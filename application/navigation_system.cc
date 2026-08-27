@@ -7,6 +7,7 @@
 #include <utility>
 #include "navigation2d/control/regulated_pure_pursuit.h"
 #include "navigation2d/control/dwa_controller.h"
+#include "navigation2d/control/mppi_controller.h"
 #include "navigation2d/costmap/grid_2d.h"
 #include "navigation2d/costmap/layered_costmap.h"
 #include "navigation2d/planning/global_planner.h"
@@ -18,6 +19,7 @@ double NormalizeAngle(double value) { return std::atan2(std::sin(value), std::co
 std::unique_ptr<LocalController> MakeController(const NavigationConfig& config) {
   if (config.controller == "rpp") return std::make_unique<RegulatedPurePursuit>(config);
   if (config.controller == "dwa") return std::make_unique<DwaController>(config);
+  if (config.controller == "mppi") return std::make_unique<MppiController>(config);
   throw std::runtime_error("unknown controller: " + config.controller);
 }
 }

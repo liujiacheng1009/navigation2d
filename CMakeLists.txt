@@ -20,7 +20,8 @@ add_library(navigation2d_core STATIC
   application/navigation_config.cc costmap/grid_2d.cc costmap/layered_costmap.cc
   planning/grid_search.cc planning/dijkstra_planner.cc planning/astar_planner.cc
   planning/theta_star_planner.cc planning/planner_factory.cc
-  control/regulated_pure_pursuit.cc control/dwa_controller.cc application/navigation_system.cc)
+  control/regulated_pure_pursuit.cc control/dwa_controller.cc control/mppi_controller.cc
+  application/navigation_system.cc)
 target_include_directories(navigation2d_core PUBLIC "${PROJECT_SOURCE_DIR}/..")
 target_link_libraries(navigation2d_core PUBLIC Eigen3::Eigen Sophus::Sophus yaml-cpp)
 target_compile_options(navigation2d_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -32,3 +33,6 @@ enable_testing()
 add_executable(layered_costmap_test test/layered_costmap_test.cc)
 target_link_libraries(layered_costmap_test PRIVATE navigation2d_core)
 add_test(NAME layered_costmap_test COMMAND layered_costmap_test)
+add_executable(mppi_controller_test test/mppi_controller_test.cc)
+target_link_libraries(mppi_controller_test PRIVATE navigation2d_core)
+add_test(NAME mppi_controller_test COMMAND mppi_controller_test)

@@ -34,6 +34,24 @@ dwa:
   goal_weight: 1.0
   obstacle_weight: 3.0
   velocity_weight: 0.5
+mppi:
+  time_steps: 30
+  batch_size: 256
+  iterations: 1
+  seed: 20260827
+  temperature: 0.3
+  gamma: 0.015
+  vx_std: 0.12
+  wz_std: 0.35
+  constraint_weight: 4.0
+  cost_weight: 3.81
+  goal_weight: 5.0
+  goal_angle_weight: 3.0
+  path_align_weight: 14.0
+  path_follow_weight: 5.0
+  path_angle_weight: 2.0
+  prefer_forward_weight: 5.0
+  smoothness_weight: 1.0
 safety:
   collision_horizon: 1.0
   max_navigation_duration: 60.0

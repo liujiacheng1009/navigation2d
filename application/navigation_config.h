@@ -47,6 +47,23 @@ struct NavigationConfig {
   double dwa_goal_weight = 1.;
   double dwa_obstacle_weight = 3.;
   double dwa_velocity_weight = .5;
+  int mppi_time_steps = 30;
+  int mppi_batch_size = 256;
+  int mppi_iterations = 1;
+  unsigned int mppi_seed = 20260827;
+  double mppi_temperature = .3;
+  double mppi_gamma = .015;
+  double mppi_vx_std = .12;
+  double mppi_wz_std = .35;
+  double mppi_constraint_weight = 4.;
+  double mppi_cost_weight = 3.81;
+  double mppi_goal_weight = 5.;
+  double mppi_goal_angle_weight = 3.;
+  double mppi_path_align_weight = 14.;
+  double mppi_path_follow_weight = 5.;
+  double mppi_path_angle_weight = 2.;
+  double mppi_prefer_forward_weight = 5.;
+  double mppi_smoothness_weight = 1.;
 };
 
 }  // namespace navigation2d
