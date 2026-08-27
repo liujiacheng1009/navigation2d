@@ -36,8 +36,8 @@ struct NavigationConfig {
   double recovery_linear_velocity = -.08;
   double recovery_angular_velocity = .4;
   double dynamic_obstacle_radius = .20;
-  double goal_xy_tolerance = .15;
-  double goal_yaw_tolerance = .20;
+  double goal_xy_tolerance = .05;
+  double goal_yaw_tolerance = .05;
 };
 
 }  // namespace navigation2d

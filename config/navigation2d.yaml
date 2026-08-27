@@ -26,8 +26,8 @@ controller:
 safety:
   collision_horizon: 1.0
   max_navigation_duration: 45.0
-  goal_xy_tolerance: 0.15
-  goal_yaw_tolerance: 0.20
+  goal_xy_tolerance: 0.05
+  goal_yaw_tolerance: 0.05
 scheduler:
   global_replan_period: 0.5
 recovery:
