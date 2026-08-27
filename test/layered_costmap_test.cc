@@ -1,6 +1,6 @@
 #include <cassert>
 #include <fstream>
-#include "navigation2/costmap/layered_costmap.h"
+#include "navigation2d/costmap/layered_costmap.h"
 
 int main() {
   const char* path = "/tmp/navigation2d_costmap_test.json";

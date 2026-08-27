@@ -1,16 +1,16 @@
-#include "navigation2/application/navigation_system.h"
+#include "navigation2d/application/navigation_system.h"
 
 #include <algorithm>
 #include <cmath>
 #include <optional>
 #include <stdexcept>
 #include <utility>
-#include "navigation2/control/regulated_pure_pursuit.h"
-#include "navigation2/control/dwa_controller.h"
-#include "navigation2/costmap/grid_2d.h"
-#include "navigation2/costmap/layered_costmap.h"
-#include "navigation2/planning/global_planner.h"
-#include "navigation2/planning/planner_factory.h"
+#include "navigation2d/control/regulated_pure_pursuit.h"
+#include "navigation2d/control/dwa_controller.h"
+#include "navigation2d/costmap/grid_2d.h"
+#include "navigation2d/costmap/layered_costmap.h"
+#include "navigation2d/planning/global_planner.h"
+#include "navigation2d/planning/planner_factory.h"
 
 namespace navigation2d {
 namespace {

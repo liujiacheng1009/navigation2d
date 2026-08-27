@@ -1,4 +1,4 @@
-#include "navigation2/control/dwa_controller.h"
+#include "navigation2d/control/dwa_controller.h"
 
 #include <algorithm>
 #include <cmath>

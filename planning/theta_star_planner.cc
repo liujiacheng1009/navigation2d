@@ -1,8 +1,8 @@
-#include "navigation2/planning/theta_star_planner.h"
+#include "navigation2d/planning/theta_star_planner.h"
 
 #include <cmath>
 
-#include "navigation2/planning/grid_search.h"
+#include "navigation2d/planning/grid_search.h"
 
 namespace navigation2d {
 

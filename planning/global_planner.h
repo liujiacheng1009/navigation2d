@@ -1,7 +1,7 @@
 #pragma once
 
-#include "navigation2/costmap/layered_costmap.h"
-#include "navigation2/types.h"
+#include "navigation2d/costmap/layered_costmap.h"
+#include "navigation2d/types.h"
 
 namespace navigation2d {
 

@@ -1,9 +1,9 @@
-#include "navigation2/simulation/navigation_simulator.h"
+#include "navigation2d/simulation/navigation_simulator.h"
 
 #include <algorithm>
 #include <cmath>
-#include "navigation2/application/navigation_system.h"
-#include "navigation2/costmap/grid_2d.h"
+#include "navigation2d/application/navigation_system.h"
+#include "navigation2d/costmap/grid_2d.h"
 
 namespace navigation2d::simulation {
 namespace {

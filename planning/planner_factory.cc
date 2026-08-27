@@ -1,10 +1,10 @@
-#include "navigation2/planning/planner_factory.h"
+#include "navigation2d/planning/planner_factory.h"
 
 #include <stdexcept>
 
-#include "navigation2/planning/astar_planner.h"
-#include "navigation2/planning/dijkstra_planner.h"
-#include "navigation2/planning/theta_star_planner.h"
+#include "navigation2d/planning/astar_planner.h"
+#include "navigation2d/planning/dijkstra_planner.h"
+#include "navigation2d/planning/theta_star_planner.h"
 
 namespace navigation2d {
 

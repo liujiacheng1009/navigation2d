@@ -3,7 +3,7 @@
 #include <memory>
 #include <string>
 
-#include "navigation2/planning/global_planner.h"
+#include "navigation2d/planning/global_planner.h"
 
 namespace navigation2d {
 

@@ -3,8 +3,8 @@
 #include <cstdint>
 #include <memory>
 #include <string>
-#include "navigation2/application/navigation_config.h"
-#include "navigation2/types.h"
+#include "navigation2d/application/navigation_config.h"
+#include "navigation2d/types.h"
 
 namespace navigation2d {
 

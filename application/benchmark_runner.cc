@@ -3,7 +3,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
-#include "navigation2/simulation/navigation_simulator.h"
+#include "navigation2d/simulation/navigation_simulator.h"
 
 int main(int argc, char** argv) try {
   if (argc < 10) throw std::runtime_error("usage: navigation2d_benchmark CONFIG CASE WORLD SX SY SYAW GX GY GYAW [--obstacle APPEAR DISAPPEAR X Y]...");

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "navigation2/application/navigation_config.h"
-#include "navigation2/control/local_controller.h"
+#include "navigation2d/application/navigation_config.h"
+#include "navigation2d/control/local_controller.h"
 
 namespace navigation2d {
 

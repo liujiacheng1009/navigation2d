@@ -1,4 +1,4 @@
-#include "navigation2/planning/grid_search.h"
+#include "navigation2d/planning/grid_search.h"
 
 #include <algorithm>
 #include <array>
