@@ -6,6 +6,8 @@ namespace navigation2d {
 
 struct NavigationConfig {
   static NavigationConfig Load(const std::string& filename);
+  std::string planner = "dijkstra";
+  std::string controller = "rpp";
   double map_resolution = .03;
   double robot_radius = .18;
   double inflation_radius = .22;
@@ -27,7 +29,7 @@ struct NavigationConfig {
   double max_linear_acceleration = .8;
   double max_angular_acceleration = 1.8;
   double collision_horizon = 1.;
-  double max_navigation_duration = 45.;
+  double max_navigation_duration = 60.;
   double control_period = .06;
   double global_replan_period = .5;
   double progress_radius = .05;
@@ -38,6 +40,13 @@ struct NavigationConfig {
   double dynamic_obstacle_radius = .20;
   double goal_xy_tolerance = .05;
   double goal_yaw_tolerance = .05;
+  double dwa_horizon = 1.5;
+  int dwa_linear_samples = 5;
+  int dwa_angular_samples = 15;
+  double dwa_path_weight = 2.;
+  double dwa_goal_weight = 1.;
+  double dwa_obstacle_weight = 3.;
+  double dwa_velocity_weight = .5;
 };
 
 }  // namespace navigation2d

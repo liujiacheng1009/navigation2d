@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <utility>
 #include "navigation2/control/regulated_pure_pursuit.h"
+#include "navigation2/control/dwa_controller.h"
 #include "navigation2/costmap/grid_2d.h"
 #include "navigation2/costmap/layered_costmap.h"
 #include "navigation2/planning/navfn_planner.h"
@@ -13,13 +14,18 @@
 namespace navigation2d {
 namespace {
 double NormalizeAngle(double value) { return std::atan2(std::sin(value), std::cos(value)); }
+std::unique_ptr<LocalController> MakeController(const NavigationConfig& config) {
+  if (config.controller == "rpp") return std::make_unique<RegulatedPurePursuit>(config);
+  if (config.controller == "dwa") return std::make_unique<DwaController>(config);
+  throw std::runtime_error("unknown controller: " + config.controller);
+}
 }
 
 class NavigationSystem::Impl {
  public:
   Impl(NavigationConfig value, const std::string& map_path)
       : config(std::move(value)), costmap(Grid2d::Load(map_path), config),
-        planner(0.), controller(config) {
+        planner(0., config.planner), controller(MakeController(config)) {
     if (std::abs(costmap.grid().resolution() - config.map_resolution) > 1e-9)
       throw std::runtime_error("map resolution does not match navigation configuration");
   }
@@ -27,6 +33,11 @@ class NavigationSystem::Impl {
   void Replan(const Pose2d& pose) {
     try {
       path = planner.Plan(costmap, pose, *goal); ++state.replans;
+      double path_length = 0.;
+      for (std::size_t i = 1; i < path.size(); ++i)
+        path_length += std::hypot(path[i].x - path[i - 1].x,
+                                  path[i].y - path[i - 1].y);
+      if (state.global_path_length_m == 0.) state.global_path_length_m = path_length;
       state.status = NavigationStatus::kNavigating;
     } catch (const std::runtime_error&) {
       path.clear(); state.command = {}; state.status = NavigationStatus::kBlocked;
@@ -37,7 +48,7 @@ class NavigationSystem::Impl {
   NavigationConfig config;
   LayeredCostmap costmap;
   NavFnPlanner planner;
-  RegulatedPurePursuit controller;
+  std::unique_ptr<LocalController> controller;
   std::optional<Pose2d> goal;
   Path path;
   NavigationState state;
@@ -57,6 +68,7 @@ NavigationSystem& NavigationSystem::operator=(NavigationSystem&&) noexcept = def
 
 void NavigationSystem::SetGoal(Pose2d goal) {
   impl_->goal = goal; impl_->path.clear(); impl_->state.status = NavigationStatus::kNavigating;
+  impl_->state.global_path_length_m = 0.;
   impl_->next_replan_time = 0.; impl_->progress_initialized = false;
 }
 
@@ -117,11 +129,11 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Velocity me
   if (impl_->recovery_steps_remaining > 0) {
     command = {std::max(-impl_->config.max_reverse_velocity,
                         impl_->config.recovery_linear_velocity), 0.};
-    if (impl_->controller.CollisionImminent(pose, command, impl_->costmap))
+    if (impl_->controller->CollisionImminent(pose, command, impl_->costmap))
       command = {0., impl_->config.recovery_angular_velocity};
     --impl_->recovery_steps_remaining;
   } else {
-    command = impl_->controller.Compute(impl_->path, pose, measured_velocity, impl_->costmap);
+    command = impl_->controller->Compute(impl_->path, pose, measured_velocity, impl_->costmap);
   }
   if (command.linear == 0. && command.angular == 0. &&
       (measured_velocity.linear != 0. || measured_velocity.angular != 0.))

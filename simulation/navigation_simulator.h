@@ -19,6 +19,7 @@ struct RunResult {
   int replans = 0;
   int emergency_stops = 0;
   int recoveries = 0;
+  double global_path_length_m = 0.;
   std::uint64_t costmap_digest = 0;
   Path trajectory;
 };

@@ -1,4 +1,7 @@
 # Fully expanded deterministic configuration. Unknown or missing keys are fatal.
+selection:
+  planner: dijkstra
+  controller: rpp
 map:
   resolution: 0.03
 costmap:
@@ -23,9 +26,17 @@ controller:
   max_linear_acceleration: 0.8
   max_angular_acceleration: 1.8
   control_period: 0.06
+dwa:
+  horizon: 1.5
+  linear_samples: 5
+  angular_samples: 15
+  path_weight: 2.0
+  goal_weight: 1.0
+  obstacle_weight: 3.0
+  velocity_weight: 0.5
 safety:
   collision_horizon: 1.0
-  max_navigation_duration: 45.0
+  max_navigation_duration: 60.0
   goal_xy_tolerance: 0.05
   goal_yaw_tolerance: 0.05
 scheduler:

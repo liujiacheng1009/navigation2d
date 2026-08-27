@@ -29,8 +29,12 @@ void ExactKeys(const YAML::Node& node, std::initializer_list<const char*> expect
 
 NavigationConfig NavigationConfig::Load(const std::string& filename) {
   const YAML::Node root = YAML::LoadFile(filename);
-  ExactKeys(root, {"map", "costmap", "controller", "safety", "scheduler", "recovery"}, "root");
+  ExactKeys(root, {"selection", "map", "costmap", "controller", "dwa", "safety", "scheduler", "recovery"}, "root");
   NavigationConfig c;
+  const auto selection = root["selection"];
+  ExactKeys(selection, {"planner", "controller"}, "selection");
+  c.planner = selection["planner"].as<std::string>();
+  c.controller = selection["controller"].as<std::string>();
   const auto map = root["map"];
   ExactKeys(map, {"resolution"}, "map"); c.map_resolution = Number(map, "resolution");
   const auto costmap = root["costmap"];
@@ -64,6 +68,16 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
   c.max_linear_acceleration = Number(controller, "max_linear_acceleration");
   c.max_angular_acceleration = Number(controller, "max_angular_acceleration");
   c.control_period = Number(controller, "control_period");
+  const auto dwa = root["dwa"];
+  ExactKeys(dwa, {"horizon", "linear_samples", "angular_samples", "path_weight",
+                  "goal_weight", "obstacle_weight", "velocity_weight"}, "dwa");
+  c.dwa_horizon = Number(dwa, "horizon");
+  c.dwa_linear_samples = dwa["linear_samples"].as<int>();
+  c.dwa_angular_samples = dwa["angular_samples"].as<int>();
+  c.dwa_path_weight = Number(dwa, "path_weight");
+  c.dwa_goal_weight = Number(dwa, "goal_weight");
+  c.dwa_obstacle_weight = Number(dwa, "obstacle_weight");
+  c.dwa_velocity_weight = Number(dwa, "velocity_weight");
   const auto safety = root["safety"];
   ExactKeys(safety, {"collision_horizon", "max_navigation_duration", "goal_xy_tolerance", "goal_yaw_tolerance"}, "safety");
   c.collision_horizon = Number(safety, "collision_horizon");
@@ -82,6 +96,9 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
   c.recovery_linear_velocity = Number(recovery, "linear_velocity");
   c.recovery_angular_velocity = Number(recovery, "angular_velocity");
   c.dynamic_obstacle_radius = Number(recovery, "dynamic_obstacle_radius");
+  if ((c.planner != "dijkstra" && c.planner != "astar" && c.planner != "theta_star") ||
+      (c.controller != "rpp" && c.controller != "dwa"))
+    throw std::runtime_error("unknown planner or controller selection");
   if (c.map_resolution <= 0. || c.robot_radius <= 0. || c.inflation_radius < c.robot_radius ||
       c.control_period <= 0. || c.global_replan_period < c.control_period)
     throw std::runtime_error("invalid navigation configuration bounds");

@@ -52,6 +52,7 @@ RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, P
     if (state.status == NavigationStatus::kSucceeded) {
       result.status = "SUCCEEDED"; result.replans = state.replans;
       result.emergency_stops = state.emergency_stops; result.recoveries = state.recoveries;
+      result.global_path_length_m = state.global_path_length_m;
       result.costmap_digest = state.costmap_digest; break;
     }
     const Velocity command = state.command;
@@ -74,6 +75,7 @@ RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, P
     else { pose = candidate; velocity = command; }
     result.replans = state.replans; result.emergency_stops = state.emergency_stops;
     result.recoveries = state.recoveries; result.costmap_digest = state.costmap_digest;
+    result.global_path_length_m = state.global_path_length_m;
     result.trajectory.push_back(pose); result.steps = step + 1;
   }
   result.duration_s = result.steps * config_.control_period;

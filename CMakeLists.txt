@@ -6,7 +6,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(yaml-cpp REQUIRED)
 add_library(navigation2d_core STATIC
   application/navigation_config.cc costmap/grid_2d.cc costmap/layered_costmap.cc planning/navfn_planner.cc
-  control/regulated_pure_pursuit.cc application/navigation_system.cc)
+  control/regulated_pure_pursuit.cc control/dwa_controller.cc application/navigation_system.cc)
 target_include_directories(navigation2d_core PUBLIC "${PROJECT_SOURCE_DIR}/..")
 target_link_libraries(navigation2d_core PUBLIC yaml-cpp)
 target_compile_options(navigation2d_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
