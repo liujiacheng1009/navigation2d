@@ -6,18 +6,28 @@
 #include "navigation2/application/navigation_system.h"
 
 int main(int argc, char** argv) try {
-  if (argc != 9) throw std::runtime_error("usage: navigation2d_benchmark CASE WORLD SX SY SYAW GX GY GYAW");
+  if (argc < 10) throw std::runtime_error("usage: navigation2d_benchmark CONFIG CASE WORLD SX SY SYAW GX GY GYAW [--obstacle APPEAR DISAPPEAR X Y]...");
   const auto started = std::chrono::steady_clock::now();
-  navigation2d::NavigationSystem system;
-  const auto result = system.Run(argv[2], {std::stod(argv[3]), std::stod(argv[4]), std::stod(argv[5])},
-                                 {std::stod(argv[6]), std::stod(argv[7]), std::stod(argv[8])});
+  navigation2d::NavigationSystem system(navigation2d::NavigationConfig::Load(argv[1]));
+  std::vector<navigation2d::ObstacleEvent> obstacles;
+  for (int i = 10; i < argc; i += 5) {
+    if (i + 4 >= argc || std::string(argv[i]) != "--obstacle") throw std::runtime_error("invalid obstacle arguments");
+    obstacles.push_back({std::stod(argv[i + 1]), std::stod(argv[i + 2]),
+                         std::stod(argv[i + 3]), std::stod(argv[i + 4])});
+  }
+  const auto result = system.Run(argv[3], {std::stod(argv[4]), std::stod(argv[5]), std::stod(argv[6])},
+                                 {std::stod(argv[7]), std::stod(argv[8]), std::stod(argv[9])}, obstacles);
   const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
   std::cout << std::fixed << std::setprecision(6)
-            << "{\"id\":\"" << argv[1] << "\",\"status\":\"" << result.status
+            << "{\"id\":\"" << argv[2] << "\",\"status\":\"" << result.status
             << "\",\"goal_error_m\":" << result.goal_error_m
             << ",\"collision_delta\":" << result.collisions
             << ",\"sim_duration_s\":" << result.duration_s
             << ",\"steps\":" << result.steps << ",\"wall_seconds\":" << wall
+            << ",\"replans\":" << result.replans
+            << ",\"emergency_stops\":" << result.emergency_stops
+            << ",\"recoveries\":" << result.recoveries
+            << ",\"costmap_digest\":" << result.costmap_digest
             << ",\"trace\":[";
   for (size_t i = 0; i < result.trajectory.size(); ++i) {
     if (i) std::cout << ',';

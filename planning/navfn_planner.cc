@@ -15,10 +15,11 @@ constexpr std::array<std::array<int, 2>, 8> kDirections{{
     {{1, 1}}, {{1, -1}}, {{-1, 1}}, {{-1, -1}}}};
 }
 
-Path NavFnPlanner::Plan(const Grid2d& grid, const Pose2d& start, const Pose2d& goal) const {
+Path NavFnPlanner::Plan(const LayeredCostmap& costmap, const Pose2d& start, const Pose2d& goal) const {
+  const Grid2d& grid = costmap.grid();
   const auto [sx, sy] = grid.ToCell(start.x, start.y);
   const auto [gx, gy] = grid.ToCell(goal.x, goal.y);
-  if (grid.collides(start.x, start.y, clearance_) || grid.collides(goal.x, goal.y, clearance_))
+  if (costmap.lethal(start.x, start.y, clearance_) || costmap.lethal(goal.x, goal.y, clearance_))
     throw std::runtime_error("start or goal is occupied");
   const int size = grid.width() * grid.height();
   const int source = sy * grid.width() + sx, target = gy * grid.width() + gx;
@@ -35,14 +36,15 @@ Path NavFnPlanner::Plan(const Grid2d& grid, const Pose2d& start, const Pose2d& g
       const int nx = x + d[0], ny = y + d[1];
       if (nx < 0 || ny < 0 || nx >= grid.width() || ny >= grid.height()) continue;
       const auto [wx, wy] = grid.CellCenter(nx, ny);
-      if (grid.collides(wx, wy, clearance_)) continue;
+      if (costmap.lethal(wx, wy, clearance_)) continue;
       if (d[0] && d[1]) {
         const auto [ax, ay] = grid.CellCenter(x + d[0], y);
         const auto [bx, by] = grid.CellCenter(x, y + d[1]);
-        if (grid.collides(ax, ay, clearance_) || grid.collides(bx, by, clearance_)) continue;
+        if (costmap.lethal(ax, ay, clearance_) || costmap.lethal(bx, by, clearance_)) continue;
       }
       const int next = ny * grid.width() + nx;
-      const double candidate = current.cost + (d[0] && d[1] ? std::sqrt(2.) : 1.);
+      const double traversal = 1. + static_cast<double>(costmap.cost(nx, ny)) / 252.;
+      const double candidate = current.cost + (d[0] && d[1] ? std::sqrt(2.) : 1.) * traversal;
       if (candidate < distance[next]) { distance[next] = candidate; parent[next] = current.cell; open.push({candidate, next}); }
     }
   }

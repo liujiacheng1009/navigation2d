@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(yaml-cpp REQUIRED)
 add_library(navigation2d_core STATIC
-  mapping/grid_2d.cc planning/navfn_planner.cc
+  application/navigation_config.cc costmap/grid_2d.cc costmap/layered_costmap.cc planning/navfn_planner.cc
   control/regulated_pure_pursuit.cc application/navigation_system.cc)
 target_include_directories(navigation2d_core PUBLIC "${PROJECT_SOURCE_DIR}/..")
 target_link_libraries(navigation2d_core PUBLIC yaml-cpp)
@@ -13,3 +13,6 @@ target_compile_options(navigation2d_core PRIVATE -Wall -Wextra -Wpedantic -Werro
 add_executable(navigation2d_benchmark application/benchmark_runner.cc)
 target_link_libraries(navigation2d_benchmark PRIVATE navigation2d_core)
 enable_testing()
+add_executable(layered_costmap_test test/layered_costmap_test.cc)
+target_link_libraries(layered_costmap_test PRIVATE navigation2d_core)
+add_test(NAME layered_costmap_test COMMAND layered_costmap_test)

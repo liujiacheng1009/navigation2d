@@ -1,0 +1,39 @@
+# Fully expanded deterministic configuration. Unknown or missing keys are fatal.
+map:
+  resolution: 0.03
+costmap:
+  robot_radius: 0.18
+  inflation_radius: 0.22
+  inflation_cost_scaling: 8.0
+  obstacle_max_range: 5.0
+  raytrace_max_range: 5.5
+  local_window_width: 3.0
+  local_window_height: 3.0
+controller:
+  desired_linear_velocity: 0.24
+  lookahead_time: 1.5
+  min_lookahead_distance: 0.25
+  max_lookahead_distance: 0.60
+  rotate_to_heading_min_angle: 0.50
+  min_approach_velocity: 0.05
+  regulated_min_radius: 0.50
+  regulated_min_speed: 0.08
+  max_reverse_velocity: 0.12
+  max_angular_velocity: 0.9
+  max_linear_acceleration: 0.8
+  max_angular_acceleration: 1.8
+  control_period: 0.06
+safety:
+  collision_horizon: 1.0
+  max_navigation_duration: 45.0
+  goal_xy_tolerance: 0.15
+  goal_yaw_tolerance: 0.20
+scheduler:
+  global_replan_period: 0.5
+recovery:
+  progress_radius: 0.05
+  progress_timeout: 10.0
+  duration: 1.0
+  linear_velocity: -0.08
+  angular_velocity: 0.4
+  dynamic_obstacle_radius: 0.20

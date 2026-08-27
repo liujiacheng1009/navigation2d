@@ -1,4 +1,4 @@
-#include "navigation2/mapping/grid_2d.h"
+#include "navigation2/costmap/grid_2d.h"
 
 #include <cmath>
 #include <stdexcept>

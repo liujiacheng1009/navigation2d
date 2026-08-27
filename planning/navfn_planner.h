@@ -1,7 +1,7 @@
 #pragma once
 
 #include "navigation2/types.h"
-#include "navigation2/mapping/grid_2d.h"
+#include "navigation2/costmap/layered_costmap.h"
 
 namespace navigation2d {
 
@@ -9,7 +9,7 @@ namespace navigation2d {
 class NavFnPlanner {
  public:
   explicit NavFnPlanner(double clearance) : clearance_(clearance) {}
-  Path Plan(const Grid2d& grid, const Pose2d& start, const Pose2d& goal) const;
+  Path Plan(const LayeredCostmap& costmap, const Pose2d& start, const Pose2d& goal) const;
 
  private:
   double clearance_;
