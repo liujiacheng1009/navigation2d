@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.16)
+project(navigation2d LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+find_package(yaml-cpp REQUIRED)
+add_library(navigation2d_core STATIC
+  mapping/grid_2d.cc planning/navfn_planner.cc
+  control/regulated_pure_pursuit.cc application/navigation_system.cc)
+target_include_directories(navigation2d_core PUBLIC "${PROJECT_SOURCE_DIR}/..")
+target_link_libraries(navigation2d_core PUBLIC yaml-cpp)
+target_compile_options(navigation2d_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_executable(navigation2d_benchmark application/benchmark_runner.cc)
+target_link_libraries(navigation2d_benchmark PRIVATE navigation2d_core)
+enable_testing()
