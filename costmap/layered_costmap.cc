@@ -63,6 +63,18 @@ void LayeredCostmap::UpdateObstacleLayer(const Pose2d& pose, const LaserScan& sc
   if (changed) Reinflate();
 }
 
+void LayeredCostmap::UpdateObstacleLayer(const Pose2d& pose, const PointCloud2d& cloud) {
+  bool changed = false;
+  for (const auto& point : cloud.points) {
+    const double range = std::hypot(point.x, point.y);
+    if (range <= 0. || range > std::min(cloud.range_max, config_.obstacle_max_range)) continue;
+    const double world_x = pose.x + std::cos(pose.yaw) * point.x - std::sin(pose.yaw) * point.y;
+    const double world_y = pose.y + std::sin(pose.yaw) * point.x + std::cos(pose.yaw) * point.y;
+    changed = Raytrace(pose.x, pose.y, world_x, world_y, true) || changed;
+  }
+  if (changed) Reinflate();
+}
+
 void LayeredCostmap::Reinflate() {
   std::fill(master_.begin(), master_.end(), kFree);
   std::vector<std::pair<int, int>> lethal;

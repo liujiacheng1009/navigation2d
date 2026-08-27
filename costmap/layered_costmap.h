@@ -16,6 +16,7 @@ class LayeredCostmap {
  public:
   LayeredCostmap(Grid2d static_map, NavigationConfig config);
   void UpdateObstacleLayer(const Pose2d& sensor_pose, const LaserScan& scan);
+  void UpdateObstacleLayer(const Pose2d& sensor_pose, const PointCloud2d& cloud);
   void MarkObstacle(double x, double y);
   void ClearObstacle(double x, double y);
   std::uint8_t cost(int x, int y) const;

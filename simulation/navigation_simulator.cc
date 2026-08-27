@@ -1,0 +1,85 @@
+#include "navigation2/simulation/navigation_simulator.h"
+
+#include <algorithm>
+#include <cmath>
+#include "navigation2/application/navigation_system.h"
+#include "navigation2/costmap/grid_2d.h"
+
+namespace navigation2d::simulation {
+namespace {
+double Angle(double value) { return std::atan2(std::sin(value), std::cos(value)); }
+
+LaserScan SimulateScan(const Pose2d& pose, const std::vector<ObstacleEvent>& obstacles,
+                       const std::vector<bool>& active, const NavigationConfig& config) {
+  LaserScan scan{-M_PI, 2. * M_PI / 360., .05, config.raytrace_max_range,
+                 std::vector<double>(360, config.raytrace_max_range)};
+  for (std::size_t ray = 0; ray < scan.ranges.size(); ++ray) {
+    const double angle = pose.yaw + scan.angle_min + ray * scan.angle_increment;
+    const double ux = std::cos(angle), uy = std::sin(angle);
+    for (std::size_t i = 0; i < obstacles.size(); ++i) if (active[i]) {
+      const double dx = obstacles[i].x - pose.x, dy = obstacles[i].y - pose.y;
+      const double projection = dx * ux + dy * uy;
+      const double perpendicular2 = dx * dx + dy * dy - projection * projection;
+      const double radius = config.dynamic_obstacle_radius;
+      if (projection > 0. && perpendicular2 <= radius * radius) {
+        const double range = projection - std::sqrt(radius * radius - perpendicular2);
+        if (range >= scan.range_min) scan.ranges[ray] = std::min(scan.ranges[ray], range);
+      }
+    }
+  }
+  return scan;
+}
+}
+
+RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, Pose2d goal,
+                                   const std::vector<ObstacleEvent>& obstacles) const {
+  const Grid2d truth = Grid2d::Load(world_path);
+  NavigationSystem navigation(config_, world_path);
+  navigation.SetGoal(goal);
+  RunResult result; result.trajectory.push_back(pose);
+  Velocity velocity;
+  std::vector<bool> active(obstacles.size(), false);
+  const int max_steps = static_cast<int>(std::ceil(config_.max_navigation_duration /
+                                                   config_.control_period));
+  for (int step = 0; step < max_steps; ++step) {
+    const double now = step * config_.control_period;
+    for (std::size_t i = 0; i < obstacles.size(); ++i)
+      active[i] = now >= obstacles[i].appear_s &&
+          (obstacles[i].disappear_s < 0. || now < obstacles[i].disappear_s);
+    if (step % 2 == 0)
+      navigation.UpdateLaserScan(pose, SimulateScan(pose, obstacles, active, config_));
+    const NavigationState state = navigation.ComputeCommand(pose, velocity, now);
+    if (state.status == NavigationStatus::kSucceeded) {
+      result.status = "SUCCEEDED"; result.replans = state.replans;
+      result.emergency_stops = state.emergency_stops; result.recoveries = state.recoveries;
+      result.costmap_digest = state.costmap_digest; break;
+    }
+    const Velocity command = state.command;
+    const double next_yaw = pose.yaw + command.angular * config_.control_period;
+    Pose2d candidate;
+    if (std::abs(command.angular) < 1e-9) {
+      candidate = {pose.x + command.linear * std::cos(pose.yaw) * config_.control_period,
+                   pose.y + command.linear * std::sin(pose.yaw) * config_.control_period,
+                   Angle(next_yaw)};
+    } else {
+      const double radius = command.linear / command.angular;
+      candidate = {pose.x + radius * (std::sin(next_yaw) - std::sin(pose.yaw)),
+                   pose.y - radius * (std::cos(next_yaw) - std::cos(pose.yaw)), Angle(next_yaw)};
+    }
+    bool collision = truth.collides(candidate.x, candidate.y, config_.robot_radius);
+    for (std::size_t i = 0; i < obstacles.size(); ++i) if (active[i])
+      collision = collision || std::hypot(candidate.x - obstacles[i].x,
+          candidate.y - obstacles[i].y) <= config_.robot_radius + config_.dynamic_obstacle_radius;
+    if (collision) { ++result.collisions; velocity = {}; }
+    else { pose = candidate; velocity = command; }
+    result.replans = state.replans; result.emergency_stops = state.emergency_stops;
+    result.recoveries = state.recoveries; result.costmap_digest = state.costmap_digest;
+    result.trajectory.push_back(pose); result.steps = step + 1;
+  }
+  result.duration_s = result.steps * config_.control_period;
+  result.goal_error_m = std::hypot(goal.x - pose.x, goal.y - pose.y);
+  result.goal_heading_error_rad = std::abs(Angle(goal.yaw - pose.yaw));
+  return result;
+}
+
+}  // namespace navigation2d::simulation

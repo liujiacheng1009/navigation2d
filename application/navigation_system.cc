@@ -2,115 +2,134 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <stdexcept>
+#include <utility>
 #include "navigation2/control/regulated_pure_pursuit.h"
 #include "navigation2/costmap/grid_2d.h"
+#include "navigation2/costmap/layered_costmap.h"
 #include "navigation2/planning/navfn_planner.h"
 
 namespace navigation2d {
-namespace { double Angle(double a) { return std::atan2(std::sin(a), std::cos(a)); } }
+namespace {
+double NormalizeAngle(double value) { return std::atan2(std::sin(value), std::cos(value)); }
+}
 
-RunResult NavigationSystem::Run(const std::string& world_path, Pose2d pose, Pose2d goal,
-                                const std::vector<ObstacleEvent>& obstacles) const {
-  LayeredCostmap costmap(Grid2d::Load(world_path), config_);
-  if (std::abs(costmap.grid().resolution() - config_.map_resolution) > 1e-9)
-    throw std::runtime_error("map resolution does not match navigation configuration");
-  // The master grid already contains the inscribed footprint and inflation
-  // costs, so the planner must not apply the robot radius a second time.
-  NavFnPlanner planner(0.);
-  Path path = planner.Plan(costmap, pose, goal);
-  RegulatedPurePursuit controller(config_);
-  RunResult result; result.trajectory.push_back(pose);
-  Velocity velocity;
-  std::vector<bool> active(obstacles.size(), false);
-  double last_progress_time = 0.;
-  Pose2d last_progress_pose = pose;
-  int recovery_steps_remaining = 0;
-  const int max_steps = static_cast<int>(std::ceil(config_.max_navigation_duration /
-                                                   config_.control_period));
-  for (int step = 0; step < max_steps; ++step) {
-    const double now = step * config_.control_period;
-    bool map_changed = false;
-    for (std::size_t i = 0; i < obstacles.size(); ++i) {
-      const bool should_be_active = now >= obstacles[i].appear_s &&
-          (obstacles[i].disappear_s < 0. || now < obstacles[i].disappear_s);
-      if (should_be_active != active[i]) {
-        active[i] = should_be_active; map_changed = true;
-      }
-    }
-    LaserScan scan{-M_PI, 2. * M_PI / 360., .05, config_.raytrace_max_range,
-                   std::vector<double>(360, config_.raytrace_max_range)};
-    for (std::size_t ray = 0; ray < scan.ranges.size(); ++ray) {
-      const double angle = pose.yaw + scan.angle_min + ray * scan.angle_increment;
-      const double ux = std::cos(angle), uy = std::sin(angle);
-      for (std::size_t i = 0; i < obstacles.size(); ++i) if (active[i]) {
-        const double dx = obstacles[i].x - pose.x, dy = obstacles[i].y - pose.y;
-        const double projection = dx * ux + dy * uy;
-        const double perpendicular2 = dx * dx + dy * dy - projection * projection;
-        const double kObstacleRadius = config_.dynamic_obstacle_radius;
-        if (projection > 0. && perpendicular2 <= kObstacleRadius * kObstacleRadius) {
-          const double range = projection - std::sqrt(kObstacleRadius * kObstacleRadius - perpendicular2);
-          if (range >= scan.range_min) scan.ranges[ray] = std::min(scan.ranges[ray], range);
-        }
-      }
-    }
-    if (step % 2 == 0) {
-      const auto before_scan = costmap.digest();
-      costmap.UpdateObstacleLayer(pose, scan);
-      map_changed = map_changed || costmap.digest() != before_scan;
-    }
-    if (map_changed || (now > 0. && std::fmod(now, config_.global_replan_period) < config_.control_period)) {
-      try {
-        path = planner.Plan(costmap, pose, goal); ++result.replans;
-      } catch (const std::runtime_error&) {
-        velocity = {}; ++result.emergency_stops;
-        result.trajectory.push_back(pose); result.steps = step + 1; continue;
-      }
-    }
-    const double error = std::hypot(goal.x - pose.x, goal.y - pose.y);
-    if (error <= config_.goal_xy_tolerance) { result.status = "SUCCEEDED"; break; }
-    Velocity command;
-    if (recovery_steps_remaining > 0) {
-      command = {std::max(-config_.max_reverse_velocity, config_.recovery_linear_velocity), 0.};
-      if (controller.CollisionImminent(pose, command, costmap))
-        command = {0., config_.recovery_angular_velocity};
-      --recovery_steps_remaining;
-    } else {
-      command = controller.Compute(path, pose, velocity, costmap);
-    }
-    if (command.linear == 0. && command.angular == 0. &&
-        (velocity.linear != 0. || velocity.angular != 0.)) ++result.emergency_stops;
-    const double next_yaw = pose.yaw + command.angular * config_.control_period;
-    Pose2d candidate;
-    if (std::abs(command.angular) < 1e-9) {
-      candidate = {pose.x + command.linear * std::cos(pose.yaw) * config_.control_period,
-                   pose.y + command.linear * std::sin(pose.yaw) * config_.control_period, Angle(next_yaw)};
-    } else {
-      const double radius = command.linear / command.angular;
-      candidate = {pose.x + radius * (std::sin(next_yaw) - std::sin(pose.yaw)),
-                   pose.y - radius * (std::cos(next_yaw) - std::cos(pose.yaw)), Angle(next_yaw)};
-    }
-    bool physical_collision = costmap.grid().collides(candidate.x, candidate.y, config_.robot_radius);
-    for (std::size_t i = 0; i < obstacles.size(); ++i) if (active[i])
-      physical_collision = physical_collision ||
-          std::hypot(candidate.x - obstacles[i].x, candidate.y - obstacles[i].y) <=
-              config_.robot_radius + config_.dynamic_obstacle_radius;
-    if (physical_collision) {
-      ++result.collisions; velocity = {};
-    } else { pose = candidate; velocity = command; }
-    if (std::hypot(pose.x - last_progress_pose.x, pose.y - last_progress_pose.y) >= config_.progress_radius) {
-      last_progress_pose = pose; last_progress_time = now;
-    } else if (now - last_progress_time > config_.progress_timeout) {
-      ++result.recoveries; last_progress_time = now;
-      recovery_steps_remaining = static_cast<int>(
-          std::ceil(config_.recovery_duration / config_.control_period));
-    }
-    result.trajectory.push_back(pose); result.steps = step + 1;
+class NavigationSystem::Impl {
+ public:
+  Impl(NavigationConfig value, const std::string& map_path)
+      : config(std::move(value)), costmap(Grid2d::Load(map_path), config),
+        planner(0.), controller(config) {
+    if (std::abs(costmap.grid().resolution() - config.map_resolution) > 1e-9)
+      throw std::runtime_error("map resolution does not match navigation configuration");
   }
-  result.duration_s = result.steps * config_.control_period;
-  result.goal_error_m = std::hypot(goal.x - pose.x, goal.y - pose.y);
-  result.costmap_digest = costmap.digest();
-  return result;
+
+  void Replan(const Pose2d& pose) {
+    try {
+      path = planner.Plan(costmap, pose, *goal); ++state.replans;
+      state.status = NavigationStatus::kNavigating;
+    } catch (const std::runtime_error&) {
+      path.clear(); state.command = {}; state.status = NavigationStatus::kBlocked;
+      ++state.emergency_stops;
+    }
+  }
+
+  NavigationConfig config;
+  LayeredCostmap costmap;
+  NavFnPlanner planner;
+  RegulatedPurePursuit controller;
+  std::optional<Pose2d> goal;
+  Path path;
+  NavigationState state;
+  bool observation_changed = false;
+  double next_replan_time = 0.;
+  double last_progress_time = 0.;
+  Pose2d last_progress_pose;
+  bool progress_initialized = false;
+  int recovery_steps_remaining = 0;
+};
+
+NavigationSystem::NavigationSystem(NavigationConfig config, const std::string& map_path)
+    : impl_(std::make_unique<Impl>(std::move(config), map_path)) {}
+NavigationSystem::~NavigationSystem() = default;
+NavigationSystem::NavigationSystem(NavigationSystem&&) noexcept = default;
+NavigationSystem& NavigationSystem::operator=(NavigationSystem&&) noexcept = default;
+
+void NavigationSystem::SetGoal(Pose2d goal) {
+  impl_->goal = goal; impl_->path.clear(); impl_->state.status = NavigationStatus::kNavigating;
+  impl_->next_replan_time = 0.; impl_->progress_initialized = false;
+}
+
+void NavigationSystem::ClearGoal() {
+  impl_->goal.reset(); impl_->path.clear(); impl_->state.command = {};
+  impl_->state.status = NavigationStatus::kIdle;
+}
+
+void NavigationSystem::UpdateLaserScan(const Pose2d& sensor_pose, const LaserScan& scan) {
+  const auto before = impl_->costmap.digest();
+  impl_->costmap.UpdateObstacleLayer(sensor_pose, scan);
+  impl_->observation_changed = impl_->observation_changed || before != impl_->costmap.digest();
+}
+
+void NavigationSystem::UpdatePointCloud(const Pose2d& sensor_pose, const PointCloud2d& cloud) {
+  const auto before = impl_->costmap.digest();
+  impl_->costmap.UpdateObstacleLayer(sensor_pose, cloud);
+  impl_->observation_changed = impl_->observation_changed || before != impl_->costmap.digest();
+}
+
+NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Velocity measured_velocity,
+                                                 double timestamp) {
+  if (!impl_->goal) { impl_->state.command = {}; impl_->state.status = NavigationStatus::kIdle; return impl_->state; }
+  if (!impl_->progress_initialized) {
+    impl_->last_progress_pose = pose; impl_->last_progress_time = timestamp;
+    impl_->progress_initialized = true;
+  }
+  if (impl_->observation_changed || impl_->path.empty() || timestamp >= impl_->next_replan_time) {
+    impl_->Replan(pose); impl_->observation_changed = false;
+    impl_->next_replan_time = timestamp + impl_->config.global_replan_period;
+  }
+  const double goal_distance = std::hypot(impl_->goal->x - pose.x, impl_->goal->y - pose.y);
+  if (goal_distance <= impl_->config.goal_xy_tolerance) {
+    const double yaw_error = NormalizeAngle(impl_->goal->yaw - pose.yaw);
+    if (std::abs(yaw_error) <= impl_->config.goal_yaw_tolerance) {
+      impl_->state.command = {}; impl_->state.status = NavigationStatus::kSucceeded;
+      return impl_->state;
+    }
+    const double target = std::clamp(2. * yaw_error, -impl_->config.max_angular_velocity,
+                                    impl_->config.max_angular_velocity);
+    const double max_delta = impl_->config.max_angular_acceleration * impl_->config.control_period;
+    impl_->state.command = {0., std::clamp(target, measured_velocity.angular - max_delta,
+                                          measured_velocity.angular + max_delta)};
+    impl_->state.status = NavigationStatus::kNavigating;
+    return impl_->state;
+  }
+  if (std::hypot(pose.x - impl_->last_progress_pose.x, pose.y - impl_->last_progress_pose.y) >=
+      impl_->config.progress_radius) {
+    impl_->last_progress_pose = pose; impl_->last_progress_time = timestamp;
+  } else if (timestamp - impl_->last_progress_time > impl_->config.progress_timeout) {
+    ++impl_->state.recoveries; impl_->last_progress_time = timestamp;
+    impl_->recovery_steps_remaining = static_cast<int>(
+        std::ceil(impl_->config.recovery_duration / impl_->config.control_period));
+  }
+  if (impl_->path.empty() && impl_->recovery_steps_remaining == 0) return impl_->state;
+
+  Velocity command;
+  if (impl_->recovery_steps_remaining > 0) {
+    command = {std::max(-impl_->config.max_reverse_velocity,
+                        impl_->config.recovery_linear_velocity), 0.};
+    if (impl_->controller.CollisionImminent(pose, command, impl_->costmap))
+      command = {0., impl_->config.recovery_angular_velocity};
+    --impl_->recovery_steps_remaining;
+  } else {
+    command = impl_->controller.Compute(impl_->path, pose, measured_velocity, impl_->costmap);
+  }
+  if (command.linear == 0. && command.angular == 0. &&
+      (measured_velocity.linear != 0. || measured_velocity.angular != 0.))
+    ++impl_->state.emergency_stops;
+  impl_->state.command = command;
+  impl_->state.status = NavigationStatus::kNavigating;
+  impl_->state.costmap_digest = impl_->costmap.digest();
+  return impl_->state;
 }
 
 }  // namespace navigation2d
