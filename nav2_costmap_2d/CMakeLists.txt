@@ -9,7 +9,6 @@ find_package(message_filters REQUIRED)
 find_package(nav2_common REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(nav2_util)
-find_package(nav2_voxel_grid REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -59,7 +58,6 @@ set(dependencies
   message_filters
   nav2_msgs
   nav2_util
-  nav2_voxel_grid
   nav_msgs
   pluginlib
   rclcpp
@@ -83,7 +81,6 @@ add_library(layers SHARED
   plugins/static_layer.cpp
   plugins/obstacle_layer.cpp
   src/observation_buffer.cpp
-  plugins/voxel_layer.cpp
   plugins/range_sensor_layer.cpp
 )
 ament_target_dependencies(layers
@@ -118,20 +115,6 @@ target_link_libraries(nav2_costmap_2d_client
   nav2_costmap_2d_core
 )
 
-add_executable(nav2_costmap_2d_markers src/costmap_2d_markers.cpp)
-target_link_libraries(nav2_costmap_2d_markers
-  nav2_costmap_2d_core
-)
-
-ament_target_dependencies(nav2_costmap_2d_markers
-  ${dependencies}
-)
-
-add_executable(nav2_costmap_2d_cloud src/costmap_2d_cloud.cpp)
-target_link_libraries(nav2_costmap_2d_cloud
-  nav2_costmap_2d_core
-)
-
 add_executable(nav2_costmap_2d src/costmap_2d_node.cpp)
 ament_target_dependencies(nav2_costmap_2d
   ${dependencies}
@@ -155,8 +138,6 @@ install(TARGETS
 
 install(TARGETS
   nav2_costmap_2d
-  nav2_costmap_2d_markers
-  nav2_costmap_2d_cloud
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 

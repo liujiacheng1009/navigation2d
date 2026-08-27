@@ -108,7 +108,7 @@ void Costmap2DROS::init()
 {
   RCLCPP_INFO(get_logger(), "Creating Costmap");
 
-  std::vector<std::string> clearable_layers{"obstacle_layer", "voxel_layer", "range_layer"};
+  std::vector<std::string> clearable_layers{"obstacle_layer", "range_layer"};
 
   declare_parameter("always_send_full_costmap", rclcpp::ParameterValue(false));
   declare_parameter("footprint_padding", rclcpp::ParameterValue(0.01f));

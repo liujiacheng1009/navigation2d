@@ -40,11 +40,9 @@ def generate_launch_description():
     log_level = LaunchConfiguration('log_level')
 
     lifecycle_nodes = ['controller_server',
-                       'smoother_server',
                        'planner_server',
                        'behavior_server',
                        'bt_navigator',
-                       'waypoint_follower',
                        'velocity_smoother']
 
     # Map fully qualified names to relative ones so the node's namespace can be prepended.
@@ -118,16 +116,6 @@ def generate_launch_description():
                 arguments=['--ros-args', '--log-level', log_level],
                 remappings=remappings + [('cmd_vel', 'cmd_vel_nav')]),
             Node(
-                package='nav2_smoother',
-                executable='smoother_server',
-                name='smoother_server',
-                output='screen',
-                respawn=use_respawn,
-                respawn_delay=2.0,
-                parameters=[configured_params],
-                arguments=['--ros-args', '--log-level', log_level],
-                remappings=remappings),
-            Node(
                 package='nav2_planner',
                 executable='planner_server',
                 name='planner_server',
@@ -151,16 +139,6 @@ def generate_launch_description():
                 package='nav2_bt_navigator',
                 executable='bt_navigator',
                 name='bt_navigator',
-                output='screen',
-                respawn=use_respawn,
-                respawn_delay=2.0,
-                parameters=[configured_params],
-                arguments=['--ros-args', '--log-level', log_level],
-                remappings=remappings),
-            Node(
-                package='nav2_waypoint_follower',
-                executable='waypoint_follower',
-                name='waypoint_follower',
                 output='screen',
                 respawn=use_respawn,
                 respawn_delay=2.0,
@@ -203,12 +181,6 @@ def generate_launch_description():
                         parameters=[configured_params],
                         remappings=remappings + [('cmd_vel', 'cmd_vel_nav')]),
                     ComposableNode(
-                        package='nav2_smoother',
-                        plugin='nav2_smoother::SmootherServer',
-                        name='smoother_server',
-                        parameters=[configured_params],
-                        remappings=remappings),
-                    ComposableNode(
                         package='nav2_planner',
                         plugin='nav2_planner::PlannerServer',
                         name='planner_server',
@@ -224,12 +196,6 @@ def generate_launch_description():
                         package='nav2_bt_navigator',
                         plugin='nav2_bt_navigator::BtNavigator',
                         name='bt_navigator',
-                        parameters=[configured_params],
-                        remappings=remappings),
-                    ComposableNode(
-                        package='nav2_waypoint_follower',
-                        plugin='nav2_waypoint_follower::WaypointFollower',
-                        name='waypoint_follower',
                         parameters=[configured_params],
                         remappings=remappings),
                     ComposableNode(

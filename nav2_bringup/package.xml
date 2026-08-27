@@ -12,13 +12,18 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
   <build_depend>nav2_common</build_depend>
 
-  <build_depend>navigation2</build_depend>
   <build_depend>launch_ros</build_depend>
 
   <exec_depend>launch_ros</exec_depend>
-  <exec_depend>navigation2</exec_depend>
   <exec_depend>nav2_common</exec_depend>
-  <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>nav2_behaviors</exec_depend>
+  <exec_depend>nav2_bt_navigator</exec_depend>
+  <exec_depend>nav2_controller</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>nav2_planner</exec_depend>
+  <exec_depend>nav2_regulated_pure_pursuit_controller</exec_depend>
+  <exec_depend>nav2_navfn_planner</exec_depend>
+  <exec_depend>nav2_velocity_smoother</exec_depend>
 
   <test_depend>ament_lint_common</test_depend>
   <test_depend>ament_lint_auto</test_depend>
