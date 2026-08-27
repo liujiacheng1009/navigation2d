@@ -8,11 +8,20 @@ pluginlib、生命周期节点、action 或行为树。
 
 ```text
 application/  导航闭环与 benchmark 入口
+config/       完整、严格校验的算法与安全参数
 control/      Regulated Pure Pursuit 路径跟踪
-mapping/      占用栅格、坐标转换与足迹碰撞检测
+costmap/      占用栅格、分层代价地图、滚动窗口与碰撞检测
 planning/     NavFn 风格栅格最短路径规划
 types.h      导航模块共用的最小数据类型
 ```
+
+默认配置为 `config/navigation2d.yaml`。与 localization2d 一样，配置完全展开，不允许
+include、环境变量或隐藏覆盖；缺少参数或出现未知参数会直接报错。导航静态地图与
+localization2d 的子图统一使用 0.03 m 分辨率。
+
+运行时使用静态层、激光障碍物层和指数膨胀层合成 master costmap，并提供 3 m × 3 m
+滚动局部窗口。全局路径按代价重规划，RPP 控制器执行曲率/障碍代价调速、加速度约束和
+前向碰撞预测；调度器负责周期重规划、预测停车、进度检测以及倒车/旋转恢复。
 
 ## 构建
 
