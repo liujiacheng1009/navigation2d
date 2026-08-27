@@ -9,7 +9,8 @@
 #include "navigation2/control/dwa_controller.h"
 #include "navigation2/costmap/grid_2d.h"
 #include "navigation2/costmap/layered_costmap.h"
-#include "navigation2/planning/navfn_planner.h"
+#include "navigation2/planning/global_planner.h"
+#include "navigation2/planning/planner_factory.h"
 
 namespace navigation2d {
 namespace {
@@ -25,14 +26,14 @@ class NavigationSystem::Impl {
  public:
   Impl(NavigationConfig value, const std::string& map_path)
       : config(std::move(value)), costmap(Grid2d::Load(map_path), config),
-        planner(0., config.planner), controller(MakeController(config)) {
+        planner(MakeGlobalPlanner(config.planner, 0.)), controller(MakeController(config)) {
     if (std::abs(costmap.grid().resolution() - config.map_resolution) > 1e-9)
       throw std::runtime_error("map resolution does not match navigation configuration");
   }
 
   void Replan(const Pose2d& pose) {
     try {
-      path = planner.Plan(costmap, pose, *goal); ++state.replans;
+      path = planner->Plan(costmap, pose, *goal); ++state.replans;
       double path_length = 0.;
       for (std::size_t i = 1; i < path.size(); ++i)
         path_length += std::hypot(path[i].x - path[i - 1].x,
@@ -47,7 +48,7 @@ class NavigationSystem::Impl {
 
   NavigationConfig config;
   LayeredCostmap costmap;
-  NavFnPlanner planner;
+  std::unique_ptr<GlobalPlanner> planner;
   std::unique_ptr<LocalController> controller;
   std::optional<Pose2d> goal;
   Path path;
