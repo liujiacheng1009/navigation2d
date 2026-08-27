@@ -41,10 +41,10 @@ Path GridSearch(const LayeredCostmap& costmap, const Pose2d& start,
                 const Pose2d& goal, double clearance, const Heuristic& heuristic,
                 const ParentRelaxation& relax_parent) {
   const Grid2d& grid = costmap.grid();
-  const auto [sx, sy] = grid.ToCell(start.x, start.y);
-  const auto [gx, gy] = grid.ToCell(goal.x, goal.y);
-  if (costmap.lethal(start.x, start.y, clearance) ||
-      costmap.lethal(goal.x, goal.y, clearance))
+  const auto [sx, sy] = grid.ToCell(X(start), Y(start));
+  const auto [gx, gy] = grid.ToCell(X(goal), Y(goal));
+  if (costmap.lethal(X(start), Y(start), clearance) ||
+      costmap.lethal(X(goal), Y(goal), clearance))
     throw std::runtime_error("start or goal is occupied");
   const int size = grid.width() * grid.height();
   const int source = sy * grid.width() + sx, target = gy * grid.width() + gx;
@@ -86,10 +86,10 @@ Path GridSearch(const LayeredCostmap& costmap, const Pose2d& start,
     }
   }
   if (parent[target] < 0 && source != target) throw std::runtime_error("no path");
-  Path reversed{{goal}};
+  Path reversed{goal};
   for (int cell = target; cell != source; cell = parent[cell]) {
     const auto [x, y] = grid.CellCenter(cell % grid.width(), cell / grid.width());
-    reversed.push_back({x, y, 0.});
+    reversed.push_back(MakePose2d(x, y, 0.));
   }
   reversed.push_back(start);
   std::reverse(reversed.begin(), reversed.end());
@@ -100,16 +100,16 @@ Path DensifyPath(const Path& path, double spacing) {
   if (path.empty()) return {};
   Path dense{path.front()};
   for (std::size_t i = 1; i < path.size(); ++i) {
-    const double length = std::hypot(path[i].x - path[i - 1].x,
-                                     path[i].y - path[i - 1].y);
+    const double length = (path[i].translation() - path[i - 1].translation()).norm();
     const int samples = std::max(1, static_cast<int>(std::ceil(length / spacing)));
     for (int sample = 1; sample <= samples; ++sample) {
       const double ratio = static_cast<double>(sample) / samples;
-      dense.push_back({path[i - 1].x + ratio * (path[i].x - path[i - 1].x),
-                       path[i - 1].y + ratio * (path[i].y - path[i - 1].y), 0.});
+      const Eigen::Vector2d point =
+          path[i - 1].translation() + ratio * (path[i].translation() - path[i - 1].translation());
+      dense.push_back(MakePose2d(point.x(), point.y(), 0.));
     }
   }
-  dense.back().yaw = path.back().yaw;
+  dense.back() = MakePose2d(X(dense.back()), Y(dense.back()), Yaw(path.back()));
   return dense;
 }
 

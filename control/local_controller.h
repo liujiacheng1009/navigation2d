@@ -1,16 +1,21 @@
 #pragma once
 
 #include "navigation2d/costmap/layered_costmap.h"
-#include "navigation2d/types.h"
+#include "navigation2d/planning/global_planner.h"
 
 namespace navigation2d {
+
+struct Twist2d {
+  double linear = 0.;
+  double angular = 0.;
+};
 
 class LocalController {
  public:
   virtual ~LocalController() = default;
-  virtual Velocity Compute(const Path& path, const Pose2d& pose, Velocity current,
+  virtual Twist2d Compute(const Path& path, const Pose2d& pose, Twist2d current,
                            const LayeredCostmap& costmap) const = 0;
-  virtual bool CollisionImminent(const Pose2d& pose, Velocity command,
+  virtual bool CollisionImminent(const Pose2d& pose, Twist2d command,
                                  const LayeredCostmap& costmap) const = 0;
 };
 

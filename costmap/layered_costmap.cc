@@ -56,9 +56,9 @@ void LayeredCostmap::UpdateObstacleLayer(const Pose2d& pose, const LaserScan& sc
     if (!std::isfinite(measured) || measured < scan.range_min) continue;
     const bool hit = measured <= std::min(scan.range_max, config_.obstacle_max_range);
     const double range = std::min(measured, config_.raytrace_max_range);
-    const double angle = pose.yaw + scan.angle_min + i * scan.angle_increment;
-    changed = Raytrace(pose.x, pose.y, pose.x + range * std::cos(angle),
-                       pose.y + range * std::sin(angle), hit) || changed;
+    const double angle = Yaw(pose) + scan.angle_min + i * scan.angle_increment;
+    changed = Raytrace(X(pose), Y(pose), X(pose) + range * std::cos(angle),
+                       Y(pose) + range * std::sin(angle), hit) || changed;
   }
   if (changed) Reinflate();
 }
@@ -66,11 +66,10 @@ void LayeredCostmap::UpdateObstacleLayer(const Pose2d& pose, const LaserScan& sc
 void LayeredCostmap::UpdateObstacleLayer(const Pose2d& pose, const PointCloud2d& cloud) {
   bool changed = false;
   for (const auto& point : cloud.points) {
-    const double range = std::hypot(point.x, point.y);
+    const double range = point.norm();
     if (range <= 0. || range > std::min(cloud.range_max, config_.obstacle_max_range)) continue;
-    const double world_x = pose.x + std::cos(pose.yaw) * point.x - std::sin(pose.yaw) * point.y;
-    const double world_y = pose.y + std::sin(pose.yaw) * point.x + std::cos(pose.yaw) * point.y;
-    changed = Raytrace(pose.x, pose.y, world_x, world_y, true) || changed;
+    const Eigen::Vector2d world = pose * point;
+    changed = Raytrace(X(pose), Y(pose), world.x(), world.y(), true) || changed;
   }
   if (changed) Reinflate();
 }
@@ -108,17 +107,11 @@ bool LayeredCostmap::lethal(double x, double y, double radius) const {
   return cost(cx, cy) >= kInscribed;
 }
 
-bool LayeredCostmap::PathBlocked(const Path& path, std::size_t begin) const {
-  for (std::size_t i = begin; i < path.size(); ++i)
-    if (lethal(path[i].x, path[i].y, config_.robot_radius)) return true;
-  return false;
-}
-
 std::vector<std::uint8_t> LayeredCostmap::RollingWindow(const Pose2d& pose, int* width, int* height,
                                                         int* origin_x, int* origin_y) const {
   *width = std::max(1, static_cast<int>(std::ceil(config_.local_window_width / static_map_.resolution())));
   *height = std::max(1, static_cast<int>(std::ceil(config_.local_window_height / static_map_.resolution())));
-  const auto [cx, cy] = static_map_.ToCell(pose.x, pose.y);
+  const auto [cx, cy] = static_map_.ToCell(X(pose), Y(pose));
   *origin_x = cx - *width / 2; *origin_y = cy - *height / 2;
   std::vector<std::uint8_t> result(*width * *height);
   for (int y = 0; y < *height; ++y) for (int x = 0; x < *width; ++x)

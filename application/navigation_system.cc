@@ -36,8 +36,7 @@ class NavigationSystem::Impl {
       path = planner->Plan(costmap, pose, *goal); ++state.replans;
       double path_length = 0.;
       for (std::size_t i = 1; i < path.size(); ++i)
-        path_length += std::hypot(path[i].x - path[i - 1].x,
-                                  path[i].y - path[i - 1].y);
+        path_length += (path[i].translation() - path[i - 1].translation()).norm();
       if (state.global_path_length_m == 0.) state.global_path_length_m = path_length;
       state.status = NavigationStatus::kNavigating;
     } catch (const std::runtime_error&) {
@@ -90,7 +89,7 @@ void NavigationSystem::UpdatePointCloud(const Pose2d& sensor_pose, const PointCl
   impl_->observation_changed = impl_->observation_changed || before != impl_->costmap.digest();
 }
 
-NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Velocity measured_velocity,
+NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d measured_velocity,
                                                  double timestamp) {
   if (!impl_->goal) { impl_->state.command = {}; impl_->state.status = NavigationStatus::kIdle; return impl_->state; }
   if (!impl_->progress_initialized) {
@@ -101,9 +100,9 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Velocity me
     impl_->Replan(pose); impl_->observation_changed = false;
     impl_->next_replan_time = timestamp + impl_->config.global_replan_period;
   }
-  const double goal_distance = std::hypot(impl_->goal->x - pose.x, impl_->goal->y - pose.y);
+  const double goal_distance = (impl_->goal->translation() - pose.translation()).norm();
   if (goal_distance <= impl_->config.goal_xy_tolerance) {
-    const double yaw_error = NormalizeAngle(impl_->goal->yaw - pose.yaw);
+    const double yaw_error = NormalizeAngle(Yaw(*impl_->goal) - Yaw(pose));
     if (std::abs(yaw_error) <= impl_->config.goal_yaw_tolerance) {
       impl_->state.command = {}; impl_->state.status = NavigationStatus::kSucceeded;
       return impl_->state;
@@ -116,7 +115,7 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Velocity me
     impl_->state.status = NavigationStatus::kNavigating;
     return impl_->state;
   }
-  if (std::hypot(pose.x - impl_->last_progress_pose.x, pose.y - impl_->last_progress_pose.y) >=
+  if ((pose.translation() - impl_->last_progress_pose.translation()).norm() >=
       impl_->config.progress_radius) {
     impl_->last_progress_pose = pose; impl_->last_progress_time = timestamp;
   } else if (timestamp - impl_->last_progress_time > impl_->config.progress_timeout) {
@@ -126,7 +125,7 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Velocity me
   }
   if (impl_->path.empty() && impl_->recovery_steps_remaining == 0) return impl_->state;
 
-  Velocity command;
+  Twist2d command;
   if (impl_->recovery_steps_remaining > 0) {
     command = {std::max(-impl_->config.max_reverse_velocity,
                         impl_->config.recovery_linear_velocity), 0.};

@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 #include "navigation2d/application/navigation_config.h"
-#include "navigation2d/types.h"
+#include "navigation2d/geometry/pose_2d.h"
 
 namespace navigation2d::simulation {
 
@@ -21,7 +21,7 @@ struct RunResult {
   int recoveries = 0;
   double global_path_length_m = 0.;
   std::uint64_t costmap_digest = 0;
-  Path trajectory;
+  std::vector<Pose2d> trajectory;
 };
 
 class NavigationSimulator {

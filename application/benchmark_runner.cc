@@ -22,8 +22,9 @@ int main(int argc, char** argv) try {
     } else throw std::runtime_error("invalid benchmark option: " + option);
   }
   navigation2d::simulation::NavigationSimulator simulator(config);
-  const auto result = simulator.Run(argv[3], {std::stod(argv[4]), std::stod(argv[5]), std::stod(argv[6])},
-                                 {std::stod(argv[7]), std::stod(argv[8]), std::stod(argv[9])}, obstacles);
+  const auto result = simulator.Run(
+      argv[3], navigation2d::MakePose2d(std::stod(argv[4]), std::stod(argv[5]), std::stod(argv[6])),
+      navigation2d::MakePose2d(std::stod(argv[7]), std::stod(argv[8]), std::stod(argv[9])), obstacles);
   const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
   std::cout << std::fixed << std::setprecision(6)
             << "{\"id\":\"" << argv[2] << "\",\"status\":\"" << result.status
@@ -42,8 +43,9 @@ int main(int argc, char** argv) try {
   for (size_t i = 0; i < result.trajectory.size(); ++i) {
     if (i) std::cout << ',';
     const auto& pose = result.trajectory[i];
-    std::cout << "{\"elapsed_s\":" << i * .06 << ",\"x\":" << pose.x
-              << ",\"y\":" << pose.y << ",\"yaw\":" << pose.yaw << '}';
+    std::cout << "{\"elapsed_s\":" << i * .06 << ",\"x\":" << navigation2d::X(pose)
+              << ",\"y\":" << navigation2d::Y(pose)
+              << ",\"yaw\":" << navigation2d::Yaw(pose) << '}';
   }
   std::cout << "]}\n";
   return result.status == "SUCCEEDED" && result.collisions == 0 ? 0 : 1;

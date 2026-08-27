@@ -8,9 +8,9 @@ namespace navigation2d {
 class DwaController final : public LocalController {
  public:
   explicit DwaController(NavigationConfig config) : config_(config) {}
-  Velocity Compute(const Path& path, const Pose2d& pose, Velocity current,
+  Twist2d Compute(const Path& path, const Pose2d& pose, Twist2d current,
                    const LayeredCostmap& costmap) const override;
-  bool CollisionImminent(const Pose2d& pose, Velocity command,
+  bool CollisionImminent(const Pose2d& pose, Twist2d command,
                          const LayeredCostmap& costmap) const override;
  private:
   NavigationConfig config_;

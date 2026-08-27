@@ -1,9 +1,13 @@
 #pragma once
 
+#include <vector>
+
 #include "navigation2d/costmap/layered_costmap.h"
-#include "navigation2d/types.h"
+#include "navigation2d/geometry/pose_2d.h"
 
 namespace navigation2d {
+
+using Path = std::vector<Pose2d>;
 
 class GlobalPlanner {
  public:

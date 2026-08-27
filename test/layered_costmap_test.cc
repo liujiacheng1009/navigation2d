@@ -17,9 +17,10 @@ int main() {
   map.ClearObstacle(1.0, 1.0);
   assert(map.cost(10, 10) != navigation2d::kLethal);
   navigation2d::PointCloud2d cloud{2.0, {{0.5, 0.0}}};
-  map.UpdateObstacleLayer({1.0, 1.0, 0.0}, cloud);
+  map.UpdateObstacleLayer(navigation2d::MakePose2d(1.0, 1.0, 0.0), cloud);
   assert(map.cost(15, 10) == navigation2d::kLethal);
   int width, height, x, y;
-  const auto window = map.RollingWindow({1., 1., 0.}, &width, &height, &x, &y);
+  const auto window = map.RollingWindow(navigation2d::MakePose2d(1., 1., 0.),
+                                        &width, &height, &x, &y);
   assert(static_cast<int>(window.size()) == width * height);
 }

@@ -14,10 +14,10 @@ LaserScan SimulateScan(const Pose2d& pose, const std::vector<ObstacleEvent>& obs
   LaserScan scan{-M_PI, 2. * M_PI / 360., .05, config.raytrace_max_range,
                  std::vector<double>(360, config.raytrace_max_range)};
   for (std::size_t ray = 0; ray < scan.ranges.size(); ++ray) {
-    const double angle = pose.yaw + scan.angle_min + ray * scan.angle_increment;
+    const double angle = Yaw(pose) + scan.angle_min + ray * scan.angle_increment;
     const double ux = std::cos(angle), uy = std::sin(angle);
     for (std::size_t i = 0; i < obstacles.size(); ++i) if (active[i]) {
-      const double dx = obstacles[i].x - pose.x, dy = obstacles[i].y - pose.y;
+      const double dx = obstacles[i].x - X(pose), dy = obstacles[i].y - Y(pose);
       const double projection = dx * ux + dy * uy;
       const double perpendicular2 = dx * dx + dy * dy - projection * projection;
       const double radius = config.dynamic_obstacle_radius;
@@ -37,7 +37,7 @@ RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, P
   NavigationSystem navigation(config_, world_path);
   navigation.SetGoal(goal);
   RunResult result; result.trajectory.push_back(pose);
-  Velocity velocity;
+  Twist2d velocity;
   std::vector<bool> active(obstacles.size(), false);
   const int max_steps = static_cast<int>(std::ceil(config_.max_navigation_duration /
                                                    config_.control_period));
@@ -55,22 +55,23 @@ RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, P
       result.global_path_length_m = state.global_path_length_m;
       result.costmap_digest = state.costmap_digest; break;
     }
-    const Velocity command = state.command;
-    const double next_yaw = pose.yaw + command.angular * config_.control_period;
+    const Twist2d command = state.command;
+    const double next_yaw = Yaw(pose) + command.angular * config_.control_period;
     Pose2d candidate;
     if (std::abs(command.angular) < 1e-9) {
-      candidate = {pose.x + command.linear * std::cos(pose.yaw) * config_.control_period,
-                   pose.y + command.linear * std::sin(pose.yaw) * config_.control_period,
-                   Angle(next_yaw)};
+      candidate = MakePose2d(X(pose) + command.linear * std::cos(Yaw(pose)) * config_.control_period,
+                             Y(pose) + command.linear * std::sin(Yaw(pose)) * config_.control_period,
+                             Angle(next_yaw));
     } else {
       const double radius = command.linear / command.angular;
-      candidate = {pose.x + radius * (std::sin(next_yaw) - std::sin(pose.yaw)),
-                   pose.y - radius * (std::cos(next_yaw) - std::cos(pose.yaw)), Angle(next_yaw)};
+      candidate = MakePose2d(X(pose) + radius * (std::sin(next_yaw) - std::sin(Yaw(pose))),
+                             Y(pose) - radius * (std::cos(next_yaw) - std::cos(Yaw(pose))),
+                             Angle(next_yaw));
     }
-    bool collision = truth.collides(candidate.x, candidate.y, config_.robot_radius);
+    bool collision = truth.collides(X(candidate), Y(candidate), config_.robot_radius);
     for (std::size_t i = 0; i < obstacles.size(); ++i) if (active[i])
-      collision = collision || std::hypot(candidate.x - obstacles[i].x,
-          candidate.y - obstacles[i].y) <= config_.robot_radius + config_.dynamic_obstacle_radius;
+      collision = collision || std::hypot(X(candidate) - obstacles[i].x,
+          Y(candidate) - obstacles[i].y) <= config_.robot_radius + config_.dynamic_obstacle_radius;
     if (collision) { ++result.collisions; velocity = {}; }
     else { pose = candidate; velocity = command; }
     result.replans = state.replans; result.emergency_stops = state.emergency_stops;
@@ -79,8 +80,8 @@ RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, P
     result.trajectory.push_back(pose); result.steps = step + 1;
   }
   result.duration_s = result.steps * config_.control_period;
-  result.goal_error_m = std::hypot(goal.x - pose.x, goal.y - pose.y);
-  result.goal_heading_error_rad = std::abs(Angle(goal.yaw - pose.yaw));
+  result.goal_error_m = (goal.translation() - pose.translation()).norm();
+  result.goal_heading_error_rad = std::abs(Angle(Yaw(goal) - Yaw(pose)));
   return result;
 }
 

@@ -4,7 +4,9 @@
 #include <memory>
 #include <string>
 #include "navigation2d/application/navigation_config.h"
-#include "navigation2d/types.h"
+#include "navigation2d/control/local_controller.h"
+#include "navigation2d/geometry/pose_2d.h"
+#include "navigation2d/sensor/observations.h"
 
 namespace navigation2d {
 
@@ -12,7 +14,7 @@ enum class NavigationStatus { kIdle, kNavigating, kSucceeded, kBlocked };
 
 struct NavigationState {
   NavigationStatus status = NavigationStatus::kIdle;
-  Velocity command;
+  Twist2d command;
   int replans = 0;
   int emergency_stops = 0;
   int recoveries = 0;
@@ -36,7 +38,7 @@ class NavigationSystem {
   void ClearGoal();
   void UpdateLaserScan(const Pose2d& sensor_pose, const LaserScan& scan);
   void UpdatePointCloud(const Pose2d& sensor_pose, const PointCloud2d& cloud);
-  NavigationState ComputeCommand(const Pose2d& pose, Velocity measured_velocity,
+  NavigationState ComputeCommand(const Pose2d& pose, Twist2d measured_velocity,
                                  double timestamp);
 
  private:

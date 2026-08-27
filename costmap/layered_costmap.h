@@ -4,7 +4,8 @@
 #include <vector>
 #include "navigation2d/application/navigation_config.h"
 #include "navigation2d/costmap/grid_2d.h"
-#include "navigation2d/types.h"
+#include "navigation2d/geometry/pose_2d.h"
+#include "navigation2d/sensor/observations.h"
 
 namespace navigation2d {
 
@@ -21,7 +22,6 @@ class LayeredCostmap {
   void ClearObstacle(double x, double y);
   std::uint8_t cost(int x, int y) const;
   bool lethal(double x, double y, double radius) const;
-  bool PathBlocked(const Path& path, std::size_t begin = 0) const;
   std::vector<std::uint8_t> RollingWindow(const Pose2d& centre, int* width, int* height,
                                           int* origin_x, int* origin_y) const;
   const Grid2d& grid() const { return static_map_; }
