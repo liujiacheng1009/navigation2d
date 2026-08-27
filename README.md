@@ -11,9 +11,10 @@ application/  导航闭环与 benchmark 入口
 config/       完整、严格校验的算法与安全参数
 control/      Regulated Pure Pursuit 路径跟踪
 costmap/      占用栅格、分层代价地图、滚动窗口与碰撞检测
+geometry/     基于 Sophus/Eigen 的 SE(2) 几何契约
 planning/     NavFn 风格栅格最短路径规划
+sensor/       激光扫描与二维点云输入契约
 simulation/   仅供 benchmark 使用的动态障碍、雷达和底盘真值仿真
-types.h      导航模块共用的最小数据类型
 ```
 
 默认配置为 `config/navigation2d.yaml`。与 localization2d 一样，配置完全展开，不允许
