@@ -23,7 +23,7 @@ add_library(navigation2d_core STATIC
   planning/grid_search.cc planning/dijkstra_planner.cc planning/astar_planner.cc
   planning/theta_star_planner.cc planning/planner_factory.cc
   control/regulated_pure_pursuit.cc control/dwa_controller.cc control/mppi_controller.cc control/dynamic_safety.cc
-  control/acados_mpc_backend.cc control/mpc_controller.cc
+  control/mpc_controller.cc
   application/navigation_system.cc)
 target_include_directories(navigation2d_core PUBLIC "${PROJECT_SOURCE_DIR}/..")
 target_link_libraries(navigation2d_core PUBLIC Eigen3::Eigen Sophus::Sophus yaml-cpp)
@@ -36,7 +36,7 @@ if(NAVIGATION2D_ACADOS_GENERATED_DIR)
   if(NOT EXISTS "${NAVIGATION2D_ACADOS_SOLVER}")
     message(FATAL_ERROR "generated acados solver not found: ${NAVIGATION2D_ACADOS_SOLVER}")
   endif()
-  target_compile_definitions(navigation2d_core PRIVATE NAVIGATION2D_WITH_ACADOS=1)
+  target_sources(navigation2d_core PRIVATE control/acados_mpc_backend.cc)
   target_include_directories(navigation2d_core PRIVATE
       "${NAVIGATION2D_ACADOS_GENERATED_DIR}" "${NAVIGATION2D_ACADOS_ROOT}/include"
       "${NAVIGATION2D_ACADOS_ROOT}/include/blasfeo/include"
@@ -45,6 +45,8 @@ if(NAVIGATION2D_ACADOS_GENERATED_DIR)
       "${NAVIGATION2D_ACADOS_ROOT}/lib/libacados.so"
       "${NAVIGATION2D_ACADOS_ROOT}/lib/libhpipm.so"
       "${NAVIGATION2D_ACADOS_ROOT}/lib/libblasfeo.so")
+else()
+  target_sources(navigation2d_core PRIVATE control/acados_mpc_backend_stub.cc)
 endif()
 target_compile_options(navigation2d_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_library(navigation2d_simulation STATIC simulation/navigation_simulator.cc)

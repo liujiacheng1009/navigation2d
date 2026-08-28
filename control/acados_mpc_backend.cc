@@ -5,15 +5,12 @@
 #include <cmath>
 #include <limits>
 
-#ifdef NAVIGATION2D_WITH_ACADOS
 extern "C" {
 #include "acados_solver_navigation2d_mpcc.h"
 }
-#endif
 
 namespace navigation2d {
 namespace {
-#ifdef NAVIGATION2D_WITH_ACADOS
 std::size_t NearestPathPoint(const Path& path, const Pose2d& pose) {
   std::size_t nearest = 0;
   double best = std::numeric_limits<double>::infinity();
@@ -41,29 +38,22 @@ std::size_t AdvancePath(const Path& path, std::size_t start, double distance) {
   }
   return index;
 }
-#endif
 }
 
 struct AcadosMpcBackend::Impl {
   explicit Impl(const NavigationConfig& value) : config(value) {
-#ifdef NAVIGATION2D_WITH_ACADOS
     capsule = navigation2d_mpcc_acados_create_capsule();
     ready = capsule != nullptr && navigation2d_mpcc_acados_create(capsule) == 0;
-#endif
   }
   ~Impl() {
-#ifdef NAVIGATION2D_WITH_ACADOS
     if (capsule != nullptr) {
       if (ready) navigation2d_mpcc_acados_free(capsule);
       navigation2d_mpcc_acados_free_capsule(capsule);
     }
-#endif
   }
   NavigationConfig config;
   bool ready = false;
-#ifdef NAVIGATION2D_WITH_ACADOS
   navigation2d_mpcc_solver_capsule* capsule = nullptr;
-#endif
 };
 
 AcadosMpcBackend::AcadosMpcBackend(const NavigationConfig& config)
@@ -74,10 +64,6 @@ bool AcadosMpcBackend::available() const { return impl_->ready; }
 std::optional<Twist2d> AcadosMpcBackend::Solve(
     const Path& path, const Pose2d& pose, Twist2d current,
     const std::vector<PredictedObstacle>& obstacles) const {
-#ifndef NAVIGATION2D_WITH_ACADOS
-  (void)path; (void)pose; (void)current; (void)obstacles;
-  return std::nullopt;
-#else
   if (!impl_->ready || path.size() < 2) return std::nullopt;
   auto* capsule = impl_->capsule;
   auto* config = navigation2d_mpcc_acados_get_nlp_config(capsule);
@@ -158,7 +144,6 @@ std::optional<Twist2d> AcadosMpcBackend::Solve(
                  -impl_->config.max_reverse_velocity, impl_->config.desired_linear_velocity),
       std::clamp(current.angular + acceleration[1] * impl_->config.control_period,
                  -impl_->config.max_angular_velocity, impl_->config.max_angular_velocity)};
-#endif
 }
 
 }  // namespace navigation2d
