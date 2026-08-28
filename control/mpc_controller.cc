@@ -1,8 +1,10 @@
 #include "navigation2d/control/mpc_controller.h"
 
+#include <algorithm>
 #include <cmath>
 #include <chrono>
 #include <future>
+#include <limits>
 #include <utility>
 
 #include "navigation2d/control/acados_mpc_backend.h"
@@ -28,6 +30,22 @@ Pose2d Integrate(const Pose2d& pose, const Twist2d& control, double dt) {
 
 bool IsStop(const Twist2d& command) {
   return std::abs(command.linear) < 1e-9 && std::abs(command.angular) < 1e-9;
+}
+
+bool MakesProgress(const Path& path, const Pose2d& pose, const Twist2d& command) {
+  if ((path.back().translation() - pose.translation()).norm() < .3) return true;
+  std::size_t nearest = 0;
+  double best = std::numeric_limits<double>::infinity();
+  for (std::size_t index = 0; index < path.size(); ++index) {
+    const double distance = (path[index].translation() - pose.translation()).squaredNorm();
+    if (distance < best) { best = distance; nearest = index; }
+  }
+  const auto target = path[std::min(nearest + 4, path.size() - 1)].translation();
+  const auto delta = target - pose.translation();
+  const double heading_error = NormalizeAngle(std::atan2(delta.y(), delta.x()) - Yaw(pose));
+  // Rotation is productive when it is needed. Once aligned, a near-zero
+  // translational command is controller stagnation and advances the cascade.
+  return std::abs(heading_error) > .35 || std::abs(command.linear) >= .04;
 }
 
 }  // namespace
@@ -116,7 +134,8 @@ Twist2d MpcController::Compute(const Path& path, const Pose2d& pose, Twist2d cur
   }
 
   const Twist2d sampled = mppi_->Compute(path, pose, current, costmap, dynamic_obstacles);
-  if (!IsStop(sampled) && !CollisionImminent(pose, sampled, costmap) &&
+  if (!IsStop(sampled) && MakesProgress(path, pose, sampled) &&
+      !CollisionImminent(pose, sampled, costmap) &&
       !DynamicCollisionImminent(pose, sampled, dynamic_obstacles, config_))
     return finish(ControllerBackend::kMppi, ControllerSolveStatus::kSuccess, 1, sampled);
 
