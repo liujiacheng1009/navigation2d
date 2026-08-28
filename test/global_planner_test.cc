@@ -8,6 +8,7 @@
 #include "navigation2d/planning/grid_search.h"
 #include "navigation2d/planning/search_core.h"
 #include "navigation2d/planning/motion_primitives.h"
+#include "navigation2d/planning/obstacle_heuristic.h"
 #include "navigation2d/planning/state_lattice_planner.h"
 
 int main() {
@@ -30,6 +31,16 @@ int main() {
       4, 0, [](int state) { return state == 3; }, [](int) { return 0.; },
       [](int state, int, const auto& visit) { if (state == 0) visit({1, 1.}); }, limited);
   assert(!truncated.found && truncated.diagnostics.expansion_limit_reached);
+  const auto anytime = navigation2d::planning_internal::AnytimeRepairingAStar(
+      5, 0, 4, [](int state) { return state == 4 ? 0. : 1.; },
+      [](int state, int, const auto& visit) {
+        if (state == 0) { visit({1, 4.}); visit({2, 1.}); }
+        if (state == 1) visit({4, 1.});
+        if (state == 2) visit({3, 1.});
+        if (state == 3) visit({4, 1.});
+      }, 2.5, .5);
+  assert(anytime.found && anytime.suboptimality_bound == 1.);
+  assert(anytime.cost_to_come[4] == 3.);
 
   const char* map_path = "/tmp/navigation2d_global_planner_test.json";
   std::ofstream output(map_path);
@@ -85,11 +96,30 @@ int main() {
   const auto lattice_goal = navigation2d::MakePose2d(4., 3., M_PI_2);
   const auto lattice_path = lattice.Plan(
       map, navigation2d::MakePose2d(.8, .8, 0.), lattice_goal);
+  const auto first_lattice_diagnostics = lattice.Diagnostics();
+  assert(!first_lattice_diagnostics.obstacle_heuristic_cache_hit);
+  assert(first_lattice_diagnostics.expansions > 0);
+  assert(first_lattice_diagnostics.suboptimality_bound >= 1. &&
+         first_lattice_diagnostics.suboptimality_bound <= 2.5);
+  const auto repeated_lattice_path = lattice.Plan(
+      map, navigation2d::MakePose2d(.8, .8, 0.), lattice_goal);
+  assert(lattice.Diagnostics().obstacle_heuristic_cache_hit);
+  assert(repeated_lattice_path.size() == lattice_path.size());
   assert(lattice_path.size() > 3);
   assert(std::abs(navigation2d::Yaw(lattice_path.back()) - M_PI_2) < 1e-12);
   for (const auto& sample : lattice_path)
     assert(field.CircleCollisionFree(navigation2d::X(sample), navigation2d::Y(sample),
                                      lattice_config.robot_radius));
+  const auto [heuristic_goal_x, heuristic_goal_y] = map.grid().ToCell(4., 3.);
+  navigation2d::planning_internal::ObstacleHeuristic obstacle_heuristic(
+      map, heuristic_goal_x, heuristic_goal_y, lattice_config.robot_radius, 2.);
+  const auto [heuristic_start_x, heuristic_start_y] = map.grid().ToCell(.8, .8);
+  assert(std::isfinite(obstacle_heuristic.cost(heuristic_start_x, heuristic_start_y)));
+  assert(obstacle_heuristic.Matches(map, heuristic_goal_x, heuristic_goal_y,
+                                   lattice_config.robot_radius, 2.));
+  map.MarkObstacle(3.5, 3.5);
+  assert(!obstacle_heuristic.Matches(map, heuristic_goal_x, heuristic_goal_y,
+                                    lattice_config.robot_radius, 2.));
 
   const auto& grid = map.grid();
   const auto near_start = grid.ToCell(1.5, 2.3);

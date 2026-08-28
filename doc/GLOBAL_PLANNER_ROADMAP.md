@@ -14,7 +14,7 @@
    O(1) 查询；多边形 footprint 按 yaw bin 预栅格化并支持 swept-volume 查询。
 4. **差速 State Lattice（已完成）**：生成直行、圆弧、原地旋转及可选倒车原语；离散终点闭合；每条原语
    保存长度、曲率、方向切换和 footprint 采样。
-5. **Anytime 搜索**：加入障碍启发式反向 DP 缓存、Weighted A* 首解和 ARA* 逐步改善；报告
+5. **Anytime 搜索（已完成）**：加入障碍启发式反向 DP 缓存、Weighted A* 首解和 ARA* 逐步改善；报告
    次优界、展开数、首解时间和最终时间。
 6. **约束平滑器**：联合优化长度、二阶平滑度、曲率变化和障碍距离；不得越出原路径安全走廊，
    保留起终点、目标姿态、倒车 cusp 和原地旋转段。
@@ -30,3 +30,10 @@
 - 超时必须返回已有安全路径或明确失败，不得返回半构造路径。
 - State Lattice 失败或资源超限时自动降级到 cost-aware 2D A*。
 - 新规划器进入默认配置前，统一基准成功率不得低于现有 A*，P95 规划时间必须满足产品预算。
+
+## 规划诊断
+
+benchmark JSON 输出 `global_plan_expansions`、`global_plan_generated`、
+`global_plan_first_solution_seconds`、`global_plan_seconds`、
+`global_plan_suboptimality_bound` 和 `obstacle_heuristic_cache_hits`，用于验证 anytime 首解、最终
+改善质量和重复重规划缓存收益。

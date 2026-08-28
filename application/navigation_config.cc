@@ -51,7 +51,8 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
   c.local_window_height = Number(costmap, "local_window_height");
   const auto lattice = root["state_lattice"];
   ExactKeys(lattice, {"yaw_bins", "primitive_length", "allow_reverse", "reverse_penalty",
-                      "rotation_cost", "cost_penalty", "max_expansions", "max_planning_time"},
+                      "rotation_cost", "cost_penalty", "max_expansions", "max_planning_time",
+                      "initial_heuristic_weight", "heuristic_weight_decrement"},
             "state_lattice");
   c.lattice_yaw_bins = lattice["yaw_bins"].as<int>();
   c.lattice_primitive_length = Number(lattice, "primitive_length");
@@ -61,6 +62,8 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
   c.lattice_cost_penalty = Number(lattice, "cost_penalty");
   c.lattice_max_expansions = lattice["max_expansions"].as<int>();
   c.lattice_max_planning_time = Number(lattice, "max_planning_time");
+  c.lattice_initial_heuristic_weight = Number(lattice, "initial_heuristic_weight");
+  c.lattice_heuristic_weight_decrement = Number(lattice, "heuristic_weight_decrement");
   const auto controller = root["controller"];
   ExactKeys(controller, {"desired_linear_velocity", "lookahead_time",
                           "min_lookahead_distance", "max_lookahead_distance",
@@ -160,6 +163,7 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
       c.lattice_primitive_length < c.map_resolution || c.lattice_reverse_penalty < 1. ||
       c.lattice_rotation_cost <= 0. || c.lattice_cost_penalty < 0. ||
       c.lattice_max_expansions < 1 || c.lattice_max_planning_time <= 0. ||
+      c.lattice_initial_heuristic_weight < 1. || c.lattice_heuristic_weight_decrement <= 0. ||
       c.control_period <= 0. || c.global_replan_period < c.control_period ||
       c.mppi_time_steps < 2 || c.mppi_batch_size < 2 || c.mppi_iterations < 1 ||
       c.mppi_temperature <= 0. || c.mppi_vx_std <= 0. || c.mppi_wz_std <= 0. ||

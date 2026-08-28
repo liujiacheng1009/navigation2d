@@ -5,6 +5,7 @@
 #include <vector>
 #include "navigation2d/application/navigation_config.h"
 #include "navigation2d/geometry/pose_2d.h"
+#include "navigation2d/planning/global_planner.h"
 
 namespace navigation2d::simulation {
 
@@ -28,6 +29,8 @@ struct RunResult {
   int recoveries = 0;
   double global_path_length_m = 0.;
   std::vector<double> controller_solve_samples_us;
+  GlobalPlanningDiagnostics global_planning;
+  int obstacle_heuristic_cache_hits = 0;
   std::uint64_t costmap_digest = 0;
   std::vector<Pose2d> trajectory;
 };

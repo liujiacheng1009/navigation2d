@@ -69,6 +69,8 @@ RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, P
       result.status = "SUCCEEDED"; result.replans = state.replans;
       result.emergency_stops = state.emergency_stops; result.recoveries = state.recoveries;
       result.global_path_length_m = state.global_path_length_m;
+      result.global_planning = state.global_planning;
+      result.obstacle_heuristic_cache_hits = state.obstacle_heuristic_cache_hits;
       result.costmap_digest = state.costmap_digest; break;
     }
     const Twist2d command = state.command;
@@ -96,6 +98,8 @@ RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, P
     result.replans = state.replans; result.emergency_stops = state.emergency_stops;
     result.recoveries = state.recoveries; result.costmap_digest = state.costmap_digest;
     result.global_path_length_m = state.global_path_length_m;
+    result.global_planning = state.global_planning;
+    result.obstacle_heuristic_cache_hits = state.obstacle_heuristic_cache_hits;
     result.trajectory.push_back(pose); result.steps = step + 1;
   }
   result.duration_s = result.steps * config_.control_period;

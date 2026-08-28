@@ -25,6 +25,7 @@ struct SearchDiagnostics {
   std::size_t expansions = 0;
   std::size_t generated = 0;
   double elapsed_s = 0.;
+  double first_solution_s = 0.;
   bool expansion_limit_reached = false;
   bool time_limit_reached = false;
 };
@@ -34,6 +35,7 @@ struct SearchResult {
   std::vector<double> cost_to_come;
   std::vector<int> parent;
   SearchDiagnostics diagnostics;
+  double suboptimality_bound = std::numeric_limits<double>::infinity();
 };
 
 using SearchHeuristic = std::function<double(int)>;
@@ -48,6 +50,14 @@ SearchResult BestFirstSearch(int state_count, int start, const GoalPredicate& is
                              const SearchHeuristic& heuristic,
                              const SearchExpansion& expand,
                              const SearchOptions& options = {});
+
+// ARA*: reuses g-values and OPEN/INCONS while decreasing epsilon. Returns the
+// best solution available within the shared expansion/time budget.
+SearchResult AnytimeRepairingAStar(int state_count, int start, int goal,
+                                   const SearchHeuristic& heuristic,
+                                   const SearchExpansion& expand,
+                                   double initial_weight, double weight_decrement,
+                                   const SearchOptions& options = {});
 
 std::vector<int> RestoreStatePath(const SearchResult& result, int start, int goal);
 

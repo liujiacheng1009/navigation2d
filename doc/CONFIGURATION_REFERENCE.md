@@ -24,7 +24,10 @@
 `yaw_bins` 是 SE(2) 朝向离散数；`primitive_length` 是长直线/圆弧原语的目标长度，生成器还会
 加入单栅格直线以保持完整连通性。`allow_reverse` 控制倒车原语，`reverse_penalty`、
 `rotation_cost` 和 `cost_penalty` 分别惩罚倒车、原地旋转和沿原语积分的 costmap 势场。
-`max_expansions` 与 `max_planning_time` 是硬资源预算；超限时明确失败，不返回半构造路径。
+`initial_heuristic_weight` 是 ARA* 初始次优界，`heuristic_weight_decrement` 控制每轮改善幅度；
+搜索在各轮间复用 OPEN、INCONS 和 g 值。`max_expansions` 与 `max_planning_time` 是所有改善轮次
+共享的硬资源预算；超限时返回已有安全解，否则明确失败，不返回半构造路径。反向 cost-aware
+障碍启发式按 costmap digest、目标格、clearance 和代价权重缓存。
 
 ## `controller`
 

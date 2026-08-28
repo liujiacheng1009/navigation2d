@@ -46,6 +46,8 @@ struct NavigationConfig {
   double lattice_cost_penalty = 2.;
   int lattice_max_expansions = 500000;
   double lattice_max_planning_time = .25;
+  double lattice_initial_heuristic_weight = 2.5;
+  double lattice_heuristic_weight_decrement = .5;
   double goal_xy_tolerance = .05;
   double goal_yaw_tolerance = .05;
   double dwa_horizon = 1.5;

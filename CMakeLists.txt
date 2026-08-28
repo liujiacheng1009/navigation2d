@@ -20,7 +20,7 @@ set(NAVIGATION2D_ACADOS_GENERATED_DIR "" CACHE PATH "Generated Navigation2D acad
 set(NAVIGATION2D_ACADOS_ROOT "" CACHE PATH "acados installation prefix")
 add_library(navigation2d_core STATIC
   application/navigation_config.cc costmap/grid_2d.cc costmap/layered_costmap.cc
-  planning/search_core.cc planning/collision_checker.cc planning/grid_search.cc
+  planning/search_core.cc planning/collision_checker.cc planning/obstacle_heuristic.cc planning/grid_search.cc
   planning/motion_primitives.cc planning/dijkstra_planner.cc planning/astar_planner.cc
   planning/state_lattice_planner.cc
   planning/theta_star_planner.cc planning/planner_factory.cc

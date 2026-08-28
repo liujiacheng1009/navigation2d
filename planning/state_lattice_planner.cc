@@ -44,20 +44,25 @@ Path StateLatticePlanner::Plan(const LayeredCostmap& costmap, const Pose2d& star
   };
   const int start_bin = YawBin(Yaw(start), bins), goal_bin = YawBin(Yaw(goal), bins);
   const int source = encode(sx, sy, start_bin), target = encode(gx, gy, goal_bin);
+  const bool cache_hit = obstacle_heuristic_ && obstacle_heuristic_->Matches(
+      costmap, gx, gy, config_.robot_radius, config_.lattice_cost_penalty);
+  if (!cache_hit)
+    obstacle_heuristic_.emplace(costmap, gx, gy, config_.robot_radius,
+                                config_.lattice_cost_penalty);
   planning_internal::SearchOptions options;
   options.max_expansions = static_cast<std::size_t>(config_.lattice_max_expansions);
   options.max_planning_time_s = config_.lattice_max_planning_time;
   const double bin_angle = 2. * M_PI / bins;
-  const auto result = planning_internal::BestFirstSearch(
-      grid.width() * grid.height() * bins, source,
-      [target](int state) { return state == target; },
-      [&](int state) {
+  const auto heuristic = [&](int state) {
         int x, y, yaw_bin;
         decode(state, &x, &y, &yaw_bin);
         const double distance = std::hypot(gx - x, gy - y) * grid.resolution();
         const double yaw = yaw_bin * bin_angle;
-        return distance + config_.lattice_rotation_cost * AngleDifference(yaw, Yaw(goal));
-      },
+        const double kinematic = std::max(
+            distance, config_.lattice_rotation_cost * AngleDifference(yaw, Yaw(goal)));
+        return std::max(kinematic, obstacle_heuristic_->cost(x, y));
+      };
+  const auto expand =
       [&](int state, int, const planning_internal::SuccessorVisitor& visit) {
         int x, y, yaw_bin;
         decode(state, &x, &y, &yaw_bin);
@@ -86,7 +91,14 @@ Path StateLatticePlanner::Plan(const LayeredCostmap& costmap, const Pose2d& star
                         cost_integral / primitive.samples.size();
           visit({encode(nx, ny, primitive.end_yaw_bin), transition});
         }
-      }, options);
+      };
+  const auto result = planning_internal::AnytimeRepairingAStar(
+      grid.width() * grid.height() * bins, source, target, heuristic, expand,
+      config_.lattice_initial_heuristic_weight,
+      config_.lattice_heuristic_weight_decrement, options);
+  diagnostics_ = {result.diagnostics.expansions, result.diagnostics.generated,
+                  result.diagnostics.elapsed_s, result.diagnostics.first_solution_s,
+                  result.suboptimality_bound, cache_hit};
   if (!result.found) {
     if (result.diagnostics.time_limit_reached) throw std::runtime_error("state lattice planning timed out");
     if (result.diagnostics.expansion_limit_reached) throw std::runtime_error("state lattice expansion limit reached");

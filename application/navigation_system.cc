@@ -40,6 +40,9 @@ class NavigationSystem::Impl {
   void Replan(const Pose2d& pose) {
     try {
       path = planner->Plan(costmap, pose, *goal); ++state.replans;
+      state.global_planning = planner->Diagnostics();
+      if (state.global_planning.obstacle_heuristic_cache_hit)
+        ++state.obstacle_heuristic_cache_hits;
       double path_length = 0.;
       for (std::size_t i = 1; i < path.size(); ++i)
         path_length += (path[i].translation() - path[i - 1].translation()).norm();

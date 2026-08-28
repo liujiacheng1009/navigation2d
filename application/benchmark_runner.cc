@@ -63,6 +63,12 @@ int main(int argc, char** argv) try {
             << ",\"emergency_stops\":" << result.emergency_stops
             << ",\"recoveries\":" << result.recoveries
             << ",\"global_path_length_m\":" << result.global_path_length_m
+            << ",\"global_plan_expansions\":" << result.global_planning.expansions
+            << ",\"global_plan_generated\":" << result.global_planning.generated
+            << ",\"global_plan_seconds\":" << result.global_planning.elapsed_s
+            << ",\"global_plan_first_solution_seconds\":" << result.global_planning.first_solution_s
+            << ",\"global_plan_suboptimality_bound\":" << result.global_planning.suboptimality_bound
+            << ",\"obstacle_heuristic_cache_hits\":" << result.obstacle_heuristic_cache_hits
             << ",\"costmap_digest\":" << result.costmap_digest
             << ",\"trace\":[";
   for (size_t i = 0; i < result.trajectory.size(); ++i) {

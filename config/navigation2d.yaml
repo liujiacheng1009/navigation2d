@@ -21,6 +21,8 @@ state_lattice:
   cost_penalty: 2.0
   max_expansions: 500000
   max_planning_time: 0.25
+  initial_heuristic_weight: 2.5
+  heuristic_weight_decrement: 0.5
 controller:
   desired_linear_velocity: 0.24
   lookahead_time: 1.5
