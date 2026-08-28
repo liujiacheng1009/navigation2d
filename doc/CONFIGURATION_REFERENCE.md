@@ -15,7 +15,8 @@
 - `resolution`：必须与输入地图一致，当前基线为 0.03 m。
 - `robot_radius`：圆形 footprint 半径。
 - `inflation_radius`、`inflation_cost_scaling`：膨胀范围和指数衰减。
-- `obstacle_max_range`、`raytrace_max_range`：标障和清障射线范围。
+- `obstacle_max_range`、`raytrace_max_range`：标障和清障射线范围。`raytrace_max_range` 必须不小于
+  `obstacle_max_range`；激光的正无穷无回波会清除至该范围，但不会标记障碍。
 - `local_window_width`、`local_window_height`：局部滚动窗口尺寸。
 
 ## `controller`
