@@ -1,8 +1,8 @@
 # 约束 MPC / MPCC 控制器
 
-`MpcController` 是 Navigation2D 的实验性高阶局部控制器。它使用确定性 shooting/beam-search
-后端，在保持纯 C++ 核心无 ROS、无专有求解器依赖的前提下，定义了可迁移到 acados 代码生成
-后端的同一优化问题边界。
+`MpcController` 是生产控制器编排入口。主后端是生成的 acados MPCC；求解器不可用、失败、
+超过 deadline 或独立安全复核失败时，确定性降级到从 Nav2 上游数值核心适配的 MPPI，再降级到
+RPP，最后输出停车。旧 shooting/beam-search 已从运行链路和配置中删除。
 
 每个周期在整段 `(v, w)` 序列上优化独轮车模型，并在每个阶段施加：速度、线/角加速度、静态
 costmap footprint、预测动态障碍椭圆安全区等约束。代价包含 MPCC 风格轮廓误差、路径切线航向
@@ -16,14 +16,11 @@ costmap footprint、预测动态障碍椭圆安全区等约束。代价包含 MP
 `dynamic_sigma_scale * sigma_x/y`。进入椭圆的候选轨迹不可行，而非只增加软成本。该模型是独立轴
 协方差的保守近似，不是完整 Safe-Horizon MPC 的场景采样实现。
 
-## 多拓扑候选与 acados 边界
+## acados 边界
 
-每轮以左、直行、右三个首控制初值同时展开，并在同一硬约束下保留各自可行序列，最后选择总代价
-最小者。这是适用于单条全局路径的轻量多初值近似；它不替代 T-MPC++ 的全局 guidance planner。
-
-运行时支持 `shooting` 和 `acados` 两个后端。acados 后端复用本文的状态、控制、stage cost、
-静态/动态约束和 `PredictedObstacle` 输入；求解器不可用、RTI 失败或独立安全复核失败时自动回退
-到 shooting 后端。
+`solver` 支持 `acados` 和 `mppi`。acados 后端复用上一周期最优状态/控制序列并向前平移 warm
+start，报告求解时间、SQP 迭代和 KKT residual；超过 `deadline` 的迟到解不会下发。完整的静态
+凸走廊和 Guidance Planner 多拓扑接入按本文后续章节实现，不能用三个角速度初值冒充。
 
 ## acados 代码生成
 
@@ -49,7 +46,7 @@ cmake --build build-acados --parallel
 ```
 
 设置 `mpc.solver: acados` 即可启用。`dynamic_safety` 始终保留，负责求解失败和预测不一致时的
-独立复核；未编译 acados 后端时会安全回退到 shooting。
+独立复核；未编译 acados 后端时会安全回退到 MPPI。
 
 benchmark JSON 同时输出 `controller_solve_samples` 和
 `controller_solve_p50_us/p95_us/p99_us`。计时范围仅为 `LocalController::Compute()`，不包含

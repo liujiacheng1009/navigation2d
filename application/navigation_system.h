@@ -23,6 +23,7 @@ struct NavigationState {
   // Duration of the latest LocalController::Compute call only. This excludes
   // sensing, costmap updates, global replanning, simulation and safety filtering.
   double controller_solve_us = 0.;
+  ControllerDiagnostics controller_diagnostics;
   GlobalPlanningDiagnostics global_planning;
   int obstacle_heuristic_cache_hits = 0;
   int incremental_replans = 0;

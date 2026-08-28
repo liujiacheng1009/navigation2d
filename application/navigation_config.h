@@ -88,8 +88,7 @@ struct NavigationConfig {
   double mppi_prefer_forward_weight = 5.;
   double mppi_smoothness_weight = 1.;
   int mpc_time_steps = 20;
-  std::string mpc_solver = "shooting";
-  int mpc_beam_width = 36;
+  std::string mpc_solver = "acados";
   double mpc_contour_weight = 12.;
   double mpc_heading_weight = 3.;
   double mpc_speed_weight = 1.;
@@ -100,6 +99,8 @@ struct NavigationConfig {
   double mpc_max_lateral_acceleration = .45;
   double mpc_dynamic_safety_margin = .08;
   double mpc_dynamic_sigma_scale = 2.;
+  double mpc_deadline = .04;
+  double dynamic_prediction_timeout = .5;
 };
 
 }  // namespace navigation2d

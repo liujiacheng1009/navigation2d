@@ -11,6 +11,21 @@ struct Twist2d {
   double angular = 0.;
 };
 
+enum class ControllerBackend { kNone, kAcados, kMppi, kRpp };
+enum class ControllerSolveStatus { kNotRun, kSuccess, kUnavailable, kFailure, kDeadlineMiss, kUnsafe };
+
+struct ControllerDiagnostics {
+  ControllerBackend backend = ControllerBackend::kNone;
+  ControllerSolveStatus status = ControllerSolveStatus::kNotRun;
+  double solve_us = 0.;
+  double solver_us = 0.;
+  double kkt_residual = 0.;
+  int iterations = 0;
+  bool deadline_miss = false;
+  int fallback_level = 0;
+  double min_ttc_s = 0.;
+};
+
 class LocalController {
  public:
   virtual ~LocalController() = default;
@@ -19,6 +34,7 @@ class LocalController {
                            const std::vector<PredictedObstacle>& dynamic_obstacles = {}) const = 0;
   virtual bool CollisionImminent(const Pose2d& pose, Twist2d command,
                                  const LayeredCostmap& costmap) const = 0;
+  virtual ControllerDiagnostics Diagnostics() const { return {}; }
 };
 
 }  // namespace navigation2d

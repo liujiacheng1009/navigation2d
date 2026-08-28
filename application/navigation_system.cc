@@ -183,6 +183,9 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
                                          impl_->dynamic_obstacles);
     impl_->state.controller_solve_us = std::chrono::duration<double, std::micro>(
         std::chrono::steady_clock::now() - solve_started).count();
+    impl_->state.controller_diagnostics = impl_->controller->Diagnostics();
+    if (impl_->state.controller_diagnostics.solve_us <= 0.)
+      impl_->state.controller_diagnostics.solve_us = impl_->state.controller_solve_us;
     if (DynamicCollisionImminent(pose, command, impl_->dynamic_obstacles, impl_->config))
       command = {};
   }

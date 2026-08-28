@@ -13,6 +13,7 @@ struct PredictedObstacle {
   double radius = .20;
   double sigma_x = 0.;
   double sigma_y = 0.;
+  double age_s = 0.;
 };
 
 }  // namespace navigation2d

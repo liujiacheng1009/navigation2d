@@ -18,7 +18,6 @@ int main() {
 
   navigation2d::NavigationConfig config;
   config.mpc_time_steps = 12;
-  config.mpc_beam_width = 24;
   navigation2d::LayeredCostmap map(navigation2d::Grid2d::Load(map_path), config);
   navigation2d::Path path;
   for (int index = 0; index <= 50; ++index)

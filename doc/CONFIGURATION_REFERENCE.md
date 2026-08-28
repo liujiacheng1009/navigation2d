@@ -60,9 +60,10 @@ RPP 与公共运动限制使用期望线速度、lookahead 距离/时间、到�
 
 ## `mpc`
 
-`solver` 可选 `shooting` 或 `acados`；后者要求构建时提供生成 solver 和 acados 安装目录，
-不可用或求解失败时回退到 shooting。`time_steps × control_period` 是约束时域，`beam_width`
-是 shooting 后端每个阶段保留的可行控制序列数。
+`solver` 可选 `mppi` 或 `acados`；后者要求构建时提供生成 solver 和 acados 安装目录，
+不可用、失败、超时或安全复核失败时回退到 MPPI，再回退到 RPP/停车。
+`time_steps × control_period` 是约束时域，`deadline` 是 acados 迟到解拒绝阈值；
+`dynamic_prediction_timeout` 是 tracker 预测的最大允许年龄。
 `contour_weight`、`heading_weight`、`progress_weight` 是 MPCC 路径轮廓、切线航向和进度项；
 其余权重约束速度参考、控制、控制变化率和 costmap 成本。`max_lateral_acceleration` 决定曲率
 限速；`dynamic_safety_margin` 与 `dynamic_sigma_scale` 分别为动态预测的几何余量和协方差倍率。

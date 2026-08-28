@@ -9,10 +9,11 @@
 namespace navigation2d {
 
 class AcadosMpcBackend;
+class MppiController;
+class RegulatedPurePursuit;
 
-// Deterministic constrained MPC / MPCC controller.  It intentionally owns no
-// ROS or solver dependency: its problem definition matches a future generated
-// acados backend, while this shooting backend is usable in the core library.
+// Deterministic production cascade: acados MPCC, Nav2-derived MPPI, then
+// regulated pursuit or a stop. It owns no ROS dependency.
 class MpcController final : public LocalController {
  public:
   explicit MpcController(NavigationConfig config);
@@ -22,10 +23,14 @@ class MpcController final : public LocalController {
                   const std::vector<PredictedObstacle>& dynamic_obstacles = {}) const override;
   bool CollisionImminent(const Pose2d& pose, Twist2d command,
                          const LayeredCostmap& costmap) const override;
+  ControllerDiagnostics Diagnostics() const override { return diagnostics_; }
 
  private:
   NavigationConfig config_;
   mutable std::unique_ptr<AcadosMpcBackend> acados_;
+  mutable std::unique_ptr<MppiController> mppi_;
+  mutable std::unique_ptr<RegulatedPurePursuit> rpp_;
+  mutable ControllerDiagnostics diagnostics_;
 };
 
 }  // namespace navigation2d

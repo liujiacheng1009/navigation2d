@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <limits>
 
@@ -54,29 +55,53 @@ struct AcadosMpcBackend::Impl {
   NavigationConfig config;
   bool ready = false;
   navigation2d_mpcc_solver_capsule* capsule = nullptr;
+  bool has_warm_start = false;
+  std::array<std::array<double, NAVIGATION2D_MPCC_NX>, NAVIGATION2D_MPCC_N + 1> states{};
+  std::array<std::array<double, NAVIGATION2D_MPCC_NU>, NAVIGATION2D_MPCC_N> controls{};
+  ControllerDiagnostics diagnostics;
 };
 
 AcadosMpcBackend::AcadosMpcBackend(const NavigationConfig& config)
     : impl_(std::make_unique<Impl>(config)) {}
 AcadosMpcBackend::~AcadosMpcBackend() = default;
 bool AcadosMpcBackend::available() const { return impl_->ready; }
+ControllerDiagnostics AcadosMpcBackend::Diagnostics() const { return impl_->diagnostics; }
 
 std::optional<Twist2d> AcadosMpcBackend::Solve(
     const Path& path, const Pose2d& pose, Twist2d current,
     const std::vector<PredictedObstacle>& obstacles) const {
-  if (!impl_->ready || path.size() < 2) return std::nullopt;
+  impl_->diagnostics = {};
+  impl_->diagnostics.backend = ControllerBackend::kAcados;
+  if (!impl_->ready || path.size() < 2) {
+    impl_->diagnostics.status = ControllerSolveStatus::kUnavailable;
+    return std::nullopt;
+  }
+  const auto solve_started = std::chrono::steady_clock::now();
   auto* capsule = impl_->capsule;
   auto* config = navigation2d_mpcc_acados_get_nlp_config(capsule);
   auto* dims = navigation2d_mpcc_acados_get_nlp_dims(capsule);
   auto* input = navigation2d_mpcc_acados_get_nlp_in(capsule);
   auto* output = navigation2d_mpcc_acados_get_nlp_out(capsule);
   std::array<double, 5> state{X(pose), Y(pose), Yaw(pose), current.linear, current.angular};
+  static_assert(NAVIGATION2D_MPCC_NX == 5 && NAVIGATION2D_MPCC_NU == 2);
   ocp_nlp_constraints_model_set(config, dims, input, output, 0, "lbx", state.data());
   ocp_nlp_constraints_model_set(config, dims, input, output, 0, "ubx", state.data());
 
   const std::size_t nearest = NearestPathPoint(path, pose);
   const double robot_remaining = (path.back().translation() - pose.translation()).norm();
   constexpr int horizon = NAVIGATION2D_MPCC_N;
+  if (impl_->has_warm_start) {
+    for (int stage = 0; stage <= horizon; ++stage) {
+      const int source = std::min(stage + 1, horizon);
+      ocp_nlp_out_set(config, dims, output, input, stage, "x",
+                      impl_->states[static_cast<std::size_t>(source)].data());
+      if (stage < horizon) {
+        const int control_source = std::min(stage + 1, horizon - 1);
+        ocp_nlp_out_set(config, dims, output, input, stage, "u",
+                        impl_->controls[static_cast<std::size_t>(control_source)].data());
+      }
+    }
+  }
   for (int stage = 0; stage <= horizon; ++stage) {
     const bool approach_goal = robot_remaining < .5;
     const std::size_t reference = approach_goal ? path.size() - 1 : AdvancePath(
@@ -133,12 +158,40 @@ std::optional<Twist2d> AcadosMpcBackend::Solve(
     if (navigation2d_mpcc_acados_update_params(capsule, stage, parameters.data(),
                                                 static_cast<int>(parameters.size())) != 0)
       return std::nullopt;
-    ocp_nlp_out_set(config, dims, output, input, stage, "x", state.data());
+    if (!impl_->has_warm_start)
+      ocp_nlp_out_set(config, dims, output, input, stage, "x", state.data());
   }
-  if (navigation2d_mpcc_acados_solve(capsule) != 0) return std::nullopt;
+  const int status = navigation2d_mpcc_acados_solve(capsule);
+  auto* solver = navigation2d_mpcc_acados_get_nlp_solver(capsule);
+  ocp_nlp_get(solver, "time_tot", &impl_->diagnostics.solver_us);
+  impl_->diagnostics.solver_us *= 1e6;
+  ocp_nlp_get(solver, "sqp_iter", &impl_->diagnostics.iterations);
+  ocp_nlp_get(solver, "nlp_res", &impl_->diagnostics.kkt_residual);
+  impl_->diagnostics.solve_us = 1e6 * std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - solve_started).count();
+  impl_->diagnostics.deadline_miss =
+      impl_->diagnostics.solve_us > impl_->config.mpc_deadline * 1e6;
+  if (status != 0) {
+    impl_->diagnostics.status = ControllerSolveStatus::kFailure;
+    impl_->has_warm_start = false;
+    return std::nullopt;
+  }
+  for (int stage = 0; stage <= horizon; ++stage) {
+    ocp_nlp_out_get(config, dims, output, stage, "x",
+                    impl_->states[static_cast<std::size_t>(stage)].data());
+    if (stage < horizon)
+      ocp_nlp_out_get(config, dims, output, stage, "u",
+                      impl_->controls[static_cast<std::size_t>(stage)].data());
+  }
+  impl_->has_warm_start = true;
+  impl_->diagnostics.status = impl_->diagnostics.deadline_miss
+      ? ControllerSolveStatus::kDeadlineMiss : ControllerSolveStatus::kSuccess;
   std::array<double, 2> acceleration{};
   ocp_nlp_out_get(config, dims, output, 0, "u", acceleration.data());
-  if (!std::isfinite(acceleration[0]) || !std::isfinite(acceleration[1])) return std::nullopt;
+  if (!std::isfinite(acceleration[0]) || !std::isfinite(acceleration[1])) {
+    impl_->diagnostics.status = ControllerSolveStatus::kFailure;
+    return std::nullopt;
+  }
   return Twist2d{
       std::clamp(current.linear + acceleration[0] * impl_->config.control_period,
                  -impl_->config.max_reverse_velocity, impl_->config.desired_linear_velocity),

@@ -52,7 +52,7 @@ int main(int argc, char** argv) try {
       i += 2;
     } else throw std::runtime_error("invalid benchmark option: " + option);
   }
-  if (config.mpc_solver != "shooting" && config.mpc_solver != "acados")
+  if (config.mpc_solver != "mppi" && config.mpc_solver != "acados")
     throw std::runtime_error("invalid MPC solver: " + config.mpc_solver);
   navigation2d::simulation::NavigationSimulator simulator(config);
   const auto result = simulator.Run(

@@ -9,6 +9,12 @@ AcadosMpcBackend::AcadosMpcBackend(const NavigationConfig&)
 AcadosMpcBackend::~AcadosMpcBackend() = default;
 
 bool AcadosMpcBackend::available() const { return false; }
+ControllerDiagnostics AcadosMpcBackend::Diagnostics() const {
+  ControllerDiagnostics diagnostics;
+  diagnostics.backend = ControllerBackend::kAcados;
+  diagnostics.status = ControllerSolveStatus::kUnavailable;
+  return diagnostics;
+}
 
 std::optional<Twist2d> AcadosMpcBackend::Solve(
     const Path&, const Pose2d&, Twist2d,
