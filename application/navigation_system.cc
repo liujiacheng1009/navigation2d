@@ -43,6 +43,8 @@ class NavigationSystem::Impl {
       state.global_planning = planner->Diagnostics();
       if (state.global_planning.obstacle_heuristic_cache_hit)
         ++state.obstacle_heuristic_cache_hits;
+      if (state.global_planning.incremental_reuse) ++state.incremental_replans;
+      state.incremental_repaired_states += state.global_planning.repaired_states;
       double path_length = 0.;
       for (std::size_t i = 1; i < path.size(); ++i)
         path_length += (path[i].translation() - path[i - 1].translation()).norm();

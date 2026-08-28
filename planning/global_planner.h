@@ -17,6 +17,8 @@ struct GlobalPlanningDiagnostics {
   double first_solution_s = 0.;
   double suboptimality_bound = 1.;
   bool obstacle_heuristic_cache_hit = false;
+  bool incremental_reuse = false;
+  std::size_t repaired_states = 0;
 };
 
 class GlobalPlanner {

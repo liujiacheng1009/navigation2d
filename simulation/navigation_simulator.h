@@ -31,6 +31,8 @@ struct RunResult {
   std::vector<double> controller_solve_samples_us;
   GlobalPlanningDiagnostics global_planning;
   int obstacle_heuristic_cache_hits = 0;
+  int incremental_replans = 0;
+  std::size_t incremental_repaired_states = 0;
   std::uint64_t costmap_digest = 0;
   std::vector<Pose2d> trajectory;
 };

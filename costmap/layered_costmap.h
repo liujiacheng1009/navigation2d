@@ -26,6 +26,8 @@ class LayeredCostmap {
                                           int* origin_x, int* origin_y) const;
   const Grid2d& grid() const { return static_map_; }
   std::uint64_t digest() const;
+  std::uint64_t revision() const { return revision_; }
+  std::vector<int> ChangedCellsSince(std::uint64_t revision) const;
 
  private:
   bool Raytrace(double x0, double y0, double x1, double y1, bool mark_endpoint);
@@ -34,6 +36,9 @@ class LayeredCostmap {
   NavigationConfig config_;
   std::vector<std::uint8_t> obstacles_;
   std::vector<std::uint8_t> master_;
+  std::uint64_t revision_ = 0;
+  struct ChangeSet { std::uint64_t revision; std::vector<int> cells; };
+  std::vector<ChangeSet> change_history_;
 };
 
 }  // namespace navigation2d

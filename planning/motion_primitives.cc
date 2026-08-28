@@ -56,7 +56,7 @@ MotionPrimitive MakeRotation(int bin, int delta, int yaw_bins) {
 
 DifferentialDrivePrimitiveSet::DifferentialDrivePrimitiveSet(
     int yaw_bins, double resolution, double primitive_length, bool allow_reverse)
-    : yaw_bins_(yaw_bins), primitives_(yaw_bins) {
+    : yaw_bins_(yaw_bins), primitives_(yaw_bins), incoming_(yaw_bins) {
   if (yaw_bins < 8 || yaw_bins % 2 != 0 || resolution <= 0. ||
       primitive_length < resolution)
     throw std::invalid_argument("invalid differential drive lattice parameters");
@@ -74,6 +74,15 @@ DifferentialDrivePrimitiveSet::DifferentialDrivePrimitiveSet(
     if (allow_reverse && primitive_length > 1.5 * resolution)
       primitives_[bin].push_back(MakeTranslation(bin, 0, -1, yaw_bins, resolution, resolution));
   }
+  for (int bin = 0; bin < yaw_bins; ++bin)
+    for (std::size_t index = 0; index < primitives_[bin].size(); ++index)
+      incoming_[primitives_[bin][index].end_yaw_bin].push_back({bin, index});
+}
+
+const std::vector<DifferentialDrivePrimitiveSet::Reference>&
+DifferentialDrivePrimitiveSet::IntoYawBin(int yaw_bin) const {
+  if (yaw_bin < 0 || yaw_bin >= yaw_bins_) throw std::out_of_range("invalid yaw bin");
+  return incoming_[yaw_bin];
 }
 
 const std::vector<MotionPrimitive>& DifferentialDrivePrimitiveSet::FromYawBin(int yaw_bin) const {

@@ -69,6 +69,11 @@ int main(int argc, char** argv) try {
             << ",\"global_plan_first_solution_seconds\":" << result.global_planning.first_solution_s
             << ",\"global_plan_suboptimality_bound\":" << result.global_planning.suboptimality_bound
             << ",\"obstacle_heuristic_cache_hits\":" << result.obstacle_heuristic_cache_hits
+            << ",\"global_plan_incremental_reuse\":"
+            << (result.global_planning.incremental_reuse ? "true" : "false")
+            << ",\"global_plan_repaired_states\":" << result.global_planning.repaired_states
+            << ",\"global_plan_incremental_replans\":" << result.incremental_replans
+            << ",\"global_plan_repaired_states_total\":" << result.incremental_repaired_states
             << ",\"costmap_digest\":" << result.costmap_digest
             << ",\"trace\":[";
   for (size_t i = 0; i < result.trajectory.size(); ++i) {

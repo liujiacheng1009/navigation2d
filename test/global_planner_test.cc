@@ -8,6 +8,7 @@
 #include "navigation2d/planning/grid_search.h"
 #include "navigation2d/planning/search_core.h"
 #include "navigation2d/planning/motion_primitives.h"
+#include "navigation2d/planning/incremental_search.h"
 #include "navigation2d/planning/obstacle_heuristic.h"
 #include "navigation2d/planning/path_smoother.h"
 #include "navigation2d/planning/state_lattice_planner.h"
@@ -42,6 +43,28 @@ int main() {
       }, 2.5, .5);
   assert(anytime.found && anytime.suboptimality_bound == 1.);
   assert(anytime.cost_to_come[4] == 3.);
+  std::vector<std::vector<std::pair<int, double>>> incremental_edges{
+      {{1, 1.}, {2, 2.}}, {{3, 1.}}, {{3, 1.}}, {}};
+  const auto successors = [&](int state, const auto& visit) {
+    for (const auto& [next, cost] : incremental_edges[state]) visit({next, cost});
+  };
+  const auto predecessors = [&](int state, const auto& visit) {
+    for (int source = 0; source < 4; ++source)
+      for (const auto& [next, cost] : incremental_edges[source])
+        if (next == state) visit({source, cost});
+  };
+  navigation2d::planning_internal::DStarLite incremental(
+      4, 3, successors, predecessors,
+      [](int, int) { return 0.; });
+  auto incremental_result = incremental.Plan(0, {});
+  assert(incremental_result.found);
+  assert((incremental_result.path == std::vector<int>{0, 1, 3}));
+  incremental_edges[1][0].second = 10.;
+  incremental_result = incremental.Plan(0, {1});
+  assert(incremental_result.found && incremental_result.reused);
+  assert((incremental_result.path == std::vector<int>{0, 2, 3}));
+  incremental_result = incremental.Plan(2, {});
+  assert((incremental_result.path == std::vector<int>{2, 3}));
 
   const char* map_path = "/tmp/navigation2d_global_planner_test.json";
   std::ofstream output(map_path);
@@ -121,6 +144,14 @@ int main() {
   map.MarkObstacle(3.5, 3.5);
   assert(!obstacle_heuristic.Matches(map, heuristic_goal_x, heuristic_goal_y,
                                     lattice_config.robot_radius, 2.));
+  const auto repaired_lattice_path = lattice.Plan(
+      map, navigation2d::MakePose2d(.9, .8, 0.), lattice_goal);
+  assert(lattice.Diagnostics().incremental_reuse);
+  assert(lattice.Diagnostics().repaired_states > 0);
+  const navigation2d::planning_internal::DistanceField repaired_field(map);
+  for (const auto& sample : repaired_lattice_path)
+    assert(repaired_field.CircleCollisionFree(navigation2d::X(sample), navigation2d::Y(sample),
+                                              lattice_config.robot_radius));
 
   navigation2d::NavigationConfig smoother_config;
   smoother_config.smoother_max_curvature = 100.;

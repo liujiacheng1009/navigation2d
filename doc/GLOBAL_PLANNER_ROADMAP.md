@@ -18,7 +18,8 @@
    次优界、展开数、首解时间和最终时间。
 6. **约束平滑器（已完成）**：联合优化长度、二阶平滑度、曲率变化和障碍距离；不得越出原路径安全走廊，
    保留起终点、目标姿态、倒车 cusp 和原地旋转段。
-7. **增量修复**：以 LPA*/AD* 复用相同目标下的搜索状态，只更新 costmap 变化影响的边；地图
+7. **增量修复（已完成）**：以目标反向的 D* Lite（LPA* 的增量重规划形式）复用相同目标下的
+   `g/rhs/OPEN/km`，只更新 costmap 变化影响的运动原语源状态；地图
    大范围变化或缓存不一致时完整重建。
 8. **统一基准**：覆盖大地图、窄通道、死胡同、动态封路和圆形/多边形 footprint；比较成功率、
    路径长度、最小净空、曲率、首解/最终 P50/P95/P99、展开节点、重规划复用率和峰值内存。
@@ -36,4 +37,6 @@
 benchmark JSON 输出 `global_plan_expansions`、`global_plan_generated`、
 `global_plan_first_solution_seconds`、`global_plan_seconds`、
 `global_plan_suboptimality_bound` 和 `obstacle_heuristic_cache_hits`，用于验证 anytime 首解、最终
-改善质量和重复重规划缓存收益。
+改善质量和重复重规划缓存收益。`global_plan_incremental_reuse`、
+`global_plan_repaired_states`、`global_plan_incremental_replans` 和
+`global_plan_repaired_states_total` 用于验证移动起点与地图变更时的增量修复范围。

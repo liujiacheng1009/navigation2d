@@ -88,6 +88,7 @@ void LayeredCostmap::UpdateObstacleLayer(const Pose2d& pose, const PointCloud2d&
 }
 
 void LayeredCostmap::Reinflate() {
+  const std::vector<std::uint8_t> previous = master_;
   std::fill(master_.begin(), master_.end(), kFree);
   std::vector<std::pair<int, int>> lethal;
   for (int y = 0; y < static_map_.height(); ++y) for (int x = 0; x < static_map_.width(); ++x) {
@@ -106,6 +107,30 @@ void LayeredCostmap::Reinflate() {
           std::clamp(252. * std::exp(-config_.inflation_cost_scaling * (distance - config_.robot_radius)), 1., 252.));
       master_[y * static_map_.width() + x] = std::max(master_[y * static_map_.width() + x], value);
     }
+  std::vector<int> changed;
+  for (std::size_t index = 0; index < master_.size(); ++index)
+    if (master_[index] != previous[index]) changed.push_back(static_cast<int>(index));
+  if (!changed.empty()) {
+    ++revision_;
+    change_history_.push_back({revision_, std::move(changed)});
+    constexpr std::size_t kHistoryLimit = 64;
+    if (change_history_.size() > kHistoryLimit) change_history_.erase(change_history_.begin());
+  }
+}
+
+std::vector<int> LayeredCostmap::ChangedCellsSince(std::uint64_t revision) const {
+  if (revision >= revision_) return {};
+  if (change_history_.empty() || revision + 1 < change_history_.front().revision) {
+    std::vector<int> all(master_.size());
+    for (std::size_t index = 0; index < all.size(); ++index) all[index] = static_cast<int>(index);
+    return all;
+  }
+  std::vector<int> changed;
+  for (const auto& set : change_history_) if (set.revision > revision)
+    changed.insert(changed.end(), set.cells.begin(), set.cells.end());
+  std::sort(changed.begin(), changed.end());
+  changed.erase(std::unique(changed.begin(), changed.end()), changed.end());
+  return changed;
 }
 
 std::uint8_t LayeredCostmap::cost(int x, int y) const {
