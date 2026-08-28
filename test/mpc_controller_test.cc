@@ -24,19 +24,27 @@ int main() {
     path.push_back(navigation2d::MakePose2d(1. + index * .1, 2., 0.));
   const auto pose = navigation2d::MakePose2d(1., 2., 0.);
   navigation2d::MpcController controller(config);
+  navigation2d::Path alternate = path;
+  for (auto& point : alternate) point.translation().y() += .15;
+  controller.SetGuidanceCandidates({{7, alternate, 0.}});
   const auto command = controller.Compute(path, pose, {}, map);
   assert(std::isfinite(command.linear));
   assert(std::isfinite(command.angular));
   assert(command.linear > 0.);
   assert(command.linear <= config.max_linear_acceleration * config.control_period + 1e-12);
+  assert(controller.Diagnostics().backend != navigation2d::ControllerBackend::kNone);
 
 #ifdef NAVIGATION2D_TEST_ACADOS
   navigation2d::AcadosMpcBackend acados(config);
   assert(acados.available());
-  const auto acados_command = acados.Solve(path, pose, {}, {});
+  const auto acados_command = acados.Solve(path, pose, {}, map, {});
   assert(acados_command.has_value());
   assert(std::isfinite(acados_command->linear));
   assert(std::isfinite(acados_command->angular));
+  const auto warm_command = acados.Solve(path, pose, *acados_command, map, {});
+  assert(warm_command.has_value());
+  assert(acados.Diagnostics().solver_us > 0.);
+  assert(std::isfinite(acados.Diagnostics().kkt_residual));
 #endif
 
   // The chance-expanded disc blocks the direct topology. The controller must
@@ -52,7 +60,7 @@ int main() {
 #ifdef NAVIGATION2D_TEST_ACADOS
   // More tracker objects than generated constraint slots must remain safe and
   // dimensionally valid; the backend ranks/fills its slots per stage.
-  const auto multi_obstacle_command = acados.Solve(path, pose, {}, obstacles);
+  const auto multi_obstacle_command = acados.Solve(path, pose, {}, map, obstacles);
   assert(multi_obstacle_command.has_value());
   assert(std::isfinite(multi_obstacle_command->linear));
   assert(std::isfinite(multi_obstacle_command->angular));

@@ -24,13 +24,16 @@ class MpcController final : public LocalController {
   bool CollisionImminent(const Pose2d& pose, Twist2d command,
                          const LayeredCostmap& costmap) const override;
   ControllerDiagnostics Diagnostics() const override { return diagnostics_; }
+  void SetGuidanceCandidates(std::vector<GuidanceCandidate> candidates) override;
 
  private:
   NavigationConfig config_;
   mutable std::unique_ptr<AcadosMpcBackend> acados_;
+  mutable std::vector<std::unique_ptr<AcadosMpcBackend>> additional_acados_;
   mutable std::unique_ptr<MppiController> mppi_;
   mutable std::unique_ptr<RegulatedPurePursuit> rpp_;
   mutable ControllerDiagnostics diagnostics_;
+  mutable std::vector<GuidanceCandidate> guidance_candidates_;
 };
 
 }  // namespace navigation2d

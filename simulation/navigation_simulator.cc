@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <chrono>
+#include <limits>
 #include "navigation2d/application/navigation_system.h"
 #include "navigation2d/costmap/grid_2d.h"
 #include "navigation2d/planning/collision_checker.h"
@@ -47,6 +49,7 @@ RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, P
   navigation.SetGoal(goal);
   RunResult result; result.trajectory.push_back(pose);
   Twist2d velocity;
+  Twist2d previous_acceleration;
   std::vector<bool> active(obstacles.size(), false);
   const int max_steps = static_cast<int>(std::ceil(config_.max_navigation_duration /
                                                    config_.control_period));
@@ -70,7 +73,10 @@ RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, P
     navigation.UpdateDynamicObstacles(std::move(predictions));
     if (step % 2 == 0)
       navigation.UpdateLaserScan(pose, SimulateScan(pose, obstacles, active, now, config_));
+    const auto cycle_started = std::chrono::steady_clock::now();
     const NavigationState state = navigation.ComputeCommand(pose, velocity, now);
+    result.control_cycle_samples_us.push_back(std::chrono::duration<double, std::micro>(
+        std::chrono::steady_clock::now() - cycle_started).count());
     if (state.replans > observed_replans) {
       observed_replans = state.replans;
       result.global_plan_samples_s.push_back(state.global_planning.elapsed_s);
@@ -82,6 +88,21 @@ RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, P
     }
     if (state.controller_solve_us > 0.)
       result.controller_solve_samples_us.push_back(state.controller_solve_us);
+    if (state.controller_diagnostics.solve_us > 0.) {
+      result.pure_solver_samples_us.push_back(state.controller_diagnostics.solver_us > 0.
+          ? state.controller_diagnostics.solver_us : state.controller_diagnostics.solve_us);
+      ++result.controller_commands;
+      if (state.controller_diagnostics.deadline_miss) ++result.controller_deadline_misses;
+      if (state.controller_diagnostics.fallback_level > 0) ++result.controller_fallbacks;
+      if (state.controller_diagnostics.backend == ControllerBackend::kAcados) ++result.acados_commands;
+      else if (state.controller_diagnostics.backend == ControllerBackend::kMppi) ++result.mppi_commands;
+      else if (state.controller_diagnostics.backend == ControllerBackend::kRpp) ++result.rpp_commands;
+    }
+    if (state.collision_monitor_action != CollisionMonitorAction::kNone)
+      ++result.collision_monitor_interventions;
+    if (state.minimum_ttc_s > 0.)
+      result.minimum_ttc_s = result.minimum_ttc_s == 0. ? state.minimum_ttc_s :
+          std::min(result.minimum_ttc_s, state.minimum_ttc_s);
     if (state.status == NavigationStatus::kSucceeded) {
       result.status = "SUCCEEDED"; result.replans = state.replans;
       result.emergency_stops = state.emergency_stops; result.recoveries = state.recoveries;
@@ -93,6 +114,16 @@ RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, P
       result.costmap_digest = state.costmap_digest; break;
     }
     const Twist2d command = state.command;
+    const Twist2d acceleration{
+        (command.linear - velocity.linear) / config_.control_period,
+        (command.angular - velocity.angular) / config_.control_period};
+    if (step > 0) {
+      result.linear_jerk_samples.push_back(
+          std::abs(acceleration.linear - previous_acceleration.linear) / config_.control_period);
+      result.angular_jerk_samples.push_back(
+          std::abs(acceleration.angular - previous_acceleration.angular) / config_.control_period);
+    }
+    previous_acceleration = acceleration;
     const double next_yaw = Yaw(pose) + command.angular * config_.control_period;
     Pose2d candidate;
     if (std::abs(command.angular) < 1e-9) {

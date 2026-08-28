@@ -6,6 +6,7 @@
 #include <vector>
 #include "navigation2d/application/navigation_config.h"
 #include "navigation2d/control/local_controller.h"
+#include "navigation2d/control/collision_monitor.h"
 #include "navigation2d/geometry/pose_2d.h"
 #include "navigation2d/sensor/observations.h"
 
@@ -24,6 +25,8 @@ struct NavigationState {
   // sensing, costmap updates, global replanning, simulation and safety filtering.
   double controller_solve_us = 0.;
   ControllerDiagnostics controller_diagnostics;
+  CollisionMonitorAction collision_monitor_action = CollisionMonitorAction::kNone;
+  double minimum_ttc_s = 0.;
   GlobalPlanningDiagnostics global_planning;
   int obstacle_heuristic_cache_hits = 0;
   int incremental_replans = 0;
@@ -50,6 +53,9 @@ class NavigationSystem {
   // Supplies tracker output in the map frame. Predictions are consumed by the
   // constrained MPC controller; legacy controllers safely ignore them.
   void UpdateDynamicObstacles(std::vector<PredictedObstacle> obstacles);
+  // Ordered topology candidates produced by the pinned TUD Guidance Planner
+  // adapter. The first safe feasible candidate has priority.
+  void UpdateGuidanceCandidates(std::vector<GuidanceCandidate> candidates);
   NavigationState ComputeCommand(const Pose2d& pose, Twist2d measured_velocity,
                                  double timestamp);
 

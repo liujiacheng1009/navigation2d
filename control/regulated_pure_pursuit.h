@@ -14,6 +14,12 @@ class RegulatedPurePursuit final : public LocalController {
                   const std::vector<PredictedObstacle>& dynamic_obstacles = {}) const override;
   bool CollisionImminent(const Pose2d& pose, Twist2d command,
                          const LayeredCostmap& costmap) const override;
+  ControllerDiagnostics Diagnostics() const override {
+    ControllerDiagnostics diagnostics;
+    diagnostics.backend = ControllerBackend::kRpp;
+    diagnostics.status = ControllerSolveStatus::kSuccess;
+    return diagnostics;
+  }
 
  private:
   NavigationConfig config_;

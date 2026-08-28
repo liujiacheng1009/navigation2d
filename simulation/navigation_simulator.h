@@ -29,6 +29,18 @@ struct RunResult {
   int recoveries = 0;
   double global_path_length_m = 0.;
   std::vector<double> controller_solve_samples_us;
+  std::vector<double> control_cycle_samples_us;
+  std::vector<double> pure_solver_samples_us;
+  std::vector<double> linear_jerk_samples;
+  std::vector<double> angular_jerk_samples;
+  int controller_deadline_misses = 0;
+  int controller_fallbacks = 0;
+  int controller_commands = 0;
+  int acados_commands = 0;
+  int mppi_commands = 0;
+  int rpp_commands = 0;
+  int collision_monitor_interventions = 0;
+  double minimum_ttc_s = 0.;
   GlobalPlanningDiagnostics global_planning;
   int obstacle_heuristic_cache_hits = 0;
   int incremental_replans = 0;

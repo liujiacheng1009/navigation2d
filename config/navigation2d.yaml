@@ -90,8 +90,18 @@ mpc:
   dynamic_sigma_scale: 2.0
   deadline: 0.04
   dynamic_prediction_timeout: 0.5
+  guidance_max_candidates: 3
+  guidance_candidate_timeout: 0.5
 safety:
   collision_horizon: 1.0
+  collision_monitor_enabled: true
+  collision_monitor_stop_distance: 0.10
+  collision_monitor_slowdown_distance: 0.45
+  collision_monitor_slowdown_ratio: 0.35
+  collision_monitor_approach_horizon: 2.0
+  collision_monitor_source_timeout: 0.3
+  collision_monitor_trigger_cycles: 2
+  collision_monitor_release_cycles: 2
   max_navigation_duration: 60.0
   goal_xy_tolerance: 0.05
   goal_yaw_tolerance: 0.05

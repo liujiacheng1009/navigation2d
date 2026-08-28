@@ -16,13 +16,14 @@ import numpy as np
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 
 
-def build_solver(output: Path, horizon: int, duration: float, obstacle_slots: int) -> None:
+def build_solver(output: Path, horizon: int, duration: float, obstacle_slots: int,
+                 corridor_slots: int) -> None:
     model = AcadosModel()
     model.name = "navigation2d_mpcc"
     # [x, y, yaw, v, w], u = [linear_acceleration, angular_acceleration].
     state = ca.SX.sym("state", 5)
     control = ca.SX.sym("control", 2)
-    parameters = ca.SX.sym("parameters", 4 + 5 * obstacle_slots)
+    parameters = ca.SX.sym("parameters", 4 + 5 * obstacle_slots + 4 * corridor_slots)
     x, y, yaw, velocity, angular = state[0], state[1], state[2], state[3], state[4]
     acceleration, angular_acceleration = control[0], control[1]
     model.x, model.u, model.p = state, control, parameters
@@ -49,12 +50,21 @@ def build_solver(output: Path, horizon: int, duration: float, obstacle_slots: in
             ((x - obstacle_x) / obstacle_rx) ** 2 + ((y - obstacle_y) / obstacle_ry) ** 2
             + (1. - obstacle_active) * 1e6
         )
-    model.con_h_expr = ca.vertcat(*obstacle_constraints)
+    corridor_constraints = []
+    corridor_offset = 4 + 5 * obstacle_slots
+    for slot in range(corridor_slots):
+        offset = corridor_offset + 4 * slot
+        normal_x, normal_y = parameters[offset], parameters[offset + 1]
+        bound, active = parameters[offset + 2], parameters[offset + 3]
+        corridor_constraints.append(
+            bound - normal_x * x - normal_y * y + (1. - active) * 1e6
+        )
+    model.con_h_expr = ca.vertcat(*(obstacle_constraints + corridor_constraints))
 
     ocp = AcadosOcp()
     ocp.name = "navigation2d_mpcc"
     ocp.model = model
-    ocp.parameter_values = np.zeros(4 + 5 * obstacle_slots)
+    ocp.parameter_values = np.zeros(4 + 5 * obstacle_slots + 4 * corridor_slots)
     ocp.solver_options.N_horizon = horizon
     ocp.solver_options.tf = duration
     ocp.cost.cost_type = "NONLINEAR_LS"
@@ -70,8 +80,8 @@ def build_solver(output: Path, horizon: int, duration: float, obstacle_slots: in
     ocp.constraints.idxbx = np.array([3, 4])
     ocp.constraints.lbx = np.array([-0.12, -0.9])
     ocp.constraints.ubx = np.array([0.55, 0.9])
-    ocp.constraints.lh = np.ones(obstacle_slots)
-    ocp.constraints.uh = np.full(obstacle_slots, 1e15)
+    ocp.constraints.lh = np.concatenate((np.ones(obstacle_slots), np.zeros(corridor_slots)))
+    ocp.constraints.uh = np.full(obstacle_slots + corridor_slots, 1e15)
     ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"
     ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
     ocp.solver_options.integrator_type = "ERK"
@@ -91,13 +101,16 @@ def main() -> None:
     parser.add_argument("--horizon", type=int, default=20)
     parser.add_argument("--duration", type=float, default=1.2)
     parser.add_argument("--obstacle-slots", type=int, default=4)
+    parser.add_argument("--corridor-slots", type=int, default=8)
     args = parser.parse_args()
-    if args.horizon < 2 or args.duration <= 0 or args.obstacle_slots < 1:
-        parser.error("horizon must be >= 2, duration positive, and obstacle-slots >= 1")
+    if (args.horizon < 2 or args.duration <= 0 or args.obstacle_slots < 1 or
+            args.corridor_slots < 4):
+        parser.error("horizon >= 2, positive duration, obstacle-slots >= 1 and corridor-slots >= 4 required")
     if not os.environ.get("ACADOS_SOURCE_DIR"):
         parser.error("ACADOS_SOURCE_DIR must point to an acados source tree")
     args.output.mkdir(parents=True, exist_ok=True)
-    build_solver(args.output.resolve(), args.horizon, args.duration, args.obstacle_slots)
+    build_solver(args.output.resolve(), args.horizon, args.duration, args.obstacle_slots,
+                 args.corridor_slots)
 
 
 if __name__ == "__main__":

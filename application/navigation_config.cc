@@ -144,7 +144,8 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
   ExactKeys(mpc, {"solver", "time_steps", "contour_weight", "heading_weight", "speed_weight",
                   "control_weight", "control_rate_weight", "obstacle_weight", "progress_weight",
                   "max_lateral_acceleration", "dynamic_safety_margin", "dynamic_sigma_scale",
-                  "deadline", "dynamic_prediction_timeout"}, "mpc");
+                  "deadline", "dynamic_prediction_timeout", "guidance_max_candidates",
+                  "guidance_candidate_timeout"}, "mpc");
   c.mpc_solver = mpc["solver"].as<std::string>();
   c.mpc_time_steps = mpc["time_steps"].as<int>();
   c.mpc_contour_weight = Number(mpc, "contour_weight");
@@ -159,12 +160,27 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
   c.mpc_dynamic_sigma_scale = Number(mpc, "dynamic_sigma_scale");
   c.mpc_deadline = Number(mpc, "deadline");
   c.dynamic_prediction_timeout = Number(mpc, "dynamic_prediction_timeout");
+  c.guidance_max_candidates = mpc["guidance_max_candidates"].as<int>();
+  c.guidance_candidate_timeout = Number(mpc, "guidance_candidate_timeout");
   const auto safety = root["safety"];
-  ExactKeys(safety, {"collision_horizon", "max_navigation_duration", "goal_xy_tolerance", "goal_yaw_tolerance"}, "safety");
+  ExactKeys(safety, {"collision_horizon", "max_navigation_duration", "goal_xy_tolerance",
+                      "goal_yaw_tolerance", "collision_monitor_enabled",
+                      "collision_monitor_stop_distance", "collision_monitor_slowdown_distance",
+                      "collision_monitor_slowdown_ratio", "collision_monitor_approach_horizon",
+                      "collision_monitor_source_timeout", "collision_monitor_trigger_cycles",
+                      "collision_monitor_release_cycles"}, "safety");
   c.collision_horizon = Number(safety, "collision_horizon");
   c.max_navigation_duration = Number(safety, "max_navigation_duration");
   c.goal_xy_tolerance = Number(safety, "goal_xy_tolerance");
   c.goal_yaw_tolerance = Number(safety, "goal_yaw_tolerance");
+  c.collision_monitor_enabled = safety["collision_monitor_enabled"].as<bool>();
+  c.collision_monitor_stop_distance = Number(safety, "collision_monitor_stop_distance");
+  c.collision_monitor_slowdown_distance = Number(safety, "collision_monitor_slowdown_distance");
+  c.collision_monitor_slowdown_ratio = Number(safety, "collision_monitor_slowdown_ratio");
+  c.collision_monitor_approach_horizon = Number(safety, "collision_monitor_approach_horizon");
+  c.collision_monitor_source_timeout = Number(safety, "collision_monitor_source_timeout");
+  c.collision_monitor_trigger_cycles = safety["collision_monitor_trigger_cycles"].as<int>();
+  c.collision_monitor_release_cycles = safety["collision_monitor_release_cycles"].as<int>();
   const auto scheduler = root["scheduler"];
   ExactKeys(scheduler, {"global_replan_period"}, "scheduler");
   c.global_replan_period = Number(scheduler, "global_replan_period");
@@ -206,6 +222,12 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
       c.mpc_progress_weight < 0. || c.mpc_max_lateral_acceleration <= 0. ||
       c.mpc_dynamic_safety_margin < 0. || c.mpc_dynamic_sigma_scale < 0. ||
       c.mpc_deadline <= 0. || c.dynamic_prediction_timeout <= 0. ||
+      c.guidance_max_candidates < 1 || c.guidance_candidate_timeout <= 0. ||
+      c.collision_monitor_stop_distance < 0. ||
+      c.collision_monitor_slowdown_distance <= c.collision_monitor_stop_distance ||
+      c.collision_monitor_slowdown_ratio <= 0. || c.collision_monitor_slowdown_ratio > 1. ||
+      c.collision_monitor_approach_horizon <= 0. || c.collision_monitor_source_timeout <= 0. ||
+      c.collision_monitor_trigger_cycles < 1 || c.collision_monitor_release_cycles < 1 ||
       c.dwa_horizon <= 0. || c.dwa_linear_samples < 1 || c.dwa_angular_samples < 1)
     throw std::runtime_error("invalid navigation configuration bounds");
   return c;

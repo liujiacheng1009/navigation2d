@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <utility>
 #include "navigation2d/control/regulated_pure_pursuit.h"
+#include "navigation2d/control/collision_monitor.h"
 #include "navigation2d/control/dwa_controller.h"
 #include "navigation2d/control/mppi_controller.h"
 #include "navigation2d/control/mpc_controller.h"
@@ -53,7 +54,8 @@ class NavigationSystem::Impl {
  public:
   Impl(NavigationConfig value, const std::string& map_path)
       : config(std::move(value)), costmap(Grid2d::Load(map_path), config),
-        planner(MakeGlobalPlanner(config)), controller(MakeController(config)) {
+        planner(MakeGlobalPlanner(config)), controller(MakeController(config)),
+        collision_monitor(config) {
     if (std::abs(costmap.grid().resolution() - config.map_resolution) > 1e-9)
       throw std::runtime_error("map resolution does not match navigation configuration");
   }
@@ -88,6 +90,7 @@ class NavigationSystem::Impl {
   LayeredCostmap costmap;
   std::unique_ptr<GlobalPlanner> planner;
   std::unique_ptr<LocalController> controller;
+  CollisionMonitor collision_monitor;
   std::optional<Pose2d> goal;
   Path path;
   NavigationState state;
@@ -118,12 +121,14 @@ void NavigationSystem::ClearGoal() {
 }
 
 void NavigationSystem::UpdateLaserScan(const Pose2d& sensor_pose, const LaserScan& scan) {
+  impl_->collision_monitor.UpdateLaserScan(sensor_pose, scan);
   const auto before = impl_->costmap.digest();
   impl_->costmap.UpdateObstacleLayer(sensor_pose, scan);
   impl_->observation_changed = impl_->observation_changed || before != impl_->costmap.digest();
 }
 
 void NavigationSystem::UpdatePointCloud(const Pose2d& sensor_pose, const PointCloud2d& cloud) {
+  impl_->collision_monitor.UpdatePointCloud(sensor_pose, cloud);
   const auto before = impl_->costmap.digest();
   impl_->costmap.UpdateObstacleLayer(sensor_pose, cloud);
   impl_->observation_changed = impl_->observation_changed || before != impl_->costmap.digest();
@@ -131,6 +136,10 @@ void NavigationSystem::UpdatePointCloud(const Pose2d& sensor_pose, const PointCl
 
 void NavigationSystem::UpdateDynamicObstacles(std::vector<PredictedObstacle> obstacles) {
   impl_->dynamic_obstacles = std::move(obstacles);
+}
+
+void NavigationSystem::UpdateGuidanceCandidates(std::vector<GuidanceCandidate> candidates) {
+  impl_->controller->SetGuidanceCandidates(std::move(candidates));
 }
 
 NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d measured_velocity,
@@ -188,6 +197,14 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
       impl_->state.controller_diagnostics.solve_us = impl_->state.controller_solve_us;
     if (DynamicCollisionImminent(pose, command, impl_->dynamic_obstacles, impl_->config))
       command = {};
+    const auto monitored = impl_->collision_monitor.Filter(pose, command, timestamp);
+    command = monitored.command;
+    impl_->state.collision_monitor_action = monitored.action;
+    const double dynamic_ttc = MinimumDynamicTtc(
+        pose, command, impl_->dynamic_obstacles, impl_->config);
+    impl_->state.minimum_ttc_s = monitored.time_to_collision_s > 0. && dynamic_ttc > 0. ?
+        std::min(monitored.time_to_collision_s, dynamic_ttc) :
+        std::max(monitored.time_to_collision_s, dynamic_ttc);
   }
   if (command.linear == 0. && command.angular == 0. &&
       (measured_velocity.linear != 0. || measured_velocity.angular != 0.))

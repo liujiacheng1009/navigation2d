@@ -38,6 +38,17 @@ python3 tools/run_global_planner_benchmark.py --repetitions 3 --jobs 5
 
 报告写入 `artifacts/navigation2d/results/global-planners-*.json`，生成报告不提交仓库。
 
+局部控制器发布比较使用相同场景、独立进程和同一个 benchmark 二进制：
+
+```bash
+python3 tools/run_local_controller_benchmark.py --repetitions 3 --jobs 4
+```
+
+验证真实 acados 后端时，用 `--binary` 指向启用 acados 的构建产物，并用
+`--acados-library-path` 指向它的运行库目录。发布门禁检查控制周期与纯求解 P50/P95/P99、
+deadline miss、最小 TTC、jerk、碰撞、各后端命令数和降级率，不能用 portable 构建中预期的
+MPPI 降级结果代替 acados 数据。
+
 每个 case 必须是独立进程；共享一个 NavigationSystem、静态全局状态或输出文件会破坏并发
 确定性。新增 case 后同步更新 manifest、tier 选择测试和数据集 README。
 

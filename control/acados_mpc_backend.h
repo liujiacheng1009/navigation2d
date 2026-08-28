@@ -18,6 +18,7 @@ class AcadosMpcBackend {
 
   bool available() const;
   std::optional<Twist2d> Solve(const Path& path, const Pose2d& pose, Twist2d current,
+                               const LayeredCostmap& costmap,
                                const std::vector<PredictedObstacle>& obstacles) const;
   ControllerDiagnostics Diagnostics() const;
 

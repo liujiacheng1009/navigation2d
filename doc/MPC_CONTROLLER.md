@@ -22,6 +22,26 @@ costmap footprint、预测动态障碍椭圆安全区等约束。代价包含 MP
 start，报告求解时间、SQP 迭代和 KKT residual；超过 `deadline` 的迟到解不会下发。完整的静态
 凸走廊和 Guidance Planner 多拓扑接入按本文后续章节实现，不能用三个角速度初值冒充。
 
+## 静态安全走廊与 footprint
+
+DecompUtil 固定在提交 `b0836c7228d19f0fa97282c584b55adf642279da`。每个控制周期只截取预测
+时域覆盖的参考段和局部障碍点，生成凸多面体；半空间边界使用当前参考 yaw 下的多边形 footprint
+支撑函数内缩。新版生成 solver 默认提供 8 个走廊半空间槽，这些是 acados 非线性规划的硬约束，
+而不是求解后才检查 costmap。圆形 footprint 使用半径支撑函数。
+
+## TUD Guidance 多拓扑
+
+TUD Guidance Planner 固定在提交 `2c4188371e18e2fb3d083e0867b5e4d537a42860`。由于上游实现依赖
+ROS/ros_tools，它作为运行时 producer，通过 `UpdateGuidanceCandidates()` 向 ROS-free 核心提交按
+质量排序、带 topology ID 和 age 的路径。核心为候选维护独立 acados capsule，并行求解后仍按输入
+顺序选择第一个安全可行解；过期候选被丢弃。这一契约避免复制一个缩水 PRM 冒充上游 Guidance。
+
+## 独立安全层
+
+`CollisionMonitor` 直接消费 LaserScan/PointCloud 命中点，不读取 costmap。它实现 stop、slowdown、
+time-to-collision approach、源超时停车及触发/释放防抖。该过滤位于所有控制后端之后，因此 acados、
+MPPI、DWA、RPP 和恢复动作不能绕开它。它是软件安全层，不宣称功能安全认证。
+
 ## acados 代码生成
 
 仓库包含 `tools/generate_acados_mpc.py`，实际生成状态 `[x, y, yaw, v, w]`、输入
@@ -48,6 +68,6 @@ cmake --build build-acados --parallel
 设置 `mpc.solver: acados` 即可启用。`dynamic_safety` 始终保留，负责求解失败和预测不一致时的
 独立复核；未编译 acados 后端时会安全回退到 MPPI。
 
-benchmark JSON 同时输出 `controller_solve_samples` 和
-`controller_solve_p50_us/p95_us/p99_us`。计时范围仅为 `LocalController::Compute()`，不包含
-传感器、costmap、全局重规划、仿真和控制器外部的独立安全过滤器。
+benchmark JSON 同时输出控制器编排耗时、完整控制周期和纯 solver 的 P50/P95/P99，并输出
+deadline miss、后端命令数、降级率、最小 TTC、线/角 jerk P95 及 Collision Monitor 干预数。
+统一矩阵由根仓库 `tools/run_local_controller_benchmark.py` 执行。

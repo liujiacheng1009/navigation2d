@@ -73,6 +73,28 @@ int main(int argc, char** argv) try {
             << ",\"controller_solve_p50_us\":" << Percentile(result.controller_solve_samples_us, .50)
             << ",\"controller_solve_p95_us\":" << Percentile(result.controller_solve_samples_us, .95)
             << ",\"controller_solve_p99_us\":" << Percentile(result.controller_solve_samples_us, .99)
+            << ",\"control_cycle_p50_us\":" << Percentile(result.control_cycle_samples_us, .50)
+            << ",\"control_cycle_p95_us\":" << Percentile(result.control_cycle_samples_us, .95)
+            << ",\"control_cycle_p99_us\":" << Percentile(result.control_cycle_samples_us, .99)
+            << ",\"pure_solver_p50_us\":" << Percentile(result.pure_solver_samples_us, .50)
+            << ",\"pure_solver_p95_us\":" << Percentile(result.pure_solver_samples_us, .95)
+            << ",\"pure_solver_p99_us\":" << Percentile(result.pure_solver_samples_us, .99)
+            << ",\"controller_deadline_misses\":" << result.controller_deadline_misses
+            << ",\"controller_deadline_miss_rate\":"
+            << (result.controller_commands ? static_cast<double>(result.controller_deadline_misses) /
+                result.controller_commands : 0.)
+            << ",\"controller_fallbacks\":" << result.controller_fallbacks
+            << ",\"controller_fallback_rate\":"
+            << (result.controller_commands ? static_cast<double>(result.controller_fallbacks) /
+                result.controller_commands : 0.)
+            << ",\"controller_acados_commands\":" << result.acados_commands
+            << ",\"controller_mppi_commands\":" << result.mppi_commands
+            << ",\"controller_rpp_commands\":" << result.rpp_commands
+            << ",\"minimum_ttc_s\":" << result.minimum_ttc_s
+            << ",\"linear_jerk_p95\":" << Percentile(result.linear_jerk_samples, .95)
+            << ",\"angular_jerk_p95\":" << Percentile(result.angular_jerk_samples, .95)
+            << ",\"collision_monitor_interventions\":"
+            << result.collision_monitor_interventions
             << ",\"replans\":" << result.replans
             << ",\"emergency_stops\":" << result.emergency_stops
             << ",\"recoveries\":" << result.recoveries

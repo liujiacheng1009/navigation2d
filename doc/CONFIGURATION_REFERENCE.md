@@ -64,6 +64,8 @@ RPP 与公共运动限制使用期望线速度、lookahead 距离/时间、到�
 不可用、失败、超时或安全复核失败时回退到 MPPI，再回退到 RPP/停车。
 `time_steps × control_period` 是约束时域，`deadline` 是 acados 迟到解拒绝阈值；
 `dynamic_prediction_timeout` 是 tracker 预测的最大允许年龄。
+`guidance_max_candidates` 限制并行 acados capsule 数，`guidance_candidate_timeout` 拒绝过期的
+TUD Guidance 输出。
 `contour_weight`、`heading_weight`、`progress_weight` 是 MPCC 路径轮廓、切线航向和进度项；
 其余权重约束速度参考、控制、控制变化率和 costmap 成本。`max_lateral_acceleration` 决定曲率
 限速；`dynamic_safety_margin` 与 `dynamic_sigma_scale` 分别为动态预测的几何余量和协方差倍率。
@@ -71,6 +73,8 @@ RPP 与公共运动限制使用期望线速度、lookahead 距离/时间、到�
 ## `safety`、`scheduler` 与 `recovery`
 
 - `collision_horizon`：执行命令前的前向碰撞预测窗口。
+- `collision_monitor_*`：独立原始传感器安全层的 stop/slowdown 距离、降速倍率、approach 时域、
+  数据源超时和触发/释放防抖周期。数据源超时直接停车。
 - `goal_xy_tolerance`、`goal_yaw_tolerance`：完整 SE(2) 到达阈值。
 - `global_replan_period`：周期全局重规划间隔。
 - `progress_radius`、`progress_timeout`：卡住检测。

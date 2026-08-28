@@ -11,7 +11,7 @@ struct Twist2d {
   double angular = 0.;
 };
 
-enum class ControllerBackend { kNone, kAcados, kMppi, kRpp };
+enum class ControllerBackend { kNone, kAcados, kMppi, kRpp, kDwa };
 enum class ControllerSolveStatus { kNotRun, kSuccess, kUnavailable, kFailure, kDeadlineMiss, kUnsafe };
 
 struct ControllerDiagnostics {
@@ -26,6 +26,12 @@ struct ControllerDiagnostics {
   double min_ttc_s = 0.;
 };
 
+struct GuidanceCandidate {
+  int topology_id = 0;
+  Path path;
+  double age_s = 0.;
+};
+
 class LocalController {
  public:
   virtual ~LocalController() = default;
@@ -35,6 +41,7 @@ class LocalController {
   virtual bool CollisionImminent(const Pose2d& pose, Twist2d command,
                                  const LayeredCostmap& costmap) const = 0;
   virtual ControllerDiagnostics Diagnostics() const { return {}; }
+  virtual void SetGuidanceCandidates(std::vector<GuidanceCandidate>) {}
 };
 
 }  // namespace navigation2d

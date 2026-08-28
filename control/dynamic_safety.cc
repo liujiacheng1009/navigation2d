@@ -22,11 +22,13 @@ bool DynamicCollisionAt(const Pose2d& pose, double time,
                         const std::vector<PredictedObstacle>& obstacles,
                         const NavigationConfig& config) {
   for (const auto& obstacle : obstacles) {
+    if (obstacle.age_s < 0. || obstacle.age_s > config.dynamic_prediction_timeout) continue;
     const double radius = config.robot_radius + obstacle.radius + config.mpc_dynamic_safety_margin;
     const double rx = radius + config.mpc_dynamic_sigma_scale * std::max(0., obstacle.sigma_x);
     const double ry = radius + config.mpc_dynamic_sigma_scale * std::max(0., obstacle.sigma_y);
-    const double dx = X(pose) - (obstacle.x + obstacle.vx * time);
-    const double dy = Y(pose) - (obstacle.y + obstacle.vy * time);
+    const double prediction_time = time + obstacle.age_s;
+    const double dx = X(pose) - (obstacle.x + obstacle.vx * prediction_time);
+    const double dy = Y(pose) - (obstacle.y + obstacle.vy * prediction_time);
     if (dx * dx / (rx * rx) + dy * dy / (ry * ry) <= 1.) return true;
   }
   return false;
@@ -42,6 +44,20 @@ bool DynamicCollisionImminent(const Pose2d& pose, Twist2d command,
     if (DynamicCollisionAt(projected, time, obstacles, config)) return true;
   }
   return false;
+}
+
+double MinimumDynamicTtc(const Pose2d& pose, Twist2d command,
+                         const std::vector<PredictedObstacle>& obstacles,
+                         const NavigationConfig& config) {
+  Pose2d projected = pose;
+  const double horizon = std::max(config.collision_horizon,
+      config.mpc_time_steps * config.control_period);
+  for (double time = config.control_period; time <= horizon + 1e-9;
+       time += config.control_period) {
+    projected = Integrate(projected, command, config.control_period);
+    if (DynamicCollisionAt(projected, time, obstacles, config)) return time;
+  }
+  return 0.;
 }
 
 }  // namespace navigation2d

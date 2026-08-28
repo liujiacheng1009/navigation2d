@@ -17,7 +17,7 @@ ControllerDiagnostics AcadosMpcBackend::Diagnostics() const {
 }
 
 std::optional<Twist2d> AcadosMpcBackend::Solve(
-    const Path&, const Pose2d&, Twist2d,
+    const Path&, const Pose2d&, Twist2d, const LayeredCostmap&,
     const std::vector<PredictedObstacle>&) const {
   return std::nullopt;
 }

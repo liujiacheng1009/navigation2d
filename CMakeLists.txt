@@ -16,6 +16,11 @@ if(NOT Sophus_FOUND)
   FetchContent_MakeAvailable(sophus)
 endif()
 find_package(yaml-cpp REQUIRED)
+FetchContent_Declare(decomp_util
+  GIT_REPOSITORY https://github.com/oscardegroot/DecompUtil.git
+  GIT_TAG b0836c7228d19f0fa97282c584b55adf642279da
+  SOURCE_SUBDIR navigation2d-no-cmake)
+FetchContent_MakeAvailable(decomp_util)
 set(NAVIGATION2D_ACADOS_GENERATED_DIR "" CACHE PATH "Generated Navigation2D acados solver directory")
 set(NAVIGATION2D_ACADOS_ROOT "" CACHE PATH "acados installation prefix")
 add_library(navigation2d_core STATIC
@@ -25,10 +30,12 @@ add_library(navigation2d_core STATIC
   planning/motion_primitives.cc planning/path_smoother.cc planning/dijkstra_planner.cc planning/astar_planner.cc
   planning/state_lattice_planner.cc
   planning/theta_star_planner.cc planning/planner_factory.cc
-  control/regulated_pure_pursuit.cc control/dwa_controller.cc control/mppi_controller.cc control/dynamic_safety.cc
-  control/mpc_controller.cc
+  control/regulated_pure_pursuit.cc control/dwa_controller.cc control/nav2_mppi_core.cc
+  control/mppi_controller.cc control/dynamic_safety.cc
+  control/safe_corridor.cc control/collision_monitor.cc control/mpc_controller.cc
   application/navigation_system.cc)
 target_include_directories(navigation2d_core PUBLIC "${PROJECT_SOURCE_DIR}/..")
+target_include_directories(navigation2d_core SYSTEM PRIVATE "${decomp_util_SOURCE_DIR}/include")
 target_link_libraries(navigation2d_core PUBLIC Eigen3::Eigen Sophus::Sophus yaml-cpp)
 if(NAVIGATION2D_ACADOS_GENERATED_DIR)
   if(NOT NAVIGATION2D_ACADOS_ROOT)
@@ -72,6 +79,9 @@ add_test(NAME mpc_controller_test COMMAND mpc_controller_test)
 add_executable(dynamic_safety_test test/dynamic_safety_test.cc)
 target_link_libraries(dynamic_safety_test PRIVATE navigation2d_core)
 add_test(NAME dynamic_safety_test COMMAND dynamic_safety_test)
+add_executable(control_safety_test test/control_safety_test.cc)
+target_link_libraries(control_safety_test PRIVATE navigation2d_core)
+add_test(NAME control_safety_test COMMAND control_safety_test)
 add_executable(global_planner_test test/global_planner_test.cc)
 target_link_libraries(global_planner_test PRIVATE navigation2d_core)
 add_test(NAME global_planner_test COMMAND global_planner_test)

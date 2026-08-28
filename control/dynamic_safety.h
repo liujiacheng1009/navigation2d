@@ -16,5 +16,8 @@ bool DynamicCollisionImminent(const Pose2d& pose, Twist2d command,
 bool DynamicCollisionAt(const Pose2d& pose, double time,
                         const std::vector<PredictedObstacle>& obstacles,
                         const NavigationConfig& config);
+double MinimumDynamicTtc(const Pose2d& pose, Twist2d command,
+                         const std::vector<PredictedObstacle>& obstacles,
+                         const NavigationConfig& config);
 
 }  // namespace navigation2d

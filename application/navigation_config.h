@@ -32,6 +32,14 @@ struct NavigationConfig {
   double max_linear_acceleration = .8;
   double max_angular_acceleration = 1.8;
   double collision_horizon = 1.;
+  bool collision_monitor_enabled = true;
+  double collision_monitor_stop_distance = .10;
+  double collision_monitor_slowdown_distance = .45;
+  double collision_monitor_slowdown_ratio = .35;
+  double collision_monitor_approach_horizon = 2.;
+  double collision_monitor_source_timeout = .3;
+  int collision_monitor_trigger_cycles = 2;
+  int collision_monitor_release_cycles = 2;
   double max_navigation_duration = 60.;
   double control_period = .06;
   double global_replan_period = .5;
@@ -101,6 +109,8 @@ struct NavigationConfig {
   double mpc_dynamic_sigma_scale = 2.;
   double mpc_deadline = .04;
   double dynamic_prediction_timeout = .5;
+  int guidance_max_candidates = 3;
+  double guidance_candidate_timeout = .5;
 };
 
 }  // namespace navigation2d
