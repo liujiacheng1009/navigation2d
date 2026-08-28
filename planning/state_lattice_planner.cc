@@ -6,6 +6,7 @@
 
 #include "navigation2d/planning/collision_checker.h"
 #include "navigation2d/planning/motion_primitives.h"
+#include "navigation2d/planning/path_smoother.h"
 #include "navigation2d/planning/search_core.h"
 
 namespace navigation2d {
@@ -118,7 +119,8 @@ Path StateLatticePlanner::Plan(const LayeredCostmap& costmap, const Pose2d& star
       path.push_back(MakePose2d(wx + X(sample), wy + Y(sample), Yaw(sample)));
   }
   path.back() = goal;
-  return path;
+  return planning_internal::ConstrainedPathSmoother(config_).Smooth(
+      path, costmap, config_.robot_radius);
 }
 
 }  // namespace navigation2d

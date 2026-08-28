@@ -48,6 +48,16 @@ struct NavigationConfig {
   double lattice_max_planning_time = .25;
   double lattice_initial_heuristic_weight = 2.5;
   double lattice_heuristic_weight_decrement = .5;
+  bool smoother_enabled = true;
+  int smoother_max_iterations = 100;
+  double smoother_data_weight = .2;
+  double smoother_smooth_weight = .3;
+  double smoother_obstacle_weight = .2;
+  double smoother_min_clearance = .23;
+  double smoother_max_deviation = .12;
+  double smoother_max_curvature = 4.;
+  double smoother_max_step = .02;
+  double smoother_tolerance = 1e-4;
   double goal_xy_tolerance = .05;
   double goal_yaw_tolerance = .05;
   double dwa_horizon = 1.5;

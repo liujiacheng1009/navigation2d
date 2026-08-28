@@ -23,6 +23,17 @@ state_lattice:
   max_planning_time: 0.25
   initial_heuristic_weight: 2.5
   heuristic_weight_decrement: 0.5
+path_smoother:
+  enabled: true
+  max_iterations: 100
+  data_weight: 0.2
+  smooth_weight: 0.3
+  obstacle_weight: 0.2
+  min_clearance: 0.23
+  max_deviation: 0.12
+  max_curvature: 4.0
+  max_step: 0.02
+  tolerance: 0.0001
 controller:
   desired_linear_velocity: 0.24
   lookahead_time: 1.5

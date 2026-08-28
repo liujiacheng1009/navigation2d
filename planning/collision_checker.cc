@@ -94,6 +94,13 @@ double DistanceField::distance(double world_x, double world_y) const {
   return distance(x, y);
 }
 
+Eigen::Vector2d DistanceField::gradient(double world_x, double world_y) const {
+  const auto [x, y] = grid_->ToCell(world_x, world_y);
+  const double scale = .5 / grid_->resolution();
+  return {scale * (distance(x + 1, y) - distance(x - 1, y)),
+          scale * (distance(x, y + 1) - distance(x, y - 1))};
+}
+
 bool DistanceField::CircleCollisionFree(double world_x, double world_y, double radius) const {
   const auto [x, y] = grid_->ToCell(world_x, world_y);
   if (x < 0 || y < 0 || x >= grid_->width() || y >= grid_->height()) return false;

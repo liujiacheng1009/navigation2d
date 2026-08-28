@@ -29,6 +29,13 @@
 共享的硬资源预算；超限时返回已有安全解，否则明确失败，不返回半构造路径。反向 cost-aware
 障碍启发式按 costmap digest、目标格、clearance 和代价权重缓存。
 
+## `path_smoother`
+
+平滑器在 State Lattice 路径生成后优化数据保持、二阶平滑和障碍距离项。`max_deviation` 定义相对
+原路径的硬安全走廊，`max_curvature` 是局部三点曲率上限，`min_clearance` 是障碍排斥开始距离；
+每次更新还会按半栅格间距检查相邻线段的圆形 footprint。起终点、原地旋转及前后向 cusp 固定。
+`max_step`、`max_iterations` 和 `tolerance` 控制确定性迭代收敛；`enabled` 可用于基准消融。
+
 ## `controller`
 
 RPP 与公共运动限制使用期望线速度、lookahead 距离/时间、到点减速、最小转弯半径、最大

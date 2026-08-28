@@ -29,7 +29,8 @@ void ExactKeys(const YAML::Node& node, std::initializer_list<const char*> expect
 
 NavigationConfig NavigationConfig::Load(const std::string& filename) {
   const YAML::Node root = YAML::LoadFile(filename);
-  ExactKeys(root, {"selection", "map", "costmap", "state_lattice", "controller", "dwa", "mppi", "mpc",
+  ExactKeys(root, {"selection", "map", "costmap", "state_lattice", "path_smoother",
+                   "controller", "dwa", "mppi", "mpc",
                    "safety", "scheduler", "recovery"}, "root");
   NavigationConfig c;
   const auto selection = root["selection"];
@@ -64,6 +65,20 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
   c.lattice_max_planning_time = Number(lattice, "max_planning_time");
   c.lattice_initial_heuristic_weight = Number(lattice, "initial_heuristic_weight");
   c.lattice_heuristic_weight_decrement = Number(lattice, "heuristic_weight_decrement");
+  const auto smoother = root["path_smoother"];
+  ExactKeys(smoother, {"enabled", "max_iterations", "data_weight", "smooth_weight",
+                       "obstacle_weight", "min_clearance", "max_deviation", "max_curvature",
+                       "max_step", "tolerance"}, "path_smoother");
+  c.smoother_enabled = smoother["enabled"].as<bool>();
+  c.smoother_max_iterations = smoother["max_iterations"].as<int>();
+  c.smoother_data_weight = Number(smoother, "data_weight");
+  c.smoother_smooth_weight = Number(smoother, "smooth_weight");
+  c.smoother_obstacle_weight = Number(smoother, "obstacle_weight");
+  c.smoother_min_clearance = Number(smoother, "min_clearance");
+  c.smoother_max_deviation = Number(smoother, "max_deviation");
+  c.smoother_max_curvature = Number(smoother, "max_curvature");
+  c.smoother_max_step = Number(smoother, "max_step");
+  c.smoother_tolerance = Number(smoother, "tolerance");
   const auto controller = root["controller"];
   ExactKeys(controller, {"desired_linear_velocity", "lookahead_time",
                           "min_lookahead_distance", "max_lookahead_distance",
@@ -164,6 +179,11 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
       c.lattice_rotation_cost <= 0. || c.lattice_cost_penalty < 0. ||
       c.lattice_max_expansions < 1 || c.lattice_max_planning_time <= 0. ||
       c.lattice_initial_heuristic_weight < 1. || c.lattice_heuristic_weight_decrement <= 0. ||
+      c.smoother_max_iterations < 1 || c.smoother_data_weight < 0. ||
+      c.smoother_smooth_weight < 0. || c.smoother_obstacle_weight < 0. ||
+      c.smoother_min_clearance < c.robot_radius || c.smoother_max_deviation < 0. ||
+      c.smoother_max_curvature <= 0. || c.smoother_max_step <= 0. ||
+      c.smoother_tolerance <= 0. ||
       c.control_period <= 0. || c.global_replan_period < c.control_period ||
       c.mppi_time_steps < 2 || c.mppi_batch_size < 2 || c.mppi_iterations < 1 ||
       c.mppi_temperature <= 0. || c.mppi_vx_std <= 0. || c.mppi_wz_std <= 0. ||

@@ -13,6 +13,7 @@ class DistanceField {
   explicit DistanceField(const LayeredCostmap& costmap);
   double distance(int x, int y) const;
   double distance(double world_x, double world_y) const;
+  Eigen::Vector2d gradient(double world_x, double world_y) const;
   bool CircleCollisionFree(double world_x, double world_y, double radius) const;
 
  private:

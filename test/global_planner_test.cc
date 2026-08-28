@@ -9,6 +9,7 @@
 #include "navigation2d/planning/search_core.h"
 #include "navigation2d/planning/motion_primitives.h"
 #include "navigation2d/planning/obstacle_heuristic.h"
+#include "navigation2d/planning/path_smoother.h"
 #include "navigation2d/planning/state_lattice_planner.h"
 
 int main() {
@@ -120,6 +121,22 @@ int main() {
   map.MarkObstacle(3.5, 3.5);
   assert(!obstacle_heuristic.Matches(map, heuristic_goal_x, heuristic_goal_y,
                                     lattice_config.robot_radius, 2.));
+
+  navigation2d::NavigationConfig smoother_config;
+  smoother_config.smoother_max_curvature = 100.;
+  smoother_config.smoother_min_clearance = .2;
+  const navigation2d::Path zigzag{
+      navigation2d::MakePose2d(3., 1., 0.),
+      navigation2d::MakePose2d(3.2, 1.2, 0.),
+      navigation2d::MakePose2d(3.4, 1., 0.)};
+  const auto smooth = navigation2d::planning_internal::ConstrainedPathSmoother(
+      smoother_config).Smooth(zigzag, map, .18);
+  assert(smooth.size() == zigzag.size());
+  assert(navigation2d::Y(smooth[1]) < navigation2d::Y(zigzag[1]));
+  assert((smooth[1].translation() - zigzag[1].translation()).norm() <=
+         smoother_config.smoother_max_deviation + 1e-12);
+  assert(navigation2d::X(smooth.front()) == navigation2d::X(zigzag.front()));
+  assert(navigation2d::X(smooth.back()) == navigation2d::X(zigzag.back()));
 
   const auto& grid = map.grid();
   const auto near_start = grid.ToCell(1.5, 2.3);
