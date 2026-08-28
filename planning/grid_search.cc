@@ -69,16 +69,12 @@ Path GridSearch(const LayeredCostmap& costmap, const Pose2d& start,
       }
       const int next = ny * grid.width() + nx;
       const double traversal = 1. + static_cast<double>(costmap.cost(nx, ny)) / 252.;
-      int predecessor = current;
-      double transition = (d[0] && d[1] ? std::sqrt(2.) : 1.) * traversal;
+      const double transition = (d[0] && d[1] ? std::sqrt(2.) : 1.) * traversal;
+      visit({next, transition, current});
       if (relax_parent && current_parent >= 0) {
         const auto parent_transition = relax_parent(costmap, current_parent, next);
-        if (parent_transition) {
-          predecessor = current_parent;
-          transition = *parent_transition;
-        }
+        if (parent_transition) visit({next, *parent_transition, current_parent});
       }
-      visit({next, transition, predecessor});
     }
   });
   if (!result.found) throw std::runtime_error("no path");

@@ -12,7 +12,7 @@
    和增量节点；提供确定性 tie-break、节点/时间预算及诊断指标。
 3. **Distance field 与 footprint lookup（已完成）**：静态和动态致命栅格生成欧氏距离场；圆形 footprint
    O(1) 查询；多边形 footprint 按 yaw bin 预栅格化并支持 swept-volume 查询。
-4. **差速 State Lattice**：生成直行、圆弧、原地旋转及可选倒车原语；离散终点闭合；每条原语
+4. **差速 State Lattice（已完成）**：生成直行、圆弧、原地旋转及可选倒车原语；离散终点闭合；每条原语
    保存长度、曲率、方向切换和 footprint 采样。
 5. **Anytime 搜索**：加入障碍启发式反向 DP 缓存、Weighted A* 首解和 ARA* 逐步改善；报告
    次优界、展开数、首解时间和最终时间。

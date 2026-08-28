@@ -7,6 +7,8 @@
 #include "navigation2d/planning/collision_checker.h"
 #include "navigation2d/planning/grid_search.h"
 #include "navigation2d/planning/search_core.h"
+#include "navigation2d/planning/motion_primitives.h"
+#include "navigation2d/planning/state_lattice_planner.h"
 
 int main() {
   using navigation2d::planning_internal::BestFirstSearch;
@@ -55,6 +57,39 @@ int main() {
   assert(!footprint.SweptCollisionFree(map, {
       navigation2d::MakePose2d(3., 3., 0.),
       navigation2d::MakePose2d(2.25, 2., 0.)}));
+
+  const navigation2d::planning_internal::DifferentialDrivePrimitiveSet primitives(
+      16, .1, .3, true);
+  for (int bin = 0; bin < primitives.yaw_bins(); ++bin) {
+    const auto& motions = primitives.FromYawBin(bin);
+    assert(motions.size() == 10);
+    bool has_forward = false, has_reverse = false, has_rotate = false;
+    for (const auto& motion : motions) {
+      assert(!motion.samples.empty());
+      assert(motion.samples.back().translation().isApprox(
+          Eigen::Vector2d(motion.dx_cells * .1, motion.dy_cells * .1), 1e-12));
+      has_forward = has_forward || motion.type == navigation2d::planning_internal::MotionType::kForward;
+      has_reverse = has_reverse || motion.type == navigation2d::planning_internal::MotionType::kReverse;
+      has_rotate = has_rotate || motion.type == navigation2d::planning_internal::MotionType::kRotate;
+    }
+    assert(has_forward && has_reverse && has_rotate);
+  }
+
+  navigation2d::NavigationConfig lattice_config;
+  lattice_config.map_resolution = .1;
+  lattice_config.robot_radius = .12;
+  lattice_config.lattice_yaw_bins = 16;
+  lattice_config.lattice_primitive_length = .3;
+  lattice_config.lattice_max_planning_time = 1.;
+  navigation2d::StateLatticePlanner lattice(lattice_config);
+  const auto lattice_goal = navigation2d::MakePose2d(4., 3., M_PI_2);
+  const auto lattice_path = lattice.Plan(
+      map, navigation2d::MakePose2d(.8, .8, 0.), lattice_goal);
+  assert(lattice_path.size() > 3);
+  assert(std::abs(navigation2d::Yaw(lattice_path.back()) - M_PI_2) < 1e-12);
+  for (const auto& sample : lattice_path)
+    assert(field.CircleCollisionFree(navigation2d::X(sample), navigation2d::Y(sample),
+                                     lattice_config.robot_radius));
 
   const auto& grid = map.grid();
   const auto near_start = grid.ToCell(1.5, 2.3);

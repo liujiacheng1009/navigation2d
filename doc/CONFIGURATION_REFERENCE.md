@@ -7,7 +7,7 @@
 
 ## `selection`
 
-- `planner`：`dijkstra`、`astar`、`theta_star`。
+- `planner`：`dijkstra`、`astar`、`theta_star`、`state_lattice`。
 - `controller`：`rpp`、`dwa`、`mppi`、`mpc`（默认，优先 acados）。
 
 ## `map` 与 `costmap`
@@ -18,6 +18,13 @@
 - `obstacle_max_range`、`raytrace_max_range`：标障和清障射线范围。`raytrace_max_range` 必须不小于
   `obstacle_max_range`；激光的正无穷无回波会清除至该范围，但不会标记障碍。
 - `local_window_width`、`local_window_height`：局部滚动窗口尺寸。
+
+## `state_lattice`
+
+`yaw_bins` 是 SE(2) 朝向离散数；`primitive_length` 是长直线/圆弧原语的目标长度，生成器还会
+加入单栅格直线以保持完整连通性。`allow_reverse` 控制倒车原语，`reverse_penalty`、
+`rotation_cost` 和 `cost_penalty` 分别惩罚倒车、原地旋转和沿原语积分的 costmap 势场。
+`max_expansions` 与 `max_planning_time` 是硬资源预算；超限时明确失败，不返回半构造路径。
 
 ## `controller`
 

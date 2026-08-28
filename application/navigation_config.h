@@ -38,6 +38,14 @@ struct NavigationConfig {
   double recovery_linear_velocity = -.08;
   double recovery_angular_velocity = .4;
   double dynamic_obstacle_radius = .20;
+  int lattice_yaw_bins = 32;
+  double lattice_primitive_length = .15;
+  bool lattice_allow_reverse = true;
+  double lattice_reverse_penalty = 1.5;
+  double lattice_rotation_cost = .12;
+  double lattice_cost_penalty = 2.;
+  int lattice_max_expansions = 500000;
+  double lattice_max_planning_time = .25;
   double goal_xy_tolerance = .05;
   double goal_yaw_tolerance = .05;
   double dwa_horizon = 1.5;

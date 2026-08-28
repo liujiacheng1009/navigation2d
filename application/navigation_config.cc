@@ -29,7 +29,7 @@ void ExactKeys(const YAML::Node& node, std::initializer_list<const char*> expect
 
 NavigationConfig NavigationConfig::Load(const std::string& filename) {
   const YAML::Node root = YAML::LoadFile(filename);
-  ExactKeys(root, {"selection", "map", "costmap", "controller", "dwa", "mppi", "mpc",
+  ExactKeys(root, {"selection", "map", "costmap", "state_lattice", "controller", "dwa", "mppi", "mpc",
                    "safety", "scheduler", "recovery"}, "root");
   NavigationConfig c;
   const auto selection = root["selection"];
@@ -49,6 +49,18 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
   c.raytrace_max_range = Number(costmap, "raytrace_max_range");
   c.local_window_width = Number(costmap, "local_window_width");
   c.local_window_height = Number(costmap, "local_window_height");
+  const auto lattice = root["state_lattice"];
+  ExactKeys(lattice, {"yaw_bins", "primitive_length", "allow_reverse", "reverse_penalty",
+                      "rotation_cost", "cost_penalty", "max_expansions", "max_planning_time"},
+            "state_lattice");
+  c.lattice_yaw_bins = lattice["yaw_bins"].as<int>();
+  c.lattice_primitive_length = Number(lattice, "primitive_length");
+  c.lattice_allow_reverse = lattice["allow_reverse"].as<bool>();
+  c.lattice_reverse_penalty = Number(lattice, "reverse_penalty");
+  c.lattice_rotation_cost = Number(lattice, "rotation_cost");
+  c.lattice_cost_penalty = Number(lattice, "cost_penalty");
+  c.lattice_max_expansions = lattice["max_expansions"].as<int>();
+  c.lattice_max_planning_time = Number(lattice, "max_planning_time");
   const auto controller = root["controller"];
   ExactKeys(controller, {"desired_linear_velocity", "lookahead_time",
                           "min_lookahead_distance", "max_lookahead_distance",
@@ -136,13 +148,18 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
   c.recovery_linear_velocity = Number(recovery, "linear_velocity");
   c.recovery_angular_velocity = Number(recovery, "angular_velocity");
   c.dynamic_obstacle_radius = Number(recovery, "dynamic_obstacle_radius");
-  if ((c.planner != "dijkstra" && c.planner != "astar" && c.planner != "theta_star") ||
+  if ((c.planner != "dijkstra" && c.planner != "astar" && c.planner != "theta_star" &&
+       c.planner != "state_lattice") ||
       (c.controller != "rpp" && c.controller != "dwa" && c.controller != "mppi" && c.controller != "mpc"))
     throw std::runtime_error("unknown planner or controller selection");
   if (c.map_resolution <= 0. || c.robot_radius <= 0. || c.inflation_radius < c.robot_radius ||
       c.inflation_cost_scaling <= 0. || c.obstacle_max_range <= 0. ||
       c.raytrace_max_range < c.obstacle_max_range || c.local_window_width <= 0. ||
       c.local_window_height <= 0. ||
+      c.lattice_yaw_bins < 8 || c.lattice_yaw_bins % 2 != 0 ||
+      c.lattice_primitive_length < c.map_resolution || c.lattice_reverse_penalty < 1. ||
+      c.lattice_rotation_cost <= 0. || c.lattice_cost_penalty < 0. ||
+      c.lattice_max_expansions < 1 || c.lattice_max_planning_time <= 0. ||
       c.control_period <= 0. || c.global_replan_period < c.control_period ||
       c.mppi_time_steps < 2 || c.mppi_batch_size < 2 || c.mppi_iterations < 1 ||
       c.mppi_temperature <= 0. || c.mppi_vx_std <= 0. || c.mppi_wz_std <= 0. ||

@@ -25,11 +25,13 @@ localization2d 的子图统一使用 0.03 m 分辨率。
 滚动局部窗口。全局路径按代价重规划，RPP 控制器执行曲率/障碍代价调速、加速度约束和
 前向碰撞预测；调度器负责周期重规划、预测停车、进度检测以及倒车/旋转恢复。
 
-`selection.planner` 可选 `dijkstra`、`astar`、`theta_star`；
+`selection.planner` 可选 `dijkstra`、`astar`、`theta_star`、`state_lattice`；
 `selection.controller` 可选 `rpp`、`dwa`、`mppi`、`mpc`（默认，优先 acados）。Dijkstra 适合作为稳定基线，A* 减少搜索，
 Theta* 生成带安全净空的任意角路径；RPP 和 DWA 适合低算力平台，MPPI 对整段随机控制序列进行
 差速模型 rollout，并用约束、路径、目标、航向、障碍和控制平滑成本优化局部轨迹。`mpc` 提供
 MPCC 风格路径轮廓控制、曲率限速、静态 footprint 约束及带协方差膨胀的动态障碍预测约束。
+`state_lattice` 在 `(x,y,yaw)` 上使用差速运动原语搜索，支持圆弧、原地旋转和可选倒车，并对
+每条原语执行 swept-footprint 碰撞检查。
 
 产品入口是 `application/navigation_system.h`：调用方通过 `SetGoal()` 设置目标，通过
 `UpdateLaserScan()` 输入真实 2D 激光，或通过 `UpdatePointCloud()` 输入雷达坐标系下的

@@ -12,6 +12,15 @@ costmap:
   raytrace_max_range: 5.5
   local_window_width: 3.0
   local_window_height: 3.0
+state_lattice:
+  yaw_bins: 32
+  primitive_length: 0.15
+  allow_reverse: true
+  reverse_penalty: 1.5
+  rotation_cost: 0.12
+  cost_penalty: 2.0
+  max_expansions: 500000
+  max_planning_time: 0.25
 controller:
   desired_linear_velocity: 0.24
   lookahead_time: 1.5
