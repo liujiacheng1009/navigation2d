@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "navigation2d/planning/astar_planner.h"
+#include "navigation2d/planning/collision_checker.h"
 #include "navigation2d/planning/grid_search.h"
 #include "navigation2d/planning/search_core.h"
 
@@ -40,6 +41,20 @@ int main() {
   map.MarkObstacle(2., 2.);
   assert(!map.lethal(2.26, 2.05, 0.));
   assert(map.lethal(2.26, 2.05, .22));
+  const navigation2d::planning_internal::DistanceField field(map);
+  assert(field.distance(2., 2.) == 0.);
+  assert(std::abs(field.distance(2.5, 2.) - .5) < .11);
+  assert(!field.CircleCollisionFree(2.26, 2.05, .22));
+  assert(field.CircleCollisionFree(3., 3., .22));
+
+  const std::vector<Eigen::Vector2d> rectangle{
+      {-.30, -.12}, {.30, -.12}, {.30, .12}, {-.30, .12}};
+  const navigation2d::planning_internal::FootprintLookup footprint(rectangle, 16, .1);
+  assert(footprint.CollisionFree(map, navigation2d::MakePose2d(3., 3., 0.)));
+  assert(!footprint.CollisionFree(map, navigation2d::MakePose2d(2.25, 2., 0.)));
+  assert(!footprint.SweptCollisionFree(map, {
+      navigation2d::MakePose2d(3., 3., 0.),
+      navigation2d::MakePose2d(2.25, 2., 0.)}));
 
   const auto& grid = map.grid();
   const auto near_start = grid.ToCell(1.5, 2.3);

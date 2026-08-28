@@ -10,7 +10,7 @@
    costmap 代价积分；输出路径中间点使用路径切线 yaw，同时保留目标 yaw。
 2. **通用搜索内核（已完成）**：搜索队列、节点存储、邻接扩展和路径恢复解耦；同一内核可承载 2D、SE(2)
    和增量节点；提供确定性 tie-break、节点/时间预算及诊断指标。
-3. **Distance field 与 footprint lookup**：静态和动态致命栅格生成欧氏距离场；圆形 footprint
+3. **Distance field 与 footprint lookup（已完成）**：静态和动态致命栅格生成欧氏距离场；圆形 footprint
    O(1) 查询；多边形 footprint 按 yaw bin 预栅格化并支持 swept-volume 查询。
 4. **差速 State Lattice**：生成直行、圆弧、原地旋转及可选倒车原语；离散终点闭合；每条原语
    保存长度、曲率、方向切换和 footprint 采样。
