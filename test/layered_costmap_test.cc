@@ -1,5 +1,6 @@
 #include <cassert>
 #include <fstream>
+#include <limits>
 #include "navigation2d/costmap/layered_costmap.h"
 
 int main() {
@@ -19,6 +20,16 @@ int main() {
   navigation2d::PointCloud2d cloud{2.0, {{0.5, 0.0}}};
   map.UpdateObstacleLayer(navigation2d::MakePose2d(1.0, 1.0, 0.0), cloud);
   assert(map.cost(15, 10) == navigation2d::kLethal);
+  // No-return laser beams must clear all observed cells, including the endpoint;
+  // otherwise a previously observed dynamic obstacle becomes a persistent ghost.
+  navigation2d::NavigationConfig raytrace_config;
+  raytrace_config.raytrace_max_range = 1.0;
+  navigation2d::LayeredCostmap raytrace_map(navigation2d::Grid2d::Load(path), raytrace_config);
+  raytrace_map.MarkObstacle(1.5, 1.0);
+  navigation2d::LaserScan no_return_scan{0., 1., .05, 1.,
+      {std::numeric_limits<double>::infinity()}};
+  raytrace_map.UpdateObstacleLayer(navigation2d::MakePose2d(.5, 1., 0.), no_return_scan);
+  assert(raytrace_map.cost(15, 10) == navigation2d::kFree);
   int width, height, x, y;
   const auto window = map.RollingWindow(navigation2d::MakePose2d(1., 1., 0.),
                                         &width, &height, &x, &y);

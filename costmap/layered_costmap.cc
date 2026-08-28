@@ -33,7 +33,15 @@ bool LayeredCostmap::Raytrace(double x0, double y0, double x1, double y1, bool m
   int error = dx + dy;
   bool changed = false;
   while (true) {
-    if (x == tx && y == ty) break;
+    if (x == tx && y == ty) {
+      if (!mark_endpoint && x >= 0 && y >= 0 && x < static_map_.width() &&
+          y < static_map_.height()) {
+        auto& value = obstacles_[y * static_map_.width() + x];
+        changed = changed || value != kFree;
+        value = kFree;
+      }
+      break;
+    }
     if (x >= 0 && y >= 0 && x < static_map_.width() && y < static_map_.height()) {
       auto& value = obstacles_[y * static_map_.width() + x];
       changed = changed || value != kFree; value = kFree;
@@ -53,9 +61,14 @@ void LayeredCostmap::UpdateObstacleLayer(const Pose2d& pose, const LaserScan& sc
   bool changed = false;
   for (std::size_t i = 0; i < scan.ranges.size(); ++i) {
     const double measured = scan.ranges[i];
-    if (!std::isfinite(measured) || measured < scan.range_min) continue;
-    const bool hit = measured <= std::min(scan.range_max, config_.obstacle_max_range);
-    const double range = std::min(measured, config_.raytrace_max_range);
+    if (std::isnan(measured) || measured < scan.range_min || measured < 0.) continue;
+    // A positive infinity is a valid no-return measurement: it clears known free
+    // space out to the configured raytrace limit, but never marks an obstacle.
+    const bool finite_return = std::isfinite(measured);
+    const bool hit = finite_return &&
+        measured <= std::min(scan.range_max, config_.obstacle_max_range);
+    const double range = finite_return ? std::min(measured, config_.raytrace_max_range)
+                                       : config_.raytrace_max_range;
     const double angle = Yaw(pose) + scan.angle_min + i * scan.angle_increment;
     changed = Raytrace(X(pose), Y(pose), X(pose) + range * std::cos(angle),
                        Y(pose) + range * std::sin(angle), hit) || changed;

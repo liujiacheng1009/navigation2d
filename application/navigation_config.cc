@@ -123,6 +123,9 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
       (c.controller != "rpp" && c.controller != "dwa" && c.controller != "mppi"))
     throw std::runtime_error("unknown planner or controller selection");
   if (c.map_resolution <= 0. || c.robot_radius <= 0. || c.inflation_radius < c.robot_radius ||
+      c.inflation_cost_scaling <= 0. || c.obstacle_max_range <= 0. ||
+      c.raytrace_max_range < c.obstacle_max_range || c.local_window_width <= 0. ||
+      c.local_window_height <= 0. ||
       c.control_period <= 0. || c.global_replan_period < c.control_period ||
       c.mppi_time_steps < 2 || c.mppi_batch_size < 2 || c.mppi_iterations < 1 ||
       c.mppi_temperature <= 0. || c.mppi_vx_std <= 0. || c.mppi_wz_std <= 0. ||
