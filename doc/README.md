@@ -9,6 +9,7 @@
 - [系统架构](ARCHITECTURE.md)：产品数据流、所有权、调度与故障边界。
 - [MPPI 控制器](MPPI_CONTROLLER.md)：开源来源、算法步骤、critics 与性能边界。
 - [约束 MPC / MPCC 控制器](MPC_CONTROLLER.md)：轮廓控制、曲率约束、动态预测与后端边界。
+- [全局规划器升级路线图](GLOBAL_PLANNER_ROADMAP.md)：State Lattice、anytime、增量修复与发布门槛。
 - [模块索引](MODULES.md)：目录、类和职责的对应关系。
 - [C++ API](API_REFERENCE.md)：产品入口和稳定值类型。
 - [配置参考](CONFIGURATION_REFERENCE.md)：严格 YAML schema 与调参顺序。

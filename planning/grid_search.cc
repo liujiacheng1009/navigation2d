@@ -22,19 +22,27 @@ constexpr std::array<std::array<int, 2>, 8> kDirections{{
 
 bool HasLineOfSight(const LayeredCostmap& costmap, int from, int to,
                     double clearance) {
+  return SegmentTraversalCost(costmap, from, to, clearance).has_value();
+}
+
+std::optional<double> SegmentTraversalCost(const LayeredCostmap& costmap, int from, int to,
+                                           double clearance) {
   const Grid2d& grid = costmap.grid();
   const int x0 = from % grid.width(), y0 = from / grid.width();
   const int x1 = to % grid.width(), y1 = to / grid.width();
-  const int samples = std::max(
-      1, static_cast<int>(std::ceil(std::hypot(x1 - x0, y1 - y0) * 2.)));
+  const double length_cells = std::hypot(x1 - x0, y1 - y0);
+  const int samples = std::max(1, static_cast<int>(std::ceil(length_cells * 2.)));
+  double accumulated = 0.;
   for (int sample = 1; sample <= samples; ++sample) {
     const double ratio = static_cast<double>(sample) / samples;
     const int x = static_cast<int>(std::lround(x0 + ratio * (x1 - x0)));
     const int y = static_cast<int>(std::lround(y0 + ratio * (y1 - y0)));
     const auto [wx, wy] = grid.CellCenter(x, y);
-    if (costmap.lethal(wx, wy, clearance) || costmap.cost(x, y) > 128) return false;
+    if (costmap.lethal(wx, wy, clearance)) return std::nullopt;
+    const double normalized_cost = static_cast<double>(costmap.cost(x, y)) / 252.;
+    accumulated += (length_cells / samples) * (1. + normalized_cost);
   }
-  return true;
+  return accumulated;
 }
 
 Path GridSearch(const LayeredCostmap& costmap, const Pose2d& start,
@@ -93,7 +101,20 @@ Path GridSearch(const LayeredCostmap& costmap, const Pose2d& start,
   }
   reversed.push_back(start);
   std::reverse(reversed.begin(), reversed.end());
+  AssignPathOrientations(&reversed);
   return reversed;
+}
+
+void AssignPathOrientations(Path* path) {
+  if (path == nullptr || path->size() < 2) return;
+  const double goal_yaw = Yaw(path->back());
+  for (std::size_t index = 0; index + 1 < path->size(); ++index) {
+    const auto delta = (*path)[index + 1].translation() - (*path)[index].translation();
+    const double yaw = delta.norm() > 1e-9 ? std::atan2(delta.y(), delta.x())
+                                           : (index == 0 ? Yaw((*path)[index]) : Yaw((*path)[index - 1]));
+    (*path)[index] = MakePose2d(X((*path)[index]), Y((*path)[index]), yaw);
+  }
+  path->back() = MakePose2d(X(path->back()), Y(path->back()), goal_yaw);
 }
 
 Path DensifyPath(const Path& path, double spacing) {
@@ -110,6 +131,7 @@ Path DensifyPath(const Path& path, double spacing) {
     }
   }
   dense.back() = MakePose2d(X(dense.back()), Y(dense.back()), Yaw(path.back()));
+  AssignPathOrientations(&dense);
   return dense;
 }
 

@@ -114,10 +114,23 @@ std::uint8_t LayeredCostmap::cost(int x, int y) const {
 }
 
 bool LayeredCostmap::lethal(double x, double y, double radius) const {
-  (void)radius;
   const auto [cx, cy] = static_map_.ToCell(x, y);
-  // Inflation has already converted footprint clearance into centre-cell cost.
-  return cost(cx, cy) >= kInscribed;
+  if (cx < 0 || cy < 0 || cx >= static_map_.width() || cy >= static_map_.height()) return true;
+  const double resolution = static_map_.resolution();
+  const int cells = static_cast<int>(std::ceil(
+      (std::max(0., radius) + std::sqrt(.5) * resolution) / resolution));
+  for (int dy = -cells; dy <= cells; ++dy) for (int dx = -cells; dx <= cells; ++dx) {
+    const int obstacle_x = cx + dx, obstacle_y = cy + dy;
+    if (obstacle_x < 0 || obstacle_y < 0 || obstacle_x >= static_map_.width() ||
+        obstacle_y >= static_map_.height()) return true;
+    if (cost(obstacle_x, obstacle_y) != kLethal) continue;
+    const auto [wx, wy] = static_map_.CellCenter(obstacle_x, obstacle_y);
+    const double half = .5 * resolution;
+    const double nearest_x = std::max(std::abs(x - wx) - half, 0.);
+    const double nearest_y = std::max(std::abs(y - wy) - half, 0.);
+    if (std::hypot(nearest_x, nearest_y) <= std::max(0., radius)) return true;
+  }
+  return false;
 }
 
 std::vector<std::uint8_t> LayeredCostmap::RollingWindow(const Pose2d& pose, int* width, int* height,

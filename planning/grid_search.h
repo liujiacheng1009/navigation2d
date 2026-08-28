@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 
 #include "navigation2d/planning/global_planner.h"
 
@@ -15,6 +16,9 @@ Path GridSearch(const LayeredCostmap& costmap, const Pose2d& start,
                 const ParentRelaxation& relax_parent = {});
 bool HasLineOfSight(const LayeredCostmap& costmap, int from, int to,
                     double clearance);
+std::optional<double> SegmentTraversalCost(const LayeredCostmap& costmap,
+                                           int from, int to, double clearance);
 Path DensifyPath(const Path& path, double spacing);
+void AssignPathOrientations(Path* path);
 
 }  // namespace navigation2d::planning_internal

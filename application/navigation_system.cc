@@ -32,7 +32,7 @@ class NavigationSystem::Impl {
  public:
   Impl(NavigationConfig value, const std::string& map_path)
       : config(std::move(value)), costmap(Grid2d::Load(map_path), config),
-        planner(MakeGlobalPlanner(config.planner, 0.)), controller(MakeController(config)) {
+        planner(MakeGlobalPlanner(config.planner, config.robot_radius)), controller(MakeController(config)) {
     if (std::abs(costmap.grid().resolution() - config.map_resolution) > 1e-9)
       throw std::runtime_error("map resolution does not match navigation configuration");
   }
