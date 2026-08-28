@@ -1,7 +1,7 @@
 # Navigation2D
 
 面向差速扫地机器人的纯 C++ 2D 导航核心。该仓库保留 Nav2 方案中当前产品需要的
-占用栅格、Dijkstra/A*/Theta* 全局规划和 RPP/DWA/MPPI 局部控制，不依赖 ROS、DDS、
+占用栅格、Dijkstra/A*/Theta* 全局规划和 RPP/DWA/MPPI/约束 MPC 局部控制，不依赖 ROS、DDS、
 pluginlib、生命周期节点、action 或行为树。
 
 ## 结构
@@ -26,9 +26,10 @@ localization2d 的子图统一使用 0.03 m 分辨率。
 前向碰撞预测；调度器负责周期重规划、预测停车、进度检测以及倒车/旋转恢复。
 
 `selection.planner` 可选 `dijkstra`、`astar`、`theta_star`；
-`selection.controller` 可选 `rpp`、`dwa`、`mppi`。Dijkstra 适合作为稳定基线，A* 减少搜索，
+`selection.controller` 可选 `rpp`、`dwa`、`mppi`、`mpc`（默认，优先 acados）。Dijkstra 适合作为稳定基线，A* 减少搜索，
 Theta* 生成带安全净空的任意角路径；RPP 和 DWA 适合低算力平台，MPPI 对整段随机控制序列进行
-差速模型 rollout，并用约束、路径、目标、航向、障碍和控制平滑成本优化局部轨迹。
+差速模型 rollout，并用约束、路径、目标、航向、障碍和控制平滑成本优化局部轨迹。`mpc` 提供
+MPCC 风格路径轮廓控制、曲率限速、静态 footprint 约束及带协方差膨胀的动态障碍预测约束。
 
 产品入口是 `application/navigation_system.h`：调用方通过 `SetGoal()` 设置目标，通过
 `UpdateLaserScan()` 输入真实 2D 激光，或通过 `UpdatePointCloud()` 输入雷达坐标系下的
