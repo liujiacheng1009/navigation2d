@@ -64,6 +64,19 @@ struct NavigationConfig {
   double mppi_path_angle_weight = 2.;
   double mppi_prefer_forward_weight = 5.;
   double mppi_smoothness_weight = 1.;
+  int mpc_time_steps = 20;
+  std::string mpc_solver = "shooting";
+  int mpc_beam_width = 36;
+  double mpc_contour_weight = 12.;
+  double mpc_heading_weight = 3.;
+  double mpc_speed_weight = 1.;
+  double mpc_control_weight = .08;
+  double mpc_control_rate_weight = .04;
+  double mpc_obstacle_weight = 4.;
+  double mpc_progress_weight = 2.;
+  double mpc_max_lateral_acceleration = .45;
+  double mpc_dynamic_safety_margin = .08;
+  double mpc_dynamic_sigma_scale = 2.;
 };
 
 }  // namespace navigation2d

@@ -52,7 +52,9 @@ MppiController::MppiController(NavigationConfig config)
       random_(config_.mppi_seed) {}
 
 Twist2d MppiController::Compute(const Path& path, const Pose2d& pose, Twist2d current,
-                                const LayeredCostmap& costmap) const {
+                                const LayeredCostmap& costmap,
+                                const std::vector<PredictedObstacle>& dynamic_obstacles) const {
+  (void)dynamic_obstacles;
   if (path.empty()) return {};
   const int batch = config_.mppi_batch_size;
   const int steps = config_.mppi_time_steps;

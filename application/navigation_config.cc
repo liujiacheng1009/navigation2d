@@ -29,7 +29,7 @@ void ExactKeys(const YAML::Node& node, std::initializer_list<const char*> expect
 
 NavigationConfig NavigationConfig::Load(const std::string& filename) {
   const YAML::Node root = YAML::LoadFile(filename);
-  ExactKeys(root, {"selection", "map", "costmap", "controller", "dwa", "mppi",
+  ExactKeys(root, {"selection", "map", "costmap", "controller", "dwa", "mppi", "mpc",
                    "safety", "scheduler", "recovery"}, "root");
   NavigationConfig c;
   const auto selection = root["selection"];
@@ -101,6 +101,23 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
   c.mppi_path_angle_weight = Number(mppi, "path_angle_weight");
   c.mppi_prefer_forward_weight = Number(mppi, "prefer_forward_weight");
   c.mppi_smoothness_weight = Number(mppi, "smoothness_weight");
+  const auto mpc = root["mpc"];
+  ExactKeys(mpc, {"solver", "time_steps", "beam_width", "contour_weight", "heading_weight", "speed_weight",
+                  "control_weight", "control_rate_weight", "obstacle_weight", "progress_weight",
+                  "max_lateral_acceleration", "dynamic_safety_margin", "dynamic_sigma_scale"}, "mpc");
+  c.mpc_solver = mpc["solver"].as<std::string>();
+  c.mpc_time_steps = mpc["time_steps"].as<int>();
+  c.mpc_beam_width = mpc["beam_width"].as<int>();
+  c.mpc_contour_weight = Number(mpc, "contour_weight");
+  c.mpc_heading_weight = Number(mpc, "heading_weight");
+  c.mpc_speed_weight = Number(mpc, "speed_weight");
+  c.mpc_control_weight = Number(mpc, "control_weight");
+  c.mpc_control_rate_weight = Number(mpc, "control_rate_weight");
+  c.mpc_obstacle_weight = Number(mpc, "obstacle_weight");
+  c.mpc_progress_weight = Number(mpc, "progress_weight");
+  c.mpc_max_lateral_acceleration = Number(mpc, "max_lateral_acceleration");
+  c.mpc_dynamic_safety_margin = Number(mpc, "dynamic_safety_margin");
+  c.mpc_dynamic_sigma_scale = Number(mpc, "dynamic_sigma_scale");
   const auto safety = root["safety"];
   ExactKeys(safety, {"collision_horizon", "max_navigation_duration", "goal_xy_tolerance", "goal_yaw_tolerance"}, "safety");
   c.collision_horizon = Number(safety, "collision_horizon");
@@ -120,7 +137,7 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
   c.recovery_angular_velocity = Number(recovery, "angular_velocity");
   c.dynamic_obstacle_radius = Number(recovery, "dynamic_obstacle_radius");
   if ((c.planner != "dijkstra" && c.planner != "astar" && c.planner != "theta_star") ||
-      (c.controller != "rpp" && c.controller != "dwa" && c.controller != "mppi"))
+      (c.controller != "rpp" && c.controller != "dwa" && c.controller != "mppi" && c.controller != "mpc"))
     throw std::runtime_error("unknown planner or controller selection");
   if (c.map_resolution <= 0. || c.robot_radius <= 0. || c.inflation_radius < c.robot_radius ||
       c.inflation_cost_scaling <= 0. || c.obstacle_max_range <= 0. ||
@@ -129,6 +146,12 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
       c.control_period <= 0. || c.global_replan_period < c.control_period ||
       c.mppi_time_steps < 2 || c.mppi_batch_size < 2 || c.mppi_iterations < 1 ||
       c.mppi_temperature <= 0. || c.mppi_vx_std <= 0. || c.mppi_wz_std <= 0. ||
+      (c.mpc_solver != "shooting" && c.mpc_solver != "acados") ||
+      c.mpc_time_steps < 2 || c.mpc_beam_width < 3 || c.mpc_contour_weight < 0. ||
+      c.mpc_heading_weight < 0. || c.mpc_speed_weight < 0. || c.mpc_control_weight < 0. ||
+      c.mpc_control_rate_weight < 0. || c.mpc_obstacle_weight < 0. ||
+      c.mpc_progress_weight < 0. || c.mpc_max_lateral_acceleration <= 0. ||
+      c.mpc_dynamic_safety_margin < 0. || c.mpc_dynamic_sigma_scale < 0. ||
       c.dwa_horizon <= 0. || c.dwa_linear_samples < 1 || c.dwa_angular_samples < 1)
     throw std::runtime_error("invalid navigation configuration bounds");
   return c;

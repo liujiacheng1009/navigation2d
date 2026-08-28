@@ -15,7 +15,9 @@ Pose2d Step(const Pose2d& pose, Twist2d velocity, double dt) {
 }  // namespace
 
 Twist2d DwaController::Compute(const Path& path, const Pose2d& pose, Twist2d current,
-                               const LayeredCostmap& costmap) const {
+                               const LayeredCostmap& costmap,
+                               const std::vector<PredictedObstacle>& dynamic_obstacles) const {
+  (void)dynamic_obstacles;
   Twist2d best{};
   double best_score = std::numeric_limits<double>::infinity();
   const double min_v = std::max(0., current.linear -

@@ -10,14 +10,16 @@ namespace {
 double Angle(double value) { return std::atan2(std::sin(value), std::cos(value)); }
 
 LaserScan SimulateScan(const Pose2d& pose, const std::vector<ObstacleEvent>& obstacles,
-                       const std::vector<bool>& active, const NavigationConfig& config) {
+                       const std::vector<bool>& active, double now, const NavigationConfig& config) {
   LaserScan scan{-M_PI, 2. * M_PI / 360., .05, config.raytrace_max_range,
                  std::vector<double>(360, config.raytrace_max_range)};
   for (std::size_t ray = 0; ray < scan.ranges.size(); ++ray) {
     const double angle = Yaw(pose) + scan.angle_min + ray * scan.angle_increment;
     const double ux = std::cos(angle), uy = std::sin(angle);
     for (std::size_t i = 0; i < obstacles.size(); ++i) if (active[i]) {
-      const double dx = obstacles[i].x - X(pose), dy = obstacles[i].y - Y(pose);
+      const double age = now - obstacles[i].appear_s;
+      const double dx = obstacles[i].x + obstacles[i].vx * age - X(pose);
+      const double dy = obstacles[i].y + obstacles[i].vy * age - Y(pose);
       const double projection = dx * ux + dy * uy;
       const double perpendicular2 = dx * dx + dy * dy - projection * projection;
       const double radius = config.dynamic_obstacle_radius;
@@ -46,9 +48,23 @@ RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, P
     for (std::size_t i = 0; i < obstacles.size(); ++i)
       active[i] = now >= obstacles[i].appear_s &&
           (obstacles[i].disappear_s < 0. || now < obstacles[i].disappear_s);
+    // The simulator is the tracker stand-in: it exports the same prediction
+    // contract that a production tracker supplies, while the runtime core
+    // itself never depends on simulation truth.
+    std::vector<PredictedObstacle> predictions;
+    for (std::size_t i = 0; i < obstacles.size(); ++i) if (active[i]) {
+      const double age = now - obstacles[i].appear_s;
+      predictions.push_back({obstacles[i].x + obstacles[i].vx * age,
+                             obstacles[i].y + obstacles[i].vy * age,
+                             obstacles[i].vx, obstacles[i].vy,
+                             config_.dynamic_obstacle_radius, .02, .02});
+    }
+    navigation.UpdateDynamicObstacles(std::move(predictions));
     if (step % 2 == 0)
-      navigation.UpdateLaserScan(pose, SimulateScan(pose, obstacles, active, config_));
+      navigation.UpdateLaserScan(pose, SimulateScan(pose, obstacles, active, now, config_));
     const NavigationState state = navigation.ComputeCommand(pose, velocity, now);
+    if (state.controller_solve_us > 0.)
+      result.controller_solve_samples_us.push_back(state.controller_solve_us);
     if (state.status == NavigationStatus::kSucceeded) {
       result.status = "SUCCEEDED"; result.replans = state.replans;
       result.emergency_stops = state.emergency_stops; result.recoveries = state.recoveries;
@@ -69,9 +85,12 @@ RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, P
                              Angle(next_yaw));
     }
     bool collision = truth.collides(X(candidate), Y(candidate), config_.robot_radius);
-    for (std::size_t i = 0; i < obstacles.size(); ++i) if (active[i])
-      collision = collision || std::hypot(X(candidate) - obstacles[i].x,
-          Y(candidate) - obstacles[i].y) <= config_.robot_radius + config_.dynamic_obstacle_radius;
+    for (std::size_t i = 0; i < obstacles.size(); ++i) if (active[i]) {
+      const double age = now - obstacles[i].appear_s;
+      collision = collision || std::hypot(X(candidate) - (obstacles[i].x + obstacles[i].vx * age),
+          Y(candidate) - (obstacles[i].y + obstacles[i].vy * age)) <=
+          config_.robot_radius + config_.dynamic_obstacle_radius;
+    }
     if (collision) { ++result.collisions; velocity = {}; }
     else { pose = candidate; velocity = command; }
     result.replans = state.replans; result.emergency_stops = state.emergency_stops;

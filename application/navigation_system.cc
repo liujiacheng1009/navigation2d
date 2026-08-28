@@ -1,6 +1,7 @@
 #include "navigation2d/application/navigation_system.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <optional>
 #include <stdexcept>
@@ -8,6 +9,8 @@
 #include "navigation2d/control/regulated_pure_pursuit.h"
 #include "navigation2d/control/dwa_controller.h"
 #include "navigation2d/control/mppi_controller.h"
+#include "navigation2d/control/mpc_controller.h"
+#include "navigation2d/control/dynamic_safety.h"
 #include "navigation2d/costmap/grid_2d.h"
 #include "navigation2d/costmap/layered_costmap.h"
 #include "navigation2d/planning/global_planner.h"
@@ -20,6 +23,7 @@ std::unique_ptr<LocalController> MakeController(const NavigationConfig& config) 
   if (config.controller == "rpp") return std::make_unique<RegulatedPurePursuit>(config);
   if (config.controller == "dwa") return std::make_unique<DwaController>(config);
   if (config.controller == "mppi") return std::make_unique<MppiController>(config);
+  if (config.controller == "mpc") return std::make_unique<MpcController>(config);
   throw std::runtime_error("unknown controller: " + config.controller);
 }
 }
@@ -60,6 +64,7 @@ class NavigationSystem::Impl {
   Pose2d last_progress_pose;
   bool progress_initialized = false;
   int recovery_steps_remaining = 0;
+  std::vector<PredictedObstacle> dynamic_obstacles;
 };
 
 NavigationSystem::NavigationSystem(NavigationConfig config, const std::string& map_path)
@@ -91,8 +96,13 @@ void NavigationSystem::UpdatePointCloud(const Pose2d& sensor_pose, const PointCl
   impl_->observation_changed = impl_->observation_changed || before != impl_->costmap.digest();
 }
 
+void NavigationSystem::UpdateDynamicObstacles(std::vector<PredictedObstacle> obstacles) {
+  impl_->dynamic_obstacles = std::move(obstacles);
+}
+
 NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d measured_velocity,
                                                  double timestamp) {
+  impl_->state.controller_solve_us = 0.;
   if (!impl_->goal) { impl_->state.command = {}; impl_->state.status = NavigationStatus::kIdle; return impl_->state; }
   if (!impl_->progress_initialized) {
     impl_->last_progress_pose = pose; impl_->last_progress_time = timestamp;
@@ -135,7 +145,13 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
       command = {0., impl_->config.recovery_angular_velocity};
     --impl_->recovery_steps_remaining;
   } else {
-    command = impl_->controller->Compute(impl_->path, pose, measured_velocity, impl_->costmap);
+    const auto solve_started = std::chrono::steady_clock::now();
+    command = impl_->controller->Compute(impl_->path, pose, measured_velocity, impl_->costmap,
+                                         impl_->dynamic_obstacles);
+    impl_->state.controller_solve_us = std::chrono::duration<double, std::micro>(
+        std::chrono::steady_clock::now() - solve_started).count();
+    if (DynamicCollisionImminent(pose, command, impl_->dynamic_obstacles, impl_->config))
+      command = {};
   }
   if (command.linear == 0. && command.angular == 0. &&
       (measured_velocity.linear != 0. || measured_velocity.angular != 0.))

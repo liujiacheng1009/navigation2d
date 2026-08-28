@@ -10,7 +10,8 @@ class RegulatedPurePursuit final : public LocalController {
  public:
   explicit RegulatedPurePursuit(NavigationConfig config) : config_(config) {}
   Twist2d Compute(const Path& path, const Pose2d& pose, Twist2d current,
-                   const LayeredCostmap& costmap) const override;
+                  const LayeredCostmap& costmap,
+                  const std::vector<PredictedObstacle>& dynamic_obstacles = {}) const override;
   bool CollisionImminent(const Pose2d& pose, Twist2d command,
                          const LayeredCostmap& costmap) const override;
 

@@ -7,7 +7,9 @@ namespace navigation2d {
 namespace { double Angle(double a) { return std::atan2(std::sin(a), std::cos(a)); } }
 
 Twist2d RegulatedPurePursuit::Compute(const Path& path, const Pose2d& pose, Twist2d current,
-                                       const LayeredCostmap& costmap) const {
+                                       const LayeredCostmap& costmap,
+                                       const std::vector<PredictedObstacle>& dynamic_obstacles) const {
+  (void)dynamic_obstacles;
   size_t nearest = 0;
   double nearest_distance = 1e30;
   for (size_t i = 0; i < path.size(); ++i) {

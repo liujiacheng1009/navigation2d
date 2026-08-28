@@ -15,7 +15,8 @@ class MppiController final : public LocalController {
  public:
   explicit MppiController(NavigationConfig config);
   Twist2d Compute(const Path& path, const Pose2d& pose, Twist2d current,
-                  const LayeredCostmap& costmap) const override;
+                  const LayeredCostmap& costmap,
+                  const std::vector<PredictedObstacle>& dynamic_obstacles = {}) const override;
   bool CollisionImminent(const Pose2d& pose, Twist2d command,
                          const LayeredCostmap& costmap) const override;
 

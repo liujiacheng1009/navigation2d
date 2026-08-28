@@ -1,7 +1,7 @@
 # Fully expanded deterministic configuration. Unknown or missing keys are fatal.
 selection:
   planner: dijkstra
-  controller: rpp
+  controller: mpc
 map:
   resolution: 0.03
 costmap:
@@ -52,6 +52,20 @@ mppi:
   path_angle_weight: 2.0
   prefer_forward_weight: 5.0
   smoothness_weight: 1.0
+mpc:
+  solver: acados
+  time_steps: 20
+  beam_width: 36
+  contour_weight: 12.0
+  heading_weight: 3.0
+  speed_weight: 1.0
+  control_weight: 0.08
+  control_rate_weight: 0.04
+  obstacle_weight: 4.0
+  progress_weight: 2.0
+  max_lateral_acceleration: 0.45
+  dynamic_safety_margin: 0.08
+  dynamic_sigma_scale: 2.0
 safety:
   collision_horizon: 1.0
   max_navigation_duration: 60.0
