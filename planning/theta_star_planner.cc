@@ -12,15 +12,8 @@ Path ThetaStarPlanner::Plan(const LayeredCostmap& costmap, const Pose2d& start,
   Path path = planning_internal::GridSearch(
       costmap, start, goal, clearance_,
       [](int x, int y, int gx, int gy) { return std::hypot(gx - x, gy - y); },
-      [this](const LayeredCostmap& map, int parent, int next, int,
-                    double parent_distance, double, int* predecessor,
-                    double* candidate) {
-        const auto segment_cost = planning_internal::SegmentTraversalCost(
-            map, parent, next, clearance_);
-        if (!segment_cost) return false;
-        *predecessor = parent;
-        *candidate = parent_distance + *segment_cost;
-        return true;
+      [this](const LayeredCostmap& map, int parent, int next) {
+        return planning_internal::SegmentTraversalCost(map, parent, next, clearance_);
       });
   return planning_internal::DensifyPath(path, 2. * grid.resolution());
 }

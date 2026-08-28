@@ -8,7 +8,7 @@
 
 1. **搜索基线修正（已完成）**：footprint clearance 必须参与几何碰撞检查；Theta* 捷径对整段
    costmap 代价积分；输出路径中间点使用路径切线 yaw，同时保留目标 yaw。
-2. **通用搜索内核**：搜索队列、节点存储、邻接扩展和路径恢复解耦；同一内核可承载 2D、SE(2)
+2. **通用搜索内核（已完成）**：搜索队列、节点存储、邻接扩展和路径恢复解耦；同一内核可承载 2D、SE(2)
    和增量节点；提供确定性 tie-break、节点/时间预算及诊断指标。
 3. **Distance field 与 footprint lookup**：静态和动态致命栅格生成欧氏距离场；圆形 footprint
    O(1) 查询；多边形 footprint 按 yaw bin 预栅格化并支持 swept-volume 查询。

@@ -3,18 +3,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <limits>
-#include <queue>
 #include <stdexcept>
 #include <vector>
+#include "navigation2d/planning/search_core.h"
 
 namespace navigation2d::planning_internal {
 namespace {
-struct Entry {
-  double priority;
-  int cell;
-  bool operator>(const Entry& rhs) const { return priority > rhs.priority; }
-};
 constexpr std::array<std::array<int, 2>, 8> kDirections{{
     {{1, 0}}, {{-1, 0}}, {{0, 1}}, {{0, -1}},
     {{1, 1}}, {{1, -1}}, {{-1, 1}}, {{-1, -1}}}};
@@ -54,19 +48,15 @@ Path GridSearch(const LayeredCostmap& costmap, const Pose2d& start,
   if (costmap.lethal(X(start), Y(start), clearance) ||
       costmap.lethal(X(goal), Y(goal), clearance))
     throw std::runtime_error("start or goal is occupied");
-  const int size = grid.width() * grid.height();
   const int source = sy * grid.width() + sx, target = gy * grid.width() + gx;
-  std::vector<double> distance(size, std::numeric_limits<double>::infinity());
-  std::vector<int> parent(size, -1);
-  std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
-  distance[source] = 0.;
-  open.push({heuristic(sx, sy, gx, gy), source});
-  while (!open.empty()) {
-    const Entry current = open.top();
-    open.pop();
-    const int x = current.cell % grid.width(), y = current.cell / grid.width();
-    if (current.priority != distance[current.cell] + heuristic(x, y, gx, gy)) continue;
-    if (current.cell == target) break;
+  const auto result = BestFirstSearch(
+      grid.width() * grid.height(), source,
+      [target](int state) { return state == target; },
+      [&](int state) {
+        return heuristic(state % grid.width(), state / grid.width(), gx, gy);
+      },
+      [&](int current, int current_parent, const SuccessorVisitor& visit) {
+    const int x = current % grid.width(), y = current / grid.width();
     for (const auto& d : kDirections) {
       const int nx = x + d[0], ny = y + d[1];
       if (nx < 0 || ny < 0 || nx >= grid.width() || ny >= grid.height()) continue;
@@ -79,23 +69,24 @@ Path GridSearch(const LayeredCostmap& costmap, const Pose2d& start,
       }
       const int next = ny * grid.width() + nx;
       const double traversal = 1. + static_cast<double>(costmap.cost(nx, ny)) / 252.;
-      int predecessor = current.cell;
-      double candidate = distance[current.cell] +
-          (d[0] && d[1] ? std::sqrt(2.) : 1.) * traversal;
-      if (relax_parent && parent[current.cell] >= 0)
-        relax_parent(costmap, parent[current.cell], next, current.cell,
-                     distance[parent[current.cell]], traversal, &predecessor,
-                     &candidate);
-      if (candidate < distance[next]) {
-        distance[next] = candidate;
-        parent[next] = predecessor;
-        open.push({candidate + heuristic(nx, ny, gx, gy), next});
+      int predecessor = current;
+      double transition = (d[0] && d[1] ? std::sqrt(2.) : 1.) * traversal;
+      if (relax_parent && current_parent >= 0) {
+        const auto parent_transition = relax_parent(costmap, current_parent, next);
+        if (parent_transition) {
+          predecessor = current_parent;
+          transition = *parent_transition;
+        }
       }
+      visit({next, transition, predecessor});
     }
-  }
-  if (parent[target] < 0 && source != target) throw std::runtime_error("no path");
+  });
+  if (!result.found) throw std::runtime_error("no path");
+  const auto states = RestoreStatePath(result, source, target);
   Path reversed{goal};
-  for (int cell = target; cell != source; cell = parent[cell]) {
+  for (auto iterator = states.rbegin(); iterator != states.rend(); ++iterator) {
+    const int cell = *iterator;
+    if (cell == source) continue;
     const auto [x, y] = grid.CellCenter(cell % grid.width(), cell / grid.width());
     reversed.push_back(MakePose2d(x, y, 0.));
   }

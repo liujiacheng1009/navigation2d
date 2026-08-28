@@ -8,8 +8,8 @@
 namespace navigation2d::planning_internal {
 
 using Heuristic = std::function<double(int, int, int, int)>;
-using ParentRelaxation = std::function<bool(const LayeredCostmap&, int, int, int,
-                                            double, double, int*, double*)>;
+using ParentRelaxation = std::function<std::optional<double>(
+    const LayeredCostmap&, int, int)>;
 
 Path GridSearch(const LayeredCostmap& costmap, const Pose2d& start,
                 const Pose2d& goal, double clearance, const Heuristic& heuristic,

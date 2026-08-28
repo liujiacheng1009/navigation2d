@@ -1,11 +1,33 @@
 #include <cassert>
 #include <cmath>
 #include <fstream>
+#include <vector>
 
 #include "navigation2d/planning/astar_planner.h"
 #include "navigation2d/planning/grid_search.h"
+#include "navigation2d/planning/search_core.h"
 
 int main() {
+  using navigation2d::planning_internal::BestFirstSearch;
+  using navigation2d::planning_internal::RestoreStatePath;
+  using navigation2d::planning_internal::SearchOptions;
+  // The generic core is independent of grid geometry and deterministically
+  // chooses state 1 when two equal-cost branches are inserted in that order.
+  const auto graph = BestFirstSearch(
+      4, 0, [](int state) { return state == 3; }, [](int) { return 0.; },
+      [](int state, int, const auto& visit) {
+        if (state == 0) { visit({1, 1.}); visit({2, 1.}); }
+        if (state == 1 || state == 2) visit({3, 1.});
+      });
+  assert(graph.found);
+  assert((RestoreStatePath(graph, 0, 3) == std::vector<int>{0, 1, 3}));
+  SearchOptions limited;
+  limited.max_expansions = 1;
+  const auto truncated = BestFirstSearch(
+      4, 0, [](int state) { return state == 3; }, [](int) { return 0.; },
+      [](int state, int, const auto& visit) { if (state == 0) visit({1, 1.}); }, limited);
+  assert(!truncated.found && truncated.diagnostics.expansion_limit_reached);
+
   const char* map_path = "/tmp/navigation2d_global_planner_test.json";
   std::ofstream output(map_path);
   output << R"({"width":50,"height":40,"resolution":0.1,"cells":[)";
