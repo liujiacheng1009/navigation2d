@@ -21,7 +21,7 @@
 7. **增量修复（已完成）**：以目标反向的 D* Lite（LPA* 的增量重规划形式）复用相同目标下的
    `g/rhs/OPEN/km`，只更新 costmap 变化影响的运动原语源状态；地图
    大范围变化或缓存不一致时完整重建。
-8. **统一基准**：覆盖大地图、窄通道、死胡同、动态封路和圆形/多边形 footprint；比较成功率、
+8. **统一基准（已完成）**：覆盖大地图、窄通道、死胡同、动态封路和圆形/多边形 footprint；比较成功率、
    路径长度、最小净空、曲率、首解/最终 P50/P95/P99、展开节点、重规划复用率和峰值内存。
 
 ## 发布门槛
@@ -32,6 +32,10 @@
 - State Lattice 失败或资源超限时自动降级到 cost-aware 2D A*。
 - 新规划器进入默认配置前，统一基准成功率不得低于现有 A*，P95 规划时间必须满足产品预算。
 
+首轮发布矩阵中 State Lattice 为 5/5、A* 为 2/5、Theta* 为 3/5；因此 State Lattice 已设为
+默认。大地图单次样本峰值约 177 MiB、重规划 P95 约 296 ms，低算力产品仍应按自身预算复测，
+必要时显式选择 `astar`。
+
 ## 规划诊断
 
 benchmark JSON 输出 `global_plan_expansions`、`global_plan_generated`、
@@ -40,3 +44,16 @@ benchmark JSON 输出 `global_plan_expansions`、`global_plan_generated`、
 改善质量和重复重规划缓存收益。`global_plan_incremental_reuse`、
 `global_plan_repaired_states`、`global_plan_incremental_replans` 和
 `global_plan_repaired_states_total` 用于验证移动起点与地图变更时的增量修复范围。
+`global_plan_p50_us/P95/P99`、`global_plan_first_solution_p50_us/P95/P99`、
+`global_plan_expansions_total`、`path_min_clearance_m`、`path_max_curvature`、`peak_rss_kb` 和
+`global_plan_fallback_used` 构成发布基准指标。净空是按外接圆计算的保守值。
+
+统一比较命令为：
+
+```bash
+python3 tools/run_global_planner_benchmark.py --repetitions 3 --jobs 5
+```
+
+每个进程有 120 秒墙钟上限；超限作为该规划器在该场景的失败样本进入成功率，而不会挂死整套基准。
+地图 JSON 可用逐格 `cells`，也可用紧凑的 `rectangles: [[x0,y0,x1,y1,value], ...]` 描述
+`[x0,x1) × [y0,y1)` 障碍矩形。

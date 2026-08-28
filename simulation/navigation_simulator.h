@@ -33,6 +33,11 @@ struct RunResult {
   int obstacle_heuristic_cache_hits = 0;
   int incremental_replans = 0;
   std::size_t incremental_repaired_states = 0;
+  std::vector<double> global_plan_samples_s;
+  std::vector<double> global_plan_first_solution_samples_s;
+  std::size_t global_plan_expansions_total = 0;
+  double path_min_clearance_m = 0.;
+  double path_max_curvature = 0.;
   std::uint64_t costmap_digest = 0;
   std::vector<Pose2d> trajectory;
 };

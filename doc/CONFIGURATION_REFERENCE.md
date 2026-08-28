@@ -14,6 +14,9 @@
 
 - `resolution`：必须与输入地图一致，当前基线为 0.03 m。
 - `robot_radius`：圆形 footprint 半径。
+- `footprint`：机器人坐标系中的凸多边形顶点列表；空列表使用 `robot_radius`。State Lattice 会按
+  yaw bin 预计算占据格并对整条运动原语做 swept-volume 检查。多边形配置下 `robot_radius`
+  仍应设置为外接圆半径，供膨胀、动态障碍和保守诊断使用。
 - `inflation_radius`、`inflation_cost_scaling`：膨胀范围和指数衰减。
 - `obstacle_max_range`、`raytrace_max_range`：标障和清障射线范围。`raytrace_max_range` 必须不小于
   `obstacle_max_range`；激光的正无穷无回波会清除至该范围，但不会标记障碍。
@@ -28,6 +31,8 @@
 搜索在各轮间复用 OPEN、INCONS 和 g 值。`max_expansions` 与 `max_planning_time` 是所有改善轮次
 共享的硬资源预算；超限时返回已有安全解，否则明确失败，不返回半构造路径。反向 cost-aware
 障碍启发式按 costmap digest、目标格、clearance 和代价权重缓存。
+若 D* Lite 与 ARA* 都在资源预算内找不到 SE(2) 解，规划器自动调用 cost-aware 2D A*；
+`global_plan_fallback_used` 明确报告该次降级。
 
 ## `path_smoother`
 

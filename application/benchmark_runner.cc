@@ -4,6 +4,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <sys/resource.h>
 #include "navigation2d/simulation/navigation_simulator.h"
 
 namespace {
@@ -38,6 +39,17 @@ int main(int argc, char** argv) try {
       config.controller = argv[i + 1]; i += 2;
     } else if (option == "--mpc-solver" && i + 1 < argc) {
       config.mpc_solver = argv[i + 1]; i += 2;
+    } else if (option == "--rectangular-footprint" && i + 2 < argc) {
+      const double length = std::stod(argv[i + 1]), width = std::stod(argv[i + 2]);
+      if (length <= 0. || width <= 0.) throw std::runtime_error("invalid rectangular footprint");
+      config.footprint = {{-.5 * length, -.5 * width}, {.5 * length, -.5 * width},
+                          {.5 * length, .5 * width}, {-.5 * length, .5 * width}};
+      config.robot_radius = .5 * std::hypot(length, width);
+      i += 3;
+    } else if (option == "--max-duration" && i + 1 < argc) {
+      config.max_navigation_duration = std::stod(argv[i + 1]);
+      if (config.max_navigation_duration <= 0.) throw std::runtime_error("invalid max duration");
+      i += 2;
     } else throw std::runtime_error("invalid benchmark option: " + option);
   }
   if (config.mpc_solver != "shooting" && config.mpc_solver != "acados")
@@ -47,6 +59,8 @@ int main(int argc, char** argv) try {
       argv[3], navigation2d::MakePose2d(std::stod(argv[4]), std::stod(argv[5]), std::stod(argv[6])),
       navigation2d::MakePose2d(std::stod(argv[7]), std::stod(argv[8]), std::stod(argv[9])), obstacles);
   const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+  rusage usage{};
+  getrusage(RUSAGE_SELF, &usage);
   std::cout << std::fixed << std::setprecision(6)
             << "{\"id\":\"" << argv[2] << "\",\"status\":\"" << result.status
             << "\",\"planner\":\"" << config.planner << "\",\"controller\":\"" << config.controller
@@ -72,8 +86,23 @@ int main(int argc, char** argv) try {
             << ",\"global_plan_incremental_reuse\":"
             << (result.global_planning.incremental_reuse ? "true" : "false")
             << ",\"global_plan_repaired_states\":" << result.global_planning.repaired_states
+            << ",\"global_plan_fallback_used\":"
+            << (result.global_planning.fallback_used ? "true" : "false")
             << ",\"global_plan_incremental_replans\":" << result.incremental_replans
             << ",\"global_plan_repaired_states_total\":" << result.incremental_repaired_states
+            << ",\"global_plan_p50_us\":" << 1e6 * Percentile(result.global_plan_samples_s, .50)
+            << ",\"global_plan_p95_us\":" << 1e6 * Percentile(result.global_plan_samples_s, .95)
+            << ",\"global_plan_p99_us\":" << 1e6 * Percentile(result.global_plan_samples_s, .99)
+            << ",\"global_plan_first_solution_p50_us\":"
+            << 1e6 * Percentile(result.global_plan_first_solution_samples_s, .50)
+            << ",\"global_plan_first_solution_p95_us\":"
+            << 1e6 * Percentile(result.global_plan_first_solution_samples_s, .95)
+            << ",\"global_plan_first_solution_p99_us\":"
+            << 1e6 * Percentile(result.global_plan_first_solution_samples_s, .99)
+            << ",\"global_plan_expansions_total\":" << result.global_plan_expansions_total
+            << ",\"path_min_clearance_m\":" << result.path_min_clearance_m
+            << ",\"path_max_curvature\":" << result.path_max_curvature
+            << ",\"peak_rss_kb\":" << usage.ru_maxrss
             << ",\"costmap_digest\":" << result.costmap_digest
             << ",\"trace\":[";
   for (size_t i = 0; i < result.trajectory.size(); ++i) {

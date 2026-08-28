@@ -26,6 +26,7 @@ class StateLatticePlanner final : public GlobalPlanner {
   mutable GlobalPlanningDiagnostics diagnostics_;
   mutable const LayeredCostmap* active_costmap_ = nullptr;
   mutable std::unique_ptr<planning_internal::DistanceField> distance_field_;
+  mutable std::unique_ptr<planning_internal::FootprintLookup> footprint_lookup_;
   mutable std::optional<planning_internal::DifferentialDrivePrimitiveSet> primitives_;
   mutable std::unique_ptr<planning_internal::DStarLite> incremental_search_;
   mutable int lattice_width_ = 0;

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <string>
+#include <vector>
+#include <Eigen/Core>
 
 namespace navigation2d {
 
@@ -10,6 +12,7 @@ struct NavigationConfig {
   std::string controller = "rpp";
   double map_resolution = .03;
   double robot_radius = .18;
+  std::vector<Eigen::Vector2d> footprint;
   double inflation_radius = .22;
   double inflation_cost_scaling = 8.;
   double obstacle_max_range = 5.;

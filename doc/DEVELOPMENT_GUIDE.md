@@ -20,7 +20,7 @@ ctest --test-dir build --output-on-failure
 ## 分级回归
 
 - 文档改动：检查链接、命令、配置字段和 `git diff --check`。
-- 等价重构：C++ 单测 + weekly 9-case，并逐 case 比较轨迹 SHA256 与 costmap digest。
+- 等价重构：C++ 单测 + weekly 全量 case，并逐 case 比较轨迹 SHA256 与 costmap digest。
 - 算法/参数变化：在上述基础上比较终点误差、航向误差、碰撞、路径长度、重规划和恢复指标，
   明确说明为什么允许 hash 改变。
 
@@ -29,6 +29,14 @@ ctest --test-dir build --output-on-failure
 ```bash
 python3 tools/run_navigation2d_regression.py --tier weekly --jobs 8
 ```
+
+全局规划器发布比较使用固定的 5 场景 × 3 规划器矩阵：
+
+```bash
+python3 tools/run_global_planner_benchmark.py --repetitions 3 --jobs 5
+```
+
+报告写入 `artifacts/navigation2d/results/global-planners-*.json`，生成报告不提交仓库。
 
 每个 case 必须是独立进程；共享一个 NavigationSystem、静态全局状态或输出文件会破坏并发
 确定性。新增 case 后同步更新 manifest、tier 选择测试和数据集 README。

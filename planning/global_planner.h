@@ -19,6 +19,9 @@ struct GlobalPlanningDiagnostics {
   bool obstacle_heuristic_cache_hit = false;
   bool incremental_reuse = false;
   std::size_t repaired_states = 0;
+  bool fallback_used = false;
+  double path_min_clearance_m = 0.;
+  double path_max_curvature = 0.;
 };
 
 class GlobalPlanner {

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <optional>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #include "navigation2d/control/regulated_pure_pursuit.h"
@@ -15,10 +16,30 @@
 #include "navigation2d/costmap/layered_costmap.h"
 #include "navigation2d/planning/global_planner.h"
 #include "navigation2d/planning/planner_factory.h"
+#include "navigation2d/planning/collision_checker.h"
 
 namespace navigation2d {
 namespace {
 double NormalizeAngle(double value) { return std::atan2(std::sin(value), std::cos(value)); }
+void AddPathMetrics(const Path& path, const LayeredCostmap& costmap, double robot_radius,
+                    GlobalPlanningDiagnostics* diagnostics) {
+  planning_internal::DistanceField field(costmap);
+  diagnostics->path_min_clearance_m = std::numeric_limits<double>::infinity();
+  diagnostics->path_max_curvature = 0.;
+  for (const auto& pose : path)
+    diagnostics->path_min_clearance_m = std::min(
+        diagnostics->path_min_clearance_m,
+        std::max(0., field.distance(X(pose), Y(pose)) - robot_radius));
+  for (std::size_t index = 1; index + 1 < path.size(); ++index) {
+    const auto first = path[index].translation() - path[index - 1].translation();
+    const auto second = path[index + 1].translation() - path[index].translation();
+    const double a = first.norm(), b = second.norm();
+    const double chord = (path[index + 1].translation() - path[index - 1].translation()).norm();
+    if (a > 1e-8 && b > 1e-8 && chord > 1e-8)
+      diagnostics->path_max_curvature = std::max(diagnostics->path_max_curvature,
+          2. * std::abs(first.x() * second.y() - first.y() * second.x()) / (a * b * chord));
+  }
+}
 std::unique_ptr<LocalController> MakeController(const NavigationConfig& config) {
   if (config.controller == "rpp") return std::make_unique<RegulatedPurePursuit>(config);
   if (config.controller == "dwa") return std::make_unique<DwaController>(config);
@@ -39,8 +60,15 @@ class NavigationSystem::Impl {
 
   void Replan(const Pose2d& pose) {
     try {
+      const auto planning_started = std::chrono::steady_clock::now();
       path = planner->Plan(costmap, pose, *goal); ++state.replans;
       state.global_planning = planner->Diagnostics();
+      const double planning_elapsed = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - planning_started).count();
+      state.global_planning.elapsed_s = planning_elapsed;
+      if (state.global_planning.first_solution_s <= 0.)
+        state.global_planning.first_solution_s = planning_elapsed;
+      AddPathMetrics(path, costmap, config.robot_radius, &state.global_planning);
       if (state.global_planning.obstacle_heuristic_cache_hit)
         ++state.obstacle_heuristic_cache_hits;
       if (state.global_planning.incremental_reuse) ++state.incremental_replans;

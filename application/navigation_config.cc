@@ -40,10 +40,19 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
   const auto map = root["map"];
   ExactKeys(map, {"resolution"}, "map"); c.map_resolution = Number(map, "resolution");
   const auto costmap = root["costmap"];
-  ExactKeys(costmap, {"robot_radius", "inflation_radius", "inflation_cost_scaling",
+  ExactKeys(costmap, {"robot_radius", "footprint", "inflation_radius", "inflation_cost_scaling",
                       "obstacle_max_range", "raytrace_max_range", "local_window_width",
                       "local_window_height"}, "costmap");
   c.robot_radius = Number(costmap, "robot_radius");
+  if (!costmap["footprint"].IsSequence()) throw std::runtime_error("costmap.footprint must be a sequence");
+  for (const auto& point : costmap["footprint"]) {
+    if (!point.IsSequence() || point.size() != 2)
+      throw std::runtime_error("costmap.footprint points must be [x, y]");
+    const double x = point[0].as<double>(), y = point[1].as<double>();
+    if (!std::isfinite(x) || !std::isfinite(y))
+      throw std::runtime_error("costmap.footprint contains non-finite coordinates");
+    c.footprint.emplace_back(x, y);
+  }
   c.inflation_radius = Number(costmap, "inflation_radius");
   c.inflation_cost_scaling = Number(costmap, "inflation_cost_scaling");
   c.obstacle_max_range = Number(costmap, "obstacle_max_range");
@@ -174,6 +183,7 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
       c.inflation_cost_scaling <= 0. || c.obstacle_max_range <= 0. ||
       c.raytrace_max_range < c.obstacle_max_range || c.local_window_width <= 0. ||
       c.local_window_height <= 0. ||
+      (!c.footprint.empty() && c.footprint.size() < 3) ||
       c.lattice_yaw_bins < 8 || c.lattice_yaw_bins % 2 != 0 ||
       c.lattice_primitive_length < c.map_resolution || c.lattice_reverse_penalty < 1. ||
       c.lattice_rotation_cost <= 0. || c.lattice_cost_penalty < 0. ||

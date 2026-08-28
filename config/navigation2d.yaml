@@ -1,11 +1,12 @@
 # Fully expanded deterministic configuration. Unknown or missing keys are fatal.
 selection:
-  planner: dijkstra
+  planner: state_lattice
   controller: mpc
 map:
   resolution: 0.03
 costmap:
   robot_radius: 0.18
+  footprint: []
   inflation_radius: 0.22
   inflation_cost_scaling: 8.0
   obstacle_max_range: 5.0

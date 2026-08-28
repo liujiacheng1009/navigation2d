@@ -4,6 +4,7 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "navigation2d/planning/astar_planner.h"
 #include "navigation2d/planning/path_smoother.h"
 
 namespace navigation2d {
@@ -36,7 +37,12 @@ std::optional<double> StateLatticePlanner::PrimitiveCost(
   double cost_integral = 0.;
   for (const auto& sample : primitive.samples) {
     const double px = wx + X(sample), py = wy + Y(sample);
-    if (!distance_field_->CircleCollisionFree(px, py, config_.robot_radius)) return std::nullopt;
+    if (footprint_lookup_) {
+      if (!footprint_lookup_->CollisionFree(
+              *active_costmap_, MakePose2d(px, py, Yaw(sample)))) return std::nullopt;
+    } else if (!distance_field_->CircleCollisionFree(px, py, config_.robot_radius)) {
+      return std::nullopt;
+    }
     const auto [cx, cy] = active_costmap_->grid().ToCell(px, py);
     cost_integral += static_cast<double>(active_costmap_->cost(cx, cy)) / 252.;
   }
@@ -96,10 +102,16 @@ Path StateLatticePlanner::Plan(const LayeredCostmap& costmap, const Pose2d& star
   if (!primitives_ || different_map)
     primitives_.emplace(bins, grid.resolution(), config_.lattice_primitive_length,
                         config_.lattice_allow_reverse);
+  if (!config_.footprint.empty() && (!footprint_lookup_ || different_map))
+    footprint_lookup_ = std::make_unique<planning_internal::FootprintLookup>(
+        config_.footprint, bins, grid.resolution());
   if (!distance_field_ || different_map || previous_revision != costmap.revision())
     distance_field_ = std::make_unique<planning_internal::DistanceField>(costmap);
-  if (!distance_field_->CircleCollisionFree(X(start), Y(start), config_.robot_radius) ||
-      !distance_field_->CircleCollisionFree(X(goal), Y(goal), config_.robot_radius))
+  const bool start_free = footprint_lookup_ ? footprint_lookup_->CollisionFree(costmap, start) :
+      distance_field_->CircleCollisionFree(X(start), Y(start), config_.robot_radius);
+  const bool goal_free = footprint_lookup_ ? footprint_lookup_->CollisionFree(costmap, goal) :
+      distance_field_->CircleCollisionFree(X(goal), Y(goal), config_.robot_radius);
+  if (!start_free || !goal_free)
     throw std::runtime_error("start or goal is occupied");
 
   const int source = Encode(sx, sy, YawBin(Yaw(start), bins));
@@ -163,7 +175,15 @@ Path StateLatticePlanner::Plan(const LayeredCostmap& costmap, const Pose2d& star
         [this](int state, int, const auto& visit) { VisitSuccessors(state, visit); },
         config_.lattice_initial_heuristic_weight,
         config_.lattice_heuristic_weight_decrement, options);
-    if (!fallback.found) throw std::runtime_error("no state lattice path");
+    if (!fallback.found) {
+      diagnostics_ = {
+          incremental.diagnostics.expansions + fallback.diagnostics.expansions,
+          incremental.diagnostics.generated + fallback.diagnostics.generated,
+          incremental.diagnostics.elapsed_s + fallback.diagnostics.elapsed_s,
+          fallback.diagnostics.first_solution_s, 1., cache_hit,
+          incremental.reused, incremental.repaired_states, true};
+      return AStarPlanner(config_.robot_radius).Plan(costmap, start, goal);
+    }
     states = planning_internal::RestoreStatePath(fallback, source, target);
     fallback_diagnostics = fallback.diagnostics;
     bound = fallback.suboptimality_bound;
@@ -173,7 +193,7 @@ Path StateLatticePlanner::Plan(const LayeredCostmap& costmap, const Pose2d& star
       incremental.diagnostics.generated + fallback_diagnostics.generated,
       incremental.diagnostics.elapsed_s + fallback_diagnostics.elapsed_s,
       incremental.found ? incremental.diagnostics.elapsed_s : fallback_diagnostics.first_solution_s,
-      bound, cache_hit, incremental.reused, incremental.repaired_states};
+      bound, cache_hit, incremental.reused, incremental.repaired_states, false};
 
   Path path{start};
   for (std::size_t index = 1; index < states.size(); ++index) {
@@ -187,8 +207,8 @@ Path StateLatticePlanner::Plan(const LayeredCostmap& costmap, const Pose2d& star
       path.push_back(MakePose2d(wx + X(sample), wy + Y(sample), Yaw(sample)));
   }
   path.back() = goal;
-  return planning_internal::ConstrainedPathSmoother(config_).Smooth(
-      path, costmap, config_.robot_radius);
+  if (!config_.footprint.empty()) return path;
+  return planning_internal::ConstrainedPathSmoother(config_).Smooth(path, costmap, config_.robot_radius);
 }
 
 }  // namespace navigation2d

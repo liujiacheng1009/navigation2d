@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include "navigation2d/application/navigation_system.h"
 #include "navigation2d/costmap/grid_2d.h"
+#include "navigation2d/planning/collision_checker.h"
 
 namespace navigation2d::simulation {
 namespace {
@@ -36,6 +38,11 @@ LaserScan SimulateScan(const Pose2d& pose, const std::vector<ObstacleEvent>& obs
 RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, Pose2d goal,
                                    const std::vector<ObstacleEvent>& obstacles) const {
   const Grid2d truth = Grid2d::Load(world_path);
+  LayeredCostmap truth_costmap(Grid2d::Load(world_path), config_);
+  std::optional<planning_internal::FootprintLookup> truth_footprint;
+  if (!config_.footprint.empty())
+    truth_footprint.emplace(config_.footprint, config_.lattice_yaw_bins,
+                            truth.resolution());
   NavigationSystem navigation(config_, world_path);
   navigation.SetGoal(goal);
   RunResult result; result.trajectory.push_back(pose);
@@ -43,6 +50,7 @@ RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, P
   std::vector<bool> active(obstacles.size(), false);
   const int max_steps = static_cast<int>(std::ceil(config_.max_navigation_duration /
                                                    config_.control_period));
+  int observed_replans = 0;
   for (int step = 0; step < max_steps; ++step) {
     const double now = step * config_.control_period;
     for (std::size_t i = 0; i < obstacles.size(); ++i)
@@ -63,6 +71,15 @@ RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, P
     if (step % 2 == 0)
       navigation.UpdateLaserScan(pose, SimulateScan(pose, obstacles, active, now, config_));
     const NavigationState state = navigation.ComputeCommand(pose, velocity, now);
+    if (state.replans > observed_replans) {
+      observed_replans = state.replans;
+      result.global_plan_samples_s.push_back(state.global_planning.elapsed_s);
+      result.global_plan_first_solution_samples_s.push_back(
+          state.global_planning.first_solution_s);
+      result.global_plan_expansions_total += state.global_planning.expansions;
+      result.path_min_clearance_m = state.global_planning.path_min_clearance_m;
+      result.path_max_curvature = state.global_planning.path_max_curvature;
+    }
     if (state.controller_solve_us > 0.)
       result.controller_solve_samples_us.push_back(state.controller_solve_us);
     if (state.status == NavigationStatus::kSucceeded) {
@@ -88,7 +105,9 @@ RunResult NavigationSimulator::Run(const std::string& world_path, Pose2d pose, P
                              Y(pose) - radius * (std::cos(next_yaw) - std::cos(Yaw(pose))),
                              Angle(next_yaw));
     }
-    bool collision = truth.collides(X(candidate), Y(candidate), config_.robot_radius);
+    bool collision = truth_footprint
+        ? !truth_footprint->CollisionFree(truth_costmap, candidate)
+        : truth.collides(X(candidate), Y(candidate), config_.robot_radius);
     for (std::size_t i = 0; i < obstacles.size(); ++i) if (active[i]) {
       const double age = now - obstacles[i].appear_s;
       collision = collision || std::hypot(X(candidate) - (obstacles[i].x + obstacles[i].vx * age),
