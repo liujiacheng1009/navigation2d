@@ -118,6 +118,12 @@ Path StateLatticePlanner::Plan(const LayeredCostmap& costmap, const Pose2d& star
   const int target = Encode(gx, gy, YawBin(Yaw(goal), bins));
   const bool cache_hit = obstacle_heuristic_ && obstacle_heuristic_->Matches(
       costmap, gx, gy, config_.robot_radius, config_.lattice_cost_penalty);
+  // Build the obstacle-aware heuristic eagerly. D* Lite may solve the first
+  // request without needing the fallback, but retaining this field makes the
+  // next identical plan a real cache hit instead of rebuilding it on demand.
+  if (!cache_hit)
+    obstacle_heuristic_.emplace(costmap, gx, gy, config_.robot_radius,
+                                config_.lattice_cost_penalty);
 
   std::vector<int> changed_states;
   bool reset_incremental = different_map || !incremental_search_ || incremental_goal_ != target;
@@ -159,9 +165,6 @@ Path StateLatticePlanner::Plan(const LayeredCostmap& costmap, const Pose2d& star
   double bound = 1.;
   planning_internal::SearchDiagnostics fallback_diagnostics;
   if (!incremental.found) {
-    if (!cache_hit)
-      obstacle_heuristic_.emplace(costmap, gx, gy, config_.robot_radius,
-                                  config_.lattice_cost_penalty);
     const double bin_angle = 2. * M_PI / bins;
     const auto heuristic = [&](int state) {
       int x, y, yaw_bin; Decode(state, &x, &y, &yaw_bin);

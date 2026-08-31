@@ -14,25 +14,44 @@ void DistanceTransform1d(const std::vector<double>& input, std::vector<double>* 
   const int size = static_cast<int>(input.size());
   std::vector<int> sites(size);
   std::vector<double> boundaries(size + 1);
-  int count = 0;
-  sites[0] = 0;
-  boundaries[0] = -std::numeric_limits<double>::infinity();
-  boundaries[1] = std::numeric_limits<double>::infinity();
-  for (int q = 1; q < size; ++q) {
+  int count = -1;
+  for (int q = 0; q < size; ++q) {
+    // Do not subtract two finite stand-ins for infinity: at this magnitude
+    // the coordinate terms are lost to rounding and can corrupt the lower
+    // envelope. A line without a finite seed remains infinitely distant.
+    if (input[q] >= kLarge * .5) continue;
+    if (count < 0) {
+      count = 0;
+      sites[count] = q;
+      boundaries[count] = -std::numeric_limits<double>::infinity();
+      boundaries[count + 1] = std::numeric_limits<double>::infinity();
+      continue;
+    }
     double boundary;
     do {
       const int site = sites[count];
       boundary = ((input[q] + q * q) - (input[site] + site * site)) /
                  (2. * (q - site));
       if (boundary <= boundaries[count]) --count;
-    } while (boundary <= boundaries[count]);
+    } while (count >= 0 && boundary <= boundaries[count]);
+    if (count < 0) {
+      count = 0;
+      sites[count] = q;
+      boundaries[count] = -std::numeric_limits<double>::infinity();
+      boundaries[count + 1] = std::numeric_limits<double>::infinity();
+      continue;
+    }
     ++count;
     sites[count] = q;
     boundaries[count] = boundary;
     boundaries[count + 1] = std::numeric_limits<double>::infinity();
   }
-  count = 0;
   output->resize(size);
+  if (count < 0) {
+    std::fill(output->begin(), output->end(), kLarge);
+    return;
+  }
+  count = 0;
   for (int q = 0; q < size; ++q) {
     while (boundaries[count + 1] < q) ++count;
     const double delta = q - sites[count];
