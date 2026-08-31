@@ -4,8 +4,8 @@
 #include <array>
 #include <chrono>
 #include <cmath>
-#include <limits>
 
+#include "navigation2d/control/path_tracking.h"
 #include "navigation2d/control/safe_corridor.h"
 
 extern "C" {
@@ -14,16 +14,6 @@ extern "C" {
 
 namespace navigation2d {
 namespace {
-std::size_t NearestPathPoint(const Path& path, const Pose2d& pose) {
-  std::size_t nearest = 0;
-  double best = std::numeric_limits<double>::infinity();
-  for (std::size_t index = 0; index < path.size(); ++index) {
-    const double distance = (path[index].translation() - pose.translation()).squaredNorm();
-    if (distance < best) { best = distance; nearest = index; }
-  }
-  return nearest;
-}
-
 double PathHeading(const Path& path, std::size_t index) {
   if (path.size() < 2) return Yaw(path.back());
   const std::size_t next = std::min(index + 1, path.size() - 1);
@@ -58,6 +48,7 @@ struct AcadosMpcBackend::Impl {
   bool ready = false;
   navigation2d_mpcc_solver_capsule* capsule = nullptr;
   bool has_warm_start = false;
+  control_internal::PathSearchState path_search;
   std::array<std::array<double, NAVIGATION2D_MPCC_NX>, NAVIGATION2D_MPCC_N + 1> states{};
   std::array<std::array<double, NAVIGATION2D_MPCC_NU>, NAVIGATION2D_MPCC_N> controls{};
   ControllerDiagnostics diagnostics;
@@ -90,7 +81,9 @@ std::optional<Twist2d> AcadosMpcBackend::Solve(
   ocp_nlp_constraints_model_set(config, dims, input, output, 0, "lbx", state.data());
   ocp_nlp_constraints_model_set(config, dims, input, output, 0, "ubx", state.data());
 
-  const std::size_t nearest = NearestPathPoint(path, pose);
+  const std::size_t nearest =
+      control_internal::FindNearestPathPoint(path, pose, &impl_->path_search);
+  impl_->diagnostics.path_search_evaluations = impl_->path_search.last_evaluations;
   const double robot_remaining = (path.back().translation() - pose.translation()).norm();
   constexpr int horizon = NAVIGATION2D_MPCC_N;
   std::array<std::size_t, horizon + 1> references{};

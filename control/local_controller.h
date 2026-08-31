@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+
 #include "navigation2d/costmap/layered_costmap.h"
 #include "navigation2d/control/obstacle_prediction.h"
 #include "navigation2d/planning/global_planner.h"
@@ -24,6 +26,7 @@ struct ControllerDiagnostics {
   bool deadline_miss = false;
   int fallback_level = 0;
   double min_ttc_s = 0.;
+  std::size_t path_search_evaluations = 0;
 };
 
 struct GuidanceCandidate {
