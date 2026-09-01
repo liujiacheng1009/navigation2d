@@ -37,4 +37,24 @@ int main() {
   }
   assert(state.status == navigation2d::NavigationStatus::kBlocked);
   assert(state.recoveries == 3);
+
+  // A precise SE(2) goal uses the docking servo rather than turning a few
+  // centimetres of residual route into another RPP/recovery cycle.
+  navigation2d::NavigationConfig docking_config = config;
+  docking_config.goal_xy_tolerance = .03;
+  docking_config.goal_yaw_tolerance = .08;
+  docking_config.progress_timeout = 1.;
+  navigation2d::NavigationSystem docking(docking_config, path);
+  docking.SetGoal(navigation2d::MakePose2d(1., 1., 0.));
+  docking.UpdateLaserScan(navigation2d::MakePose2d(.75, 1., 0.), scan);
+  state = docking.ComputeCommand(navigation2d::MakePose2d(.75, 1., 0.), {}, 0.);
+  assert(state.phase == navigation2d::NavigationPhase::kDockToGoal);
+  assert(state.command.linear > 0.);
+  docking.UpdateLaserScan(navigation2d::MakePose2d(.99, 1., .25), scan);
+  state = docking.ComputeCommand(navigation2d::MakePose2d(.99, 1., .25), {}, .06);
+  assert(state.phase == navigation2d::NavigationPhase::kDockToGoal);
+  assert(state.command.linear == 0.);
+  assert(state.command.angular < 0.);
+  state = docking.ComputeCommand(navigation2d::MakePose2d(.99, 1., .02), {}, .12);
+  assert(state.status == navigation2d::NavigationStatus::kSucceeded);
 }

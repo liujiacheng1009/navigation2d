@@ -245,13 +245,16 @@ class AutonomousExplorer final : public rclcpp::Node {
     // Keep their completion contracts separate: return must converge to the
     // recorded ground-truth start instead of stopping at the edge of the
     // ordinary navigation tolerance disk.
-    config.goal_xy_tolerance = returning ? .03 : .18;
+    config.goal_xy_tolerance = returning ? .04 : .18;
     if (returning) config.min_approach_velocity = .025;
     // LD14 observes 360 degrees, so frontier visits need no stop-and-turn
     // terminal orientation. Preserve precise heading only when docking home.
     // Backtrack edges are positional checkpoints; requiring a docking yaw at
     // every 0.35 m checkpoint creates needless stop-turn-stop motion.
-    config.goal_yaw_tolerance = returning ? .08 : 3.13;
+    // Returning means recovering the recorded start point. With a 360-degree
+    // lidar there is no mission requirement to reproduce the arbitrary start
+    // yaw; enforcing it caused needless terminal spin after position docking.
+    config.goal_yaw_tolerance = 3.13;
     try {
       navigation_ = std::make_unique<navigation2d::NavigationSystem>(config, map_snapshot_path_);
       reported_recoveries_ = 0;
@@ -597,11 +600,15 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (state.recoveries > reported_recoveries_) {
       reported_recoveries_ = state.recoveries;
       RCLCPP_WARN(get_logger(),
-                  "Route progress recovery: arc=%.2f/%.2f controller_motion=%s safety_stop=%s rpp_stage=%d velocity=(%.3f,%.3f)",
+                  "Route progress recovery: phase=%d arc=%.2f/%.2f requested=(%.3f,%.3f) published=(%.3f,%.3f) controller_motion=%s safety_stop=%s rpp_stage=%d monitor_action=%d ttc=%.3f velocity=(%.3f,%.3f)",
+                  static_cast<int>(state.phase),
                   state.path_progress_m, state.global_path_length_m,
+                  state.requested_command.linear, state.requested_command.angular,
+                  state.published_command.linear, state.published_command.angular,
                   state.controller_commanded_motion ? "yes" : "no",
                   state.safety_stopped_motion ? "yes" : "no",
                   state.controller_diagnostics.fallback_level,
+                  static_cast<int>(state.collision_monitor_action), state.minimum_ttc_s,
                   velocity_.linear, velocity_.angular);
     }
     if (state.status == navigation2d::NavigationStatus::kSucceeded) {
@@ -615,12 +622,16 @@ class AutonomousExplorer final : public rclcpp::Node {
         PublishStatus("SELECTING", "frontier reached; continuing committed tour");
       }
     } else if (state.status == navigation2d::NavigationStatus::kBlocked ||
-               (now() - goal_started_).seconds() > goal_timeout_s_) {
+               (state.phase != navigation2d::NavigationPhase::kDockToGoal &&
+                (now() - goal_started_).seconds() > goal_timeout_s_)) {
       RCLCPP_WARN(get_logger(),
-                  "Navigation2D frontier failed: status=%s elapsed=%.1f replans=%d path=%.2f",
+                  "Navigation2D frontier failed: status=%s phase=%d elapsed=%.1f replans=%d path=%.2f requested=(%.3f,%.3f) published=(%.3f,%.3f) monitor_action=%d ttc=%.3f",
                   state.status == navigation2d::NavigationStatus::kBlocked ? "blocked" : "timeout",
-                  (now() - goal_started_).seconds(), state.replans,
-                  state.global_path_length_m);
+                  static_cast<int>(state.phase), (now() - goal_started_).seconds(), state.replans,
+                  state.global_path_length_m,
+                  state.requested_command.linear, state.requested_command.angular,
+                  state.published_command.linear, state.published_command.angular,
+                  static_cast<int>(state.collision_monitor_action), state.minimum_ttc_s);
       if (ReplanActiveGoalOnLatestMap(
               state.status == navigation2d::NavigationStatus::kBlocked ?
                   "controller could not execute validated route" : "goal execution timed out"))

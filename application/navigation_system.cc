@@ -86,6 +86,18 @@ double PathProgress(const Path& path, const Pose2d& pose, double minimum_progres
   }
   return best_arc;
 }
+double DistanceToPath(const Path& path, const Pose2d& pose) {
+  double best = std::numeric_limits<double>::infinity();
+  for (std::size_t index = 1; index < path.size(); ++index) {
+    const auto start = path[index - 1].translation();
+    const auto segment = path[index].translation() - start;
+    const double squared = segment.squaredNorm();
+    if (squared <= 1e-12) continue;
+    const double ratio = std::clamp((pose.translation() - start).dot(segment) / squared, 0., 1.);
+    best = std::min(best, (pose.translation() - (start + ratio * segment)).norm());
+  }
+  return std::isfinite(best) ? best : 0.;
+}
 void AddPathMetrics(const Path& path, const LayeredCostmap& costmap, double robot_radius,
                     GlobalPlanningDiagnostics* diagnostics) {
   planning_internal::DistanceField field(costmap);
@@ -151,6 +163,8 @@ class NavigationSystem::Impl {
       if (state.global_path_length_m == 0.) state.global_path_length_m = path_length;
       best_path_progress_m = 0.;
       state.path_progress_m = 0.;
+      state.phase = NavigationPhase::kAlignToPath;
+      best_alignment_score = std::numeric_limits<double>::infinity();
       controller_blocked_cycles = 0;
       rotation_without_progress_rad = 0.;
       planning_failures = 0;
@@ -183,6 +197,10 @@ class NavigationSystem::Impl {
   int controller_blocked_cycles = 0;
   int planning_failures = 0;
   double rotation_without_progress_rad = 0.;
+  double best_alignment_score = std::numeric_limits<double>::infinity();
+  double best_docking_distance = std::numeric_limits<double>::infinity();
+  double best_docking_yaw_error = std::numeric_limits<double>::infinity();
+  bool docking_position_reached = false;
   std::vector<PredictedObstacle> dynamic_obstacles;
 };
 
@@ -201,6 +219,16 @@ void NavigationSystem::SetGoal(Pose2d goal) {
   impl_->recovery_attempts = 0; impl_->controller_blocked_cycles = 0;
   impl_->planning_failures = 0;
   impl_->rotation_without_progress_rad = 0.;
+  impl_->state.phase = NavigationPhase::kAlignToPath;
+  impl_->best_alignment_score = std::numeric_limits<double>::infinity();
+  impl_->best_docking_distance = std::numeric_limits<double>::infinity();
+  impl_->best_docking_yaw_error = std::numeric_limits<double>::infinity();
+  impl_->docking_position_reached = false;
+  impl_->state.controller_commanded_motion = false;
+  impl_->state.safety_stopped_motion = false;
+  impl_->state.requested_command = {};
+  impl_->state.published_command = {};
+  impl_->state.collision_monitor_action = CollisionMonitorAction::kNone;
 }
 
 void NavigationSystem::ClearGoal() {
@@ -243,8 +271,12 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
   // limiting makes every physically valid command unreachable for many cycles.
   // Project feedback onto the robot's declared actuation envelope; pose itself
   // remains the unmodified ground-truth pose supplied by the caller.
-  if (!std::isfinite(measured_velocity.linear)) measured_velocity.linear = 0.;
-  if (!std::isfinite(measured_velocity.angular)) measured_velocity.angular = 0.;
+  if (!std::isfinite(measured_velocity.linear) ||
+      std::abs(measured_velocity.linear) > 2. * impl_->config.desired_linear_velocity)
+    measured_velocity.linear = impl_->state.published_command.linear;
+  if (!std::isfinite(measured_velocity.angular) ||
+      std::abs(measured_velocity.angular) > 2. * impl_->config.max_angular_velocity)
+    measured_velocity.angular = impl_->state.published_command.angular;
   measured_velocity.linear = std::clamp(
       measured_velocity.linear, -impl_->config.max_reverse_velocity,
       impl_->config.desired_linear_velocity);
@@ -252,8 +284,6 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
       measured_velocity.angular, -impl_->config.max_angular_velocity,
       impl_->config.max_angular_velocity);
   impl_->state.controller_solve_us = 0.;
-  impl_->state.controller_commanded_motion = false;
-  impl_->state.safety_stopped_motion = false;
   if (!impl_->goal) { impl_->state.command = {}; impl_->state.status = NavigationStatus::kIdle; return impl_->state; }
   if (!impl_->progress_initialized) {
     impl_->last_progress_time = timestamp;
@@ -272,6 +302,89 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
   // Do not run a stale progress watchdog without a route to measure against.
   if (impl_->path.empty()) return impl_->state;
   const double goal_distance = (impl_->goal->translation() - pose.translation()).norm();
+  const bool precision_goal = impl_->config.goal_xy_tolerance <= .05;
+  // A centimetre-scale SE(2) docking pose is not a short global path. Switch
+  // to a dedicated pose servo before the remaining polyline becomes smaller
+  // than RPP's lookahead and its progress coordinate loses useful meaning.
+  if (precision_goal && goal_distance <= .30) {
+    impl_->state.phase = NavigationPhase::kDockToGoal;
+    const double yaw_error = NormalizeAngle(Yaw(*impl_->goal) - Yaw(pose));
+    if (goal_distance + .001 < impl_->best_docking_distance) {
+      impl_->best_docking_distance = goal_distance;
+      impl_->last_progress_time = timestamp;
+      impl_->recovery_attempts = 0;
+    }
+    if (goal_distance <= impl_->config.goal_xy_tolerance) {
+      if (!impl_->docking_position_reached) {
+        impl_->docking_position_reached = true;
+        impl_->best_docking_yaw_error = std::abs(yaw_error);
+        impl_->last_progress_time = timestamp;
+      } else if (std::abs(yaw_error) + .01 < impl_->best_docking_yaw_error) {
+        impl_->best_docking_yaw_error = std::abs(yaw_error);
+        impl_->last_progress_time = timestamp;
+      }
+    } else if (goal_distance > impl_->config.goal_xy_tolerance + .01) {
+      impl_->docking_position_reached = false;
+      impl_->best_docking_yaw_error = std::numeric_limits<double>::infinity();
+    }
+    if (goal_distance <= impl_->config.goal_xy_tolerance &&
+        std::abs(yaw_error) <= impl_->config.goal_yaw_tolerance) {
+      impl_->state.command = {}; impl_->state.published_command = {};
+      impl_->state.status = NavigationStatus::kSucceeded;
+      return impl_->state;
+    }
+    Twist2d docking;
+    if (goal_distance <= impl_->config.goal_xy_tolerance) {
+      docking.angular = std::clamp(yaw_error, -.35, .35);
+    } else {
+      const auto delta = impl_->goal->translation() - pose.translation();
+      const double forward_error = NormalizeAngle(std::atan2(delta.y(), delta.x()) - Yaw(pose));
+      // Only the final 30 cm docking servo may choose reverse, and only when
+      // the home point is geometrically closer behind the base. This avoids a
+      // full turn around a millimetre-scale residual while keeping all route
+      // tracking forward-only.
+      const bool reverse = std::abs(forward_error) > .5 * std::acos(-1.);
+      const double bearing_error = reverse ?
+          NormalizeAngle(forward_error + std::acos(-1.)) : forward_error;
+      if (std::abs(bearing_error) > .35) {
+        docking.angular = std::clamp(1.2 * bearing_error, -.35, .35);
+      } else {
+        const double speed = std::min(.08, std::max(.003, .4 * goal_distance));
+        docking.linear = reverse ? -speed : speed;
+        docking.angular = std::clamp(1.2 * bearing_error, -.35, .35);
+      }
+    }
+    const double dv = impl_->config.max_linear_acceleration * impl_->config.control_period;
+    const double dw = impl_->config.max_angular_acceleration * impl_->config.control_period;
+    // Docking is closed directly on the ground-truth pose error. Slew from
+    // the command actually published on the preceding cycle, not from odom's
+    // yaw derivative, which can spike across angle wrapping in simulation.
+    docking.linear = std::clamp(docking.linear,
+        impl_->state.published_command.linear - dv,
+        impl_->state.published_command.linear + dv);
+    docking.angular = std::clamp(docking.angular,
+        impl_->state.published_command.angular - dw,
+        impl_->state.published_command.angular + dw);
+    impl_->state.requested_command = docking;
+    impl_->state.controller_commanded_motion =
+        std::abs(docking.linear) > 1e-4 || std::abs(docking.angular) > 1e-4;
+    if (DynamicCollisionImminent(pose, docking, impl_->dynamic_obstacles, impl_->config)) docking = {};
+    const auto monitored = impl_->collision_monitor.Filter(pose, docking, timestamp);
+    docking = monitored.command;
+    impl_->state.published_command = docking;
+    impl_->state.collision_monitor_action = monitored.action;
+    impl_->state.safety_stopped_motion = impl_->state.controller_commanded_motion &&
+        std::abs(docking.linear) <= 1e-4 && std::abs(docking.angular) <= 1e-4;
+    impl_->state.minimum_ttc_s = monitored.time_to_collision_s;
+    if (timestamp - impl_->last_progress_time > impl_->config.progress_timeout * 3.) {
+      impl_->state.command = {};
+      impl_->state.status = NavigationStatus::kBlocked;
+      return impl_->state;
+    }
+    impl_->state.command = docking;
+    impl_->state.status = NavigationStatus::kNavigating;
+    return impl_->state;
+  }
   if (goal_distance <= impl_->config.goal_xy_tolerance) {
     const double yaw_error = NormalizeAngle(Yaw(*impl_->goal) - Yaw(pose));
     if (std::abs(yaw_error) <= impl_->config.goal_yaw_tolerance) {
@@ -293,14 +406,26 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
   const double path_progress = PathProgress(
       impl_->path, pose, impl_->best_path_progress_m);
   impl_->state.path_progress_m = path_progress;
+  if (impl_->state.phase == NavigationPhase::kAlignToPath && impl_->path.size() >= 2) {
+    const auto tangent = impl_->path[1].translation() - impl_->path[0].translation();
+    const double heading_error = NormalizeAngle(std::atan2(tangent.y(), tangent.x()) - Yaw(pose));
+    const double alignment_score = std::abs(heading_error) + DistanceToPath(impl_->path, pose);
+    if (alignment_score + .02 < impl_->best_alignment_score) {
+      impl_->best_alignment_score = alignment_score;
+      impl_->last_progress_time = timestamp;
+    }
+    if (std::abs(heading_error) < .25 || path_progress >= impl_->config.progress_radius) {
+      impl_->state.phase = NavigationPhase::kTrackPath;
+      impl_->last_progress_time = timestamp;
+    }
+  }
   if (path_progress >= impl_->best_path_progress_m + impl_->config.progress_radius) {
     impl_->best_path_progress_m = path_progress;
     impl_->last_progress_time = timestamp;
     impl_->recovery_attempts = 0;
     impl_->rotation_without_progress_rad = 0.;
-  } else if (timestamp - impl_->last_progress_time > impl_->config.progress_timeout &&
-             !(std::abs(impl_->state.command.linear) <= 1e-4 &&
-               std::abs(impl_->state.command.angular) > 1e-4)) {
+  } else if (timestamp - impl_->last_progress_time > impl_->config.progress_timeout *
+                 (impl_->state.phase == NavigationPhase::kAlignToPath ? 3. : 1.)) {
     ++impl_->state.recoveries; ++impl_->recovery_attempts;
     impl_->last_progress_time = timestamp;
     if (impl_->recovery_attempts > impl_->config.max_recovery_attempts) {
@@ -324,6 +449,7 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
     const auto solve_started = std::chrono::steady_clock::now();
     command = impl_->controller->Compute(impl_->path, pose, measured_velocity, impl_->costmap,
                                          impl_->dynamic_obstacles);
+    impl_->state.requested_command = command;
     impl_->state.controller_commanded_motion =
         std::abs(command.linear) > 1e-4 || std::abs(command.angular) > 1e-4;
     if (std::abs(command.linear) <= 1e-4 && std::abs(command.angular) > 1e-4)
@@ -338,6 +464,7 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
       command = {};
     const auto monitored = impl_->collision_monitor.Filter(pose, command, timestamp);
     command = monitored.command;
+    impl_->state.published_command = command;
     impl_->state.collision_monitor_action = monitored.action;
     impl_->state.safety_stopped_motion =
         impl_->state.controller_commanded_motion &&

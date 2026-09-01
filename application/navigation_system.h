@@ -13,9 +13,11 @@
 namespace navigation2d {
 
 enum class NavigationStatus { kIdle, kNavigating, kSucceeded, kBlocked };
+enum class NavigationPhase { kAlignToPath, kTrackPath, kDockToGoal };
 
 struct NavigationState {
   NavigationStatus status = NavigationStatus::kIdle;
+  NavigationPhase phase = NavigationPhase::kAlignToPath;
   Twist2d command;
   int replans = 0;
   int emergency_stops = 0;
@@ -27,6 +29,11 @@ struct NavigationState {
   double path_progress_m = 0.;
   bool controller_commanded_motion = false;
   bool safety_stopped_motion = false;
+  // Persist the last actually evaluated control cycle across an early
+  // progress-recovery return. This distinguishes a tracker zero from a
+  // safety filter veto; these values are reset only for a new goal.
+  Twist2d requested_command;
+  Twist2d published_command;
   // Duration of the latest LocalController::Compute call only. This excludes
   // sensing, costmap updates, global replanning, simulation and safety filtering.
   double controller_solve_us = 0.;
