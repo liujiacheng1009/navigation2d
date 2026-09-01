@@ -25,14 +25,23 @@ Pose2d Integrate(const Pose2d& pose, const Twist2d& control, double dt) {
                     Y(pose) - radius * (std::cos(next_yaw) - std::cos(yaw)), next_yaw);
 }
 
-std::size_t NearestPathPoint(const Path& path, const Pose2d& pose) {
-  std::size_t nearest = 0;
+std::size_t NearestPathPoint(const Path& path, const Pose2d& pose, std::size_t first = 0) {
+  std::size_t nearest = std::min(first, path.size() - 1);
   double best = std::numeric_limits<double>::infinity();
-  for (std::size_t index = 0; index < path.size(); ++index) {
+  for (std::size_t index = first; index < path.size(); ++index) {
     const double distance = (path[index].translation() - pose.translation()).squaredNorm();
     if (distance < best) { best = distance; nearest = index; }
   }
   return nearest;
+}
+
+std::size_t ForwardIndexAtDistance(const Path& path, std::size_t first, double distance) {
+  double accumulated = 0.;
+  for (std::size_t index = first; index + 1 < path.size(); ++index) {
+    accumulated += (path[index + 1].translation() - path[index].translation()).norm();
+    if (accumulated >= distance) return index + 1;
+  }
+  return path.size() - 1;
 }
 
 double PathHeading(const Path& path, std::size_t index) {
@@ -57,8 +66,29 @@ Twist2d MppiController::Compute(const Path& path, const Pose2d& pose, Twist2d cu
   diagnostics_.backend = ControllerBackend::kMppi;
   diagnostics_.status = ControllerSolveStatus::kSuccess;
   if (path.empty()) return {};
-  const std::size_t robot_nearest = NearestPathPoint(path, pose);
-  const std::size_t proposal_index = std::min(robot_nearest + 8, path.size() - 1);
+  const bool new_path = path.data() != active_path_data_ || path.size() != active_path_size_ ||
+      (path.front().translation() - active_path_start_.translation()).norm() > 1e-9 ||
+      (path.back().translation() - active_path_goal_.translation()).norm() > 1e-9;
+  if (new_path) {
+    active_path_data_ = path.data();
+    active_path_size_ = path.size();
+    active_path_start_ = path.front();
+    active_path_goal_ = path.back();
+    committed_path_index_ = 0;
+    core_->Reset();
+  }
+  // Permit a tiny local correction after estimation/noise, but never allow
+  // the projection to jump back to a different branch of the route.
+  const std::size_t search_begin = committed_path_index_ > 2 ? committed_path_index_ - 2 : 0;
+  const std::size_t robot_nearest = NearestPathPoint(path, pose, search_begin);
+  committed_path_index_ = std::max(committed_path_index_, robot_nearest);
+  // Look ahead by path arc length. A fixed number of grid vertices changes
+  // physical meaning whenever the planner changes its sampling resolution.
+  const double braking_distance = current.linear * current.linear /
+      std::max(2. * config_.max_linear_acceleration, 1e-9);
+  const std::size_t proposal_index = ForwardIndexAtDistance(
+      path, committed_path_index_, std::max(2. * config_.robot_radius,
+                                             braking_distance + config_.robot_radius));
   const auto proposal_delta = path[proposal_index].translation() - pose.translation();
   const double proposal_error = NormalizeAngle(
       std::atan2(proposal_delta.y(), proposal_delta.x()) - Yaw(pose));
@@ -87,7 +117,7 @@ Twist2d MppiController::Compute(const Path& path, const Pose2d& pose, Twist2d cu
                                dynamic_obstacles, config_);
         if (collision) break;
         if (step % 3 == 0) {
-          const std::size_t nearest = NearestPathPoint(path, projected);
+          const std::size_t nearest = NearestPathPoint(path, projected, robot_nearest);
           path_align += (path[nearest].translation() - projected.translation()).norm();
           path_angle_sum += std::abs(NormalizeAngle(
               PathHeading(path, nearest) - Yaw(projected)));
@@ -109,8 +139,9 @@ Twist2d MppiController::Compute(const Path& path, const Pose2d& pose, Twist2d cu
       const int last = config_.mppi_time_steps - 1;
       const Pose2d terminal = MakePose2d(
           rollouts.x(sample, last), rollouts.y(sample, last), rollouts.yaw(sample, last));
-      const std::size_t nearest = NearestPathPoint(path, terminal);
-      const std::size_t follow = std::min(nearest + 8, path.size() - 1);
+      const std::size_t nearest = NearestPathPoint(path, terminal, robot_nearest);
+      const std::size_t follow = ForwardIndexAtDistance(
+          path, nearest, std::max(2. * config_.robot_radius, braking_distance + config_.robot_radius));
       const double goal = robot_goal_distance < 1.4 ?
           (path.back().translation() - terminal.translation()).norm() : 0.;
       const double goal_angle = robot_goal_distance < .5 ?

@@ -43,9 +43,12 @@ bool MakesProgress(const Path& path, const Pose2d& pose, const Twist2d& command)
   const auto target = path[std::min(nearest + 4, path.size() - 1)].translation();
   const auto delta = target - pose.translation();
   const double heading_error = NormalizeAngle(std::atan2(delta.y(), delta.x()) - Yaw(pose));
-  // Rotation is productive when it is needed. Once aligned, a near-zero
-  // translational command is controller stagnation and advances the cascade.
-  return std::abs(heading_error) > .35 || std::abs(command.linear) >= .04;
+  // While misaligned, only rotation toward the current path is productive.
+  // Once aligned, require positive velocity along it; stale MPC warm starts
+  // must not be accepted merely because they produce a non-zero command.
+  if (std::abs(heading_error) > .35)
+    return command.angular * heading_error > 0. && std::abs(command.angular) >= .03;
+  return command.linear * std::cos(heading_error) >= .04;
 }
 
 }  // namespace
@@ -123,6 +126,7 @@ Twist2d MpcController::Compute(const Path& path, const Pose2d& pose, Twist2d cur
     for (const auto& result : results) {
       any_deadline_miss = any_deadline_miss || result.diagnostics.deadline_miss;
       if (result.command && !result.diagnostics.deadline_miss &&
+          MakesProgress(path, pose, *result.command) &&
           !CollisionImminent(pose, *result.command, costmap) &&
           !DynamicCollisionImminent(pose, *result.command, dynamic_obstacles, config_)) {
         diagnostics_ = result.diagnostics;

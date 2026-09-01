@@ -14,6 +14,12 @@ Nav2MppiCore::Nav2MppiCore(const NavigationConfig& config)
       sequence_angular_(Eigen::ArrayXd::Zero(config.mppi_time_steps)),
       random_(config.mppi_seed) {}
 
+void Nav2MppiCore::Reset() {
+  sequence_velocity_.setZero();
+  sequence_angular_.setZero();
+  history_.fill({});
+}
+
 void Nav2MppiCore::BlendProposal(Twist2d proposal) {
   sequence_velocity_ = .85 * sequence_velocity_ + .15 * proposal.linear;
   sequence_angular_ = .85 * sequence_angular_ + .15 * proposal.angular;

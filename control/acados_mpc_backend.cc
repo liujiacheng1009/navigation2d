@@ -48,6 +48,10 @@ struct AcadosMpcBackend::Impl {
   bool ready = false;
   navigation2d_mpcc_solver_capsule* capsule = nullptr;
   bool has_warm_start = false;
+  bool has_path_identity = false;
+  std::size_t path_size = 0;
+  Eigen::Vector2d path_first = Eigen::Vector2d::Zero();
+  Eigen::Vector2d path_last = Eigen::Vector2d::Zero();
   control_internal::PathSearchState path_search;
   std::array<std::array<double, NAVIGATION2D_MPCC_NX>, NAVIGATION2D_MPCC_N + 1> states{};
   std::array<std::array<double, NAVIGATION2D_MPCC_NU>, NAVIGATION2D_MPCC_N> controls{};
@@ -81,6 +85,14 @@ std::optional<Twist2d> AcadosMpcBackend::Solve(
   ocp_nlp_constraints_model_set(config, dims, input, output, 0, "lbx", state.data());
   ocp_nlp_constraints_model_set(config, dims, input, output, 0, "ubx", state.data());
 
+  const bool same_path = impl_->has_path_identity && impl_->path_size == path.size() &&
+      (impl_->path_first - path.front().translation()).squaredNorm() < 1e-12 &&
+      (impl_->path_last - path.back().translation()).squaredNorm() < 1e-12;
+  if (!same_path) impl_->has_warm_start = false;
+  impl_->has_path_identity = true;
+  impl_->path_size = path.size();
+  impl_->path_first = path.front().translation();
+  impl_->path_last = path.back().translation();
   const std::size_t nearest =
       control_internal::FindNearestPathPoint(path, pose, &impl_->path_search);
   impl_->diagnostics.path_search_evaluations = impl_->path_search.last_evaluations;

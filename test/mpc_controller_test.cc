@@ -31,6 +31,16 @@ int main() {
       long_path, navigation2d::MakePose2d(430.05, 0., 0.), &path_search);
   assert(nearest == 8601);
   assert(path_search.last_evaluations < 7 * 128);
+  // Replanning may reuse both the allocation and point count. Endpoint
+  // changes must invalidate the previous monotonic progress index.
+  const auto reused_data = long_path.data();
+  for (int index = 0; index < kLongPathPoints; ++index)
+    long_path[index] = navigation2d::MakePose2d(index * .05, 10., 0.);
+  assert(long_path.data() == reused_data);
+  nearest = navigation2d::control_internal::FindNearestPathPoint(
+      long_path, navigation2d::MakePose2d(.05, 10., 0.), &path_search);
+  assert(nearest == 1);
+  assert(path_search.last_evaluations < 4 * 128);
 
   const char* map_path = "/tmp/navigation2d_mpc_test.json";
   std::ofstream output(map_path);

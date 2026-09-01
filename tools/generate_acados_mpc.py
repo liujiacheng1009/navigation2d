@@ -80,8 +80,21 @@ def build_solver(output: Path, horizon: int, duration: float, obstacle_slots: in
     ocp.constraints.idxbx = np.array([3, 4])
     ocp.constraints.lbx = np.array([-0.12, -0.9])
     ocp.constraints.ubx = np.array([0.55, 0.9])
+    nonlinear_constraints = obstacle_slots + corridor_slots
     ocp.constraints.lh = np.concatenate((np.ones(obstacle_slots), np.zeros(corridor_slots)))
-    ocp.constraints.uh = np.full(obstacle_slots + corridor_slots, 1e15)
+    ocp.constraints.uh = np.full(nonlinear_constraints, 1e15)
+    # A newly updated occupancy grid can momentarily put the measured state
+    # just outside the corridor constructed from the previous path.  Keeping
+    # these constraints hard makes SQP-RTI's first QP infeasible (MINSTEP).
+    # High-penalty slacks preserve obstacle avoidance while allowing the next
+    # iterate to recover; CollisionMonitor remains the independent hard stop.
+    ocp.constraints.idxsh = np.arange(nonlinear_constraints)
+    ocp.constraints.lsh = np.zeros(nonlinear_constraints)
+    ocp.constraints.ush = np.zeros(nonlinear_constraints)
+    ocp.cost.zl = np.full(nonlinear_constraints, 200.0)
+    ocp.cost.zu = np.full(nonlinear_constraints, 200.0)
+    ocp.cost.Zl = np.full(nonlinear_constraints, 1000.0)
+    ocp.cost.Zu = np.full(nonlinear_constraints, 1000.0)
     ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"
     ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
     ocp.solver_options.integrator_type = "ERK"
@@ -89,10 +102,15 @@ def build_solver(output: Path, horizon: int, duration: float, obstacle_slots: in
     ocp.solver_options.print_level = 0
     ocp.code_gen_options.code_export_directory = str(output)
     ocp.code_gen_options.json_file = str(output / "acados_ocp.json")
-    # Generate/build separately: this emits a C/C++ consumable solver and
-    # does not require Python to dlopen it during generation.
-    AcadosOcpSolver.generate(ocp, verbose=False)
-    AcadosOcpSolver.build(str(output), verbose=False)
+    # ACADOS_SOURCE_DIR supplies templates; generated native code must compile
+    # and link against the separate CMake installation.
+    acados_install = Path(os.environ.get("ACADOS_INSTALL_DIR", "/opt/acados"))
+    ocp.code_gen_options.acados_include_path = str(acados_install / "include")
+    ocp.code_gen_options.acados_lib_path = str(acados_install / "lib")
+    # Only generate here.  The generated Makefile records ACADOS_SOURCE_DIR,
+    # while its public headers and libraries live in the CMake install tree;
+    # the container build invokes make with ACADOS_INSTALL_DIR explicitly.
+    AcadosOcpSolver.generate(ocp, str(output / "acados_ocp.json"), verbose=True)
 
 
 def main() -> None:

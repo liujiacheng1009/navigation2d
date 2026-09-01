@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 
 #include "navigation2d/application/navigation_config.h"
@@ -26,6 +27,13 @@ class MppiController final : public LocalController {
   NavigationConfig config_;
   mutable std::unique_ptr<control_internal::Nav2MppiCore> core_;
   mutable ControllerDiagnostics diagnostics_;
+  // Progress is monotone along one global path. This prevents a closest-point
+  // query from snapping to an already traversed, spatially nearby segment.
+  mutable const void* active_path_data_ = nullptr;
+  mutable std::size_t active_path_size_ = 0;
+  mutable Pose2d active_path_start_;
+  mutable Pose2d active_path_goal_;
+  mutable std::size_t committed_path_index_ = 0;
 };
 
 }  // namespace navigation2d

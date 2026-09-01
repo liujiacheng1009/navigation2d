@@ -22,6 +22,9 @@ struct MppiRollouts {
 class Nav2MppiCore {
  public:
   explicit Nav2MppiCore(const NavigationConfig& config);
+  // A warm start belongs to exactly one geometric reference path. Retaining
+  // it across a replan injects steering commands for an unrelated route.
+  void Reset();
   void BlendProposal(Twist2d proposal);
   MppiRollouts Generate(const Pose2d& pose, Twist2d current);
   bool Update(const MppiRollouts& rollouts, const Eigen::ArrayXd& costs);
