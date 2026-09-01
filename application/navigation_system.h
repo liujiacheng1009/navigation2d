@@ -38,6 +38,10 @@ struct NavigationState {
   // sensing, costmap updates, global replanning, simulation and safety filtering.
   double controller_solve_us = 0.;
   ControllerDiagnostics controller_diagnostics;
+  // Preserve the planner's concrete rejection reason for ROS diagnostics;
+  // callers should not have to infer start collision vs. graph disconnect
+  // from a generic zero-length path.
+  std::string planning_failure_reason;
   CollisionMonitorAction collision_monitor_action = CollisionMonitorAction::kNone;
   double minimum_ttc_s = 0.;
   GlobalPlanningDiagnostics global_planning;

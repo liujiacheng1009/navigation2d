@@ -147,6 +147,7 @@ class NavigationSystem::Impl {
       // internal projection state even when the new path has similar endpoints.
       controller = MakeController(config);
       state.global_planning = planner->Diagnostics();
+      state.planning_failure_reason.clear();
       const double planning_elapsed = std::chrono::duration<double>(
           std::chrono::steady_clock::now() - planning_started).count();
       state.global_planning.elapsed_s = planning_elapsed;
@@ -169,8 +170,9 @@ class NavigationSystem::Impl {
       rotation_without_progress_rad = 0.;
       planning_failures = 0;
       state.status = NavigationStatus::kNavigating;
-    } catch (const std::runtime_error&) {
+    } catch (const std::runtime_error& error) {
       path.clear(); state.command = {};
+      state.planning_failure_reason = error.what();
       ++planning_failures;
       state.status = planning_failures > config.max_recovery_attempts ?
           NavigationStatus::kBlocked : NavigationStatus::kNavigating;
@@ -229,6 +231,7 @@ void NavigationSystem::SetGoal(Pose2d goal) {
   impl_->state.requested_command = {};
   impl_->state.published_command = {};
   impl_->state.collision_monitor_action = CollisionMonitorAction::kNone;
+  impl_->state.planning_failure_reason.clear();
 }
 
 void NavigationSystem::ClearGoal() {
@@ -469,7 +472,8 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
     impl_->state.safety_stopped_motion =
         impl_->state.controller_commanded_motion &&
         std::abs(command.linear) <= 1e-4 && std::abs(command.angular) <= 1e-4;
-    if (!impl_->state.controller_commanded_motion && !impl_->state.safety_stopped_motion) {
+    if (!impl_->state.controller_commanded_motion && !impl_->state.safety_stopped_motion &&
+        !impl_->state.controller_diagnostics.intentional_stop) {
       ++impl_->controller_blocked_cycles;
       if (impl_->controller_blocked_cycles >= 3) {
         ++impl_->state.recoveries;

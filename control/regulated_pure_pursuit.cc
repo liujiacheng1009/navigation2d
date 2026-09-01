@@ -1,7 +1,9 @@
 #include "navigation2d/control/regulated_pure_pursuit.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <limits>
 
 namespace navigation2d {
 namespace { double Angle(double a) { return std::atan2(std::sin(a), std::cos(a)); } }
@@ -11,12 +13,18 @@ Twist2d RegulatedPurePursuit::Compute(const Path& path, const Pose2d& pose, Twis
                                        const std::vector<PredictedObstacle>& dynamic_obstacles) const {
   (void)dynamic_obstacles;
   fallback_level_ = 0;
+  maneuver_ = ControllerManeuver::kTracking;
+  intentional_stop_ = false;
   if (path.empty()) return {};
   const bool path_replaced = path.size() != path_size_ || path.empty() ||
       std::hypot(X(path.front()) - path_start_x_, Y(path.front()) - path_start_y_) > .05 ||
       std::hypot(X(path.back()) - path_goal_x_, Y(path.back()) - path_goal_y_) > .05;
   if (path_replaced) {
     progress_index_ = 0;
+    mode_ = PursuitMode::kTracking;
+    recovery_heading_ = 0.;
+    stopped_cycles_ = 0;
+    aligned_cycles_ = 0;
     path_size_ = path.size();
     if (!path.empty()) {
       path_start_x_ = X(path.front()); path_start_y_ = Y(path.front());
@@ -98,6 +106,115 @@ Twist2d RegulatedPurePursuit::Compute(const Path& path, const Pose2d& pose, Twis
     return Twist2d{linear, std::clamp(linear * curvature, -config_.max_angular_velocity,
                                       config_.max_angular_velocity)};
   };
+  const double dv = config_.max_linear_acceleration * config_.control_period;
+  const double dw = config_.max_angular_acceleration * config_.control_period;
+  const auto approach_zero = [](double value, double delta) {
+    return std::clamp(0., value - delta, value + delta);
+  };
+  const auto forward_probe_safe = [&](double heading) {
+    const Pose2d aligned = MakePose2d(X(pose), Y(pose), heading);
+    return !CollisionImminent(aligned, {config_.regulated_min_speed, 0.}, costmap);
+  };
+  // Select a heading which advances along the committed route and is
+  // executable as a short straight probe after an in-place rotation.  The
+  // preferred heading is the first materially different outgoing tangent,
+  // which handles Theta* vertices without cutting the inside of a shelf
+  // corner. Small symmetric offsets give an off-centre robot a way to move
+  // away from the obstacle before pure pursuit rejoins the centreline.
+  const auto select_recovery_heading = [&](double* selected) {
+    const auto incoming = path[nearest + 1].translation() - path[nearest].translation();
+    double preferred = std::atan2(incoming.y(), incoming.x());
+    double forward_arc = 0.;
+    for (std::size_t index = nearest + 1; index + 1 < path.size(); ++index) {
+      const auto segment = path[index + 1].translation() - path[index].translation();
+      const double length = segment.norm();
+      if (length <= 1e-9) continue;
+      forward_arc += length;
+      const double candidate = std::atan2(segment.y(), segment.x());
+      if (std::abs(Angle(candidate - preferred)) > .10) {
+        preferred = candidate;
+        break;
+      }
+      if (forward_arc > config_.max_lookahead_distance) break;
+    }
+    constexpr std::array<double, 13> kHeadingOffsets{
+        0., .10, -.10, .20, -.20, .35, -.35, .50, -.50, .70, -.70, .95, -.95};
+    for (const double offset : kHeadingOffsets) {
+      const double candidate = Angle(preferred + offset);
+      if (forward_probe_safe(candidate)) {
+        *selected = candidate;
+        return true;
+      }
+    }
+    return false;
+  };
+  const auto begin_path_alignment = [&]() {
+    double heading = 0.;
+    if (!select_recovery_heading(&heading)) {
+      mode_ = PursuitMode::kRouteInfeasible;
+      maneuver_ = ControllerManeuver::kRouteInfeasible;
+      fallback_level_ = 7;
+      return false;
+    }
+    recovery_heading_ = heading;
+    mode_ = PursuitMode::kStopping;
+    stopped_cycles_ = 0;
+    aligned_cycles_ = 0;
+    return true;
+  };
+  const auto stopping_command = [&]() {
+    maneuver_ = ControllerManeuver::kStopping;
+    intentional_stop_ = true;
+    fallback_level_ = 5;
+    Twist2d braking{approach_zero(current.linear, dv),
+                    approach_zero(current.angular, dw)};
+    // Prefer physical deceleration. If even that short rollout enters an
+    // obstacle, safety takes precedence and the velocity command is zeroed
+    // immediately; the simulator/base driver then performs the hard stop.
+    if (CollisionImminent(pose, braking, costmap)) braking = {};
+    return braking;
+  };
+
+  if (mode_ == PursuitMode::kRouteInfeasible) {
+    maneuver_ = ControllerManeuver::kRouteInfeasible;
+    fallback_level_ = 7;
+    return {};
+  }
+  if (mode_ == PursuitMode::kStopping) {
+    const bool stopped = std::abs(current.linear) < .015 &&
+                         std::abs(current.angular) < .05;
+    stopped_cycles_ = stopped ? stopped_cycles_ + 1 : 0;
+    if (stopped_cycles_ < 2) return stopping_command();
+    mode_ = PursuitMode::kRotateToPath;
+    aligned_cycles_ = 0;
+  }
+  if (mode_ == PursuitMode::kRotateToPath) {
+    maneuver_ = ControllerManeuver::kRotateToPath;
+    fallback_level_ = 6;
+    double heading_error = Angle(recovery_heading_ - Yaw(pose));
+    const bool aligned = std::abs(heading_error) < .08;
+    aligned_cycles_ = aligned ? aligned_cycles_ + 1 : 0;
+    if (aligned_cycles_ >= 2) {
+      // Revalidate the constructive forward probe because the local costmap
+      // may have changed while braking and rotating.
+      if (!forward_probe_safe(recovery_heading_)) {
+        if (!begin_path_alignment()) return {};
+        return stopping_command();
+      }
+      mode_ = PursuitMode::kTracking;
+      maneuver_ = ControllerManeuver::kTracking;
+      fallback_level_ = 0;
+      aligned_cycles_ = 0;
+    } else {
+      const double desired = std::clamp(2.2 * heading_error,
+                                        -config_.max_angular_velocity,
+                                        config_.max_angular_velocity);
+      // Rotation shim semantics: translation is exactly zero. Applying the
+      // linear acceleration clamp here would preserve residual forward speed
+      // and reproduce the stage-4 corner collision this state resolves.
+      return {0., std::clamp(desired, current.angular - dw, current.angular + dw)};
+    }
+  }
   // A globally valid polyline may require a tighter turn than its nominal
   // lookahead circle.  Search progressively shorter *path-relative* carrots
   // before declaring a stop.  This is a feasibility projection, not a speed
@@ -109,61 +226,29 @@ Twist2d RegulatedPurePursuit::Compute(const Path& path, const Pose2d& pose, Twis
     target = target_for(carrot_at(lookahead));
   }
   if (CollisionImminent(pose, target, costmap)) {
-    fallback_level_ = 1;
-    // A curvature-constrained base cannot enter every globally valid corner
-    // from every heading in one continuous arc.  Align with the tangent of
-    // the next validated segment, then resume normal pursuit on the next
-    // cycle. This bounded geometric manoeuvre replaces the old 18 s
-    // zero-command wait and is used only when every forward arc is unsafe.
-    const auto incoming = path[nearest + 1].translation() - path[nearest].translation();
-    double tangent_heading = std::atan2(incoming.y(), incoming.x());
-    double forward_arc = 0.;
-    // At a sharp vertex the current (incoming) tangent is already aligned,
-    // yet continuing straight is exactly the unsafe command. Find the first
-    // materially different outgoing tangent in the local route and align to
-    // it. Densification makes this search independent of Theta* vertex gaps.
-    for (std::size_t index = nearest + 1; index + 1 < path.size(); ++index) {
-      const auto segment = path[index + 1].translation() - path[index].translation();
-      const double length = segment.norm();
-      if (length <= 1e-9) continue;
-      forward_arc += length;
-      const double candidate = std::atan2(segment.y(), segment.x());
-      if (std::abs(Angle(candidate - tangent_heading)) > .10) {
-        tangent_heading = candidate;
-        break;
-      }
-      if (forward_arc > config_.max_lookahead_distance) break;
-    }
-    const double tangent_error = Angle(tangent_heading - Yaw(pose));
-    if (std::abs(tangent_error) > config_.rotate_to_heading_min_angle) {
-      fallback_level_ = 2;
-      target = {0., std::clamp(2.2 * tangent_error,
-                              -config_.max_angular_velocity, config_.max_angular_velocity)};
-    } else {
-      fallback_level_ = 3;
-      // Do not turn an already aligned tangent fallback into a zero-command
-      // fixed point. The dense global route has been footprint checked, so a
-      // short motion along its exact local tangent is the constructive way
-      // out of the degenerate pure-pursuit circle. It also preserves the
-      // forward-only contract instead of invoking a scripted retreat.
-      target = {config_.regulated_min_speed,
-                std::clamp(2.2 * tangent_error,
-                           -config_.max_angular_velocity, config_.max_angular_velocity)};
-    }
+    if (!begin_path_alignment()) return {};
+    return stopping_command();
   }
-  const double dv = config_.max_linear_acceleration * config_.control_period;
-  const double dw = config_.max_angular_acceleration * config_.control_period;
   target.linear = std::clamp(target.linear, current.linear - dv, current.linear + dv);
   target.angular = std::clamp(target.angular, current.angular - dw, current.angular + dw);
   if (CollisionImminent(pose, target, costmap)) {
-    fallback_level_ = 4;
-    return {0., 0.};
+    // The geometric target can be safe while the acceleration-limited command
+    // is not (for example residual forward speed when a shelf corner requires
+    // rotation). Enter the same explicit braking/alignment state instead of
+    // returning an unlabelled zero forever.
+    if (!begin_path_alignment()) return {};
+    return stopping_command();
   }
   return target;
 }
 
 bool RegulatedPurePursuit::CollisionImminent(const Pose2d& pose, Twist2d command,
                                              const LayeredCostmap& costmap) const {
+  // RPP currently uses a circular footprint. An in-place rotation therefore
+  // has exactly the same occupied set as the current pose and cannot create a
+  // new static collision. This also lets a legal, millimetre-clear pose align
+  // away from an obstacle instead of being trapped by rasterisation.
+  if (std::abs(command.linear) <= 1e-9) return false;
   Pose2d projected = pose;
   for (double t = 0.; t <= config_.collision_horizon; t += config_.control_period) {
     const double yaw = Angle(Yaw(projected) + command.angular * config_.control_period);

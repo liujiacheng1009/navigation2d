@@ -15,6 +15,12 @@ struct Twist2d {
 
 enum class ControllerBackend { kNone, kAcados, kMppi, kRpp, kDwa };
 enum class ControllerSolveStatus { kNotRun, kSuccess, kUnavailable, kFailure, kDeadlineMiss, kUnsafe };
+enum class ControllerManeuver {
+  kTracking,
+  kStopping,
+  kRotateToPath,
+  kRouteInfeasible,
+};
 
 struct ControllerDiagnostics {
   ControllerBackend backend = ControllerBackend::kNone;
@@ -25,6 +31,11 @@ struct ControllerDiagnostics {
   int iterations = 0;
   bool deadline_miss = false;
   int fallback_level = 0;
+  ControllerManeuver maneuver = ControllerManeuver::kTracking;
+  // A zero command can be a deliberate part of a convergent controller
+  // manoeuvre (for example braking before an in-place turn).  The navigation
+  // watchdog must distinguish that from a controller which has no command.
+  bool intentional_stop = false;
   double min_ttc_s = 0.;
   std::size_t path_search_evaluations = 0;
 };

@@ -19,12 +19,22 @@ class RegulatedPurePursuit final : public LocalController {
   ControllerDiagnostics Diagnostics() const override {
     ControllerDiagnostics diagnostics;
     diagnostics.backend = ControllerBackend::kRpp;
-    diagnostics.status = ControllerSolveStatus::kSuccess;
+    diagnostics.status = maneuver_ == ControllerManeuver::kRouteInfeasible ?
+        ControllerSolveStatus::kUnsafe : ControllerSolveStatus::kSuccess;
     diagnostics.fallback_level = fallback_level_;
+    diagnostics.maneuver = maneuver_;
+    diagnostics.intentional_stop = intentional_stop_;
     return diagnostics;
   }
 
  private:
+  enum class PursuitMode {
+    kTracking,
+    kStopping,
+    kRotateToPath,
+    kRouteInfeasible,
+  };
+
   NavigationConfig config_;
   // Path progress is a topological state, not an unconstrained nearest-point
   // query. Retaining it prevents a self-near path from jumping backwards.
@@ -33,6 +43,12 @@ class RegulatedPurePursuit final : public LocalController {
   mutable double path_start_x_ = 0., path_start_y_ = 0.;
   mutable double path_goal_x_ = 0., path_goal_y_ = 0.;
   mutable int fallback_level_ = 0;
+  mutable PursuitMode mode_ = PursuitMode::kTracking;
+  mutable ControllerManeuver maneuver_ = ControllerManeuver::kTracking;
+  mutable bool intentional_stop_ = false;
+  mutable double recovery_heading_ = 0.;
+  mutable int stopped_cycles_ = 0;
+  mutable int aligned_cycles_ = 0;
 };
 
 }  // namespace navigation2d
