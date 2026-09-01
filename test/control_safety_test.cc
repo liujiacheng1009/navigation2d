@@ -18,7 +18,7 @@ int main() {
   assert(before_observation.action == navigation2d::CollisionMonitorAction::kSourceTimeout);
   navigation2d::LaserScan scan;
   scan.angle_min = 0.; scan.angle_increment = .1;
-  scan.range_min = .02; scan.range_max = 5.; scan.ranges = {.20};
+  scan.range_min = .02; scan.range_max = 5.; scan.ranges = {.29};
   const auto pose = navigation2d::MakePose2d(1., 1., 0.);
   monitor.UpdateLaserScan(pose, scan);
   auto result = monitor.Filter(pose, {.2, 0.}, 1.);
@@ -34,6 +34,21 @@ int main() {
   assert(result.action == navigation2d::CollisionMonitorAction::kNone);
   result = monitor.Filter(pose, {.2, 0.}, 2.);
   assert(result.action == navigation2d::CollisionMonitorAction::kSourceTimeout);
+
+  // A noisy return already inside a circular footprint must not make motion
+  // impossible: it is removed by footprint clearing. The test above still
+  // proves that a point initially outside and newly swept by motion stops.
+  navigation2d::NavigationConfig rotation_config = config;
+  rotation_config.collision_monitor_trigger_cycles = 1;
+  navigation2d::CollisionMonitor rotation_monitor(rotation_config);
+  scan.ranges = {.20};
+  rotation_monitor.UpdateLaserScan(pose, scan);
+  result = rotation_monitor.Filter(pose, {0., .4}, 3.);
+  assert(result.action == navigation2d::CollisionMonitorAction::kNone);
+  assert(result.command.angular == .4);
+  rotation_monitor.UpdateLaserScan(pose, scan);
+  result = rotation_monitor.Filter(pose, {.2, 0.}, 3.05);
+  assert(result.action == navigation2d::CollisionMonitorAction::kNone);
 
   const char* map_path = "/tmp/navigation2d_safe_corridor_test.json";
   std::ofstream output(map_path);

@@ -75,7 +75,14 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
        time += config_.control_period) {
     projected = Integrate(projected, command, config_.control_period);
     const bool collision = std::any_of(points_.begin(), points_.end(), [&](const auto& point) {
-      return (point - projected.translation()).norm() <= config_.robot_radius;
+      const double initial_distance = (point - robot_pose.translation()).norm();
+      const double projected_distance = (point - projected.translation()).norm();
+      // Footprint clearing: a static obstacle cannot physically occupy the
+      // robot's current solid body. Returns already inside the footprint are
+      // self/noise/contact discretization and must not permanently latch the
+      // base. The monitor guards newly swept space only.
+      return initial_distance > config_.robot_radius &&
+             projected_distance <= config_.robot_radius;
     });
     if (collision) { ttc = time; break; }
   }
