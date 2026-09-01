@@ -37,6 +37,10 @@ MPCC 风格路径轮廓控制、曲率限速、静态 footprint 约束及带协�
 产品入口是 `application/navigation_system.h`：调用方通过 `SetGoal()` 设置目标，通过
 `UpdateLaserScan()` 输入真实 2D 激光，或通过 `UpdatePointCloud()` 输入雷达坐标系下的
 二维击中点，再把 localization2d/底盘提供的位姿和实测速度传给 `ComputeCommand()`。
+
+自主探索策略位于 `exploration/frontier_explorer.h`。它直接消费部分占据栅格，负责
+前沿聚类、安全观察位生成、信息增益评分、失败黑名单与探索完成判定；
+`ros/autonomous_explorer_node.cc` 只负责 ROS 消息适配、调用 `NavigationSystem` 和状态发布。
 核心只返回速度和导航状态，不生成传感器数据、不积分机器人位姿，也不访问仿真真值。
 
 ## 文档
