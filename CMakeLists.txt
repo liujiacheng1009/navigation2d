@@ -33,7 +33,7 @@ add_library(navigation2d_core STATIC
   control/regulated_pure_pursuit.cc control/dwa_controller.cc control/nav2_mppi_core.cc
   control/mppi_controller.cc control/dynamic_safety.cc
   control/safe_corridor.cc control/collision_monitor.cc control/mpc_controller.cc
-  application/navigation_system.cc)
+  exploration/frontier_explorer.cc application/navigation_system.cc)
 target_include_directories(navigation2d_core PUBLIC "${PROJECT_SOURCE_DIR}/..")
 target_include_directories(navigation2d_core SYSTEM PRIVATE "${decomp_util_SOURCE_DIR}/include")
 target_link_libraries(navigation2d_core PUBLIC Eigen3::Eigen Sophus::Sophus yaml-cpp)
@@ -85,3 +85,9 @@ add_test(NAME control_safety_test COMMAND control_safety_test)
 add_executable(global_planner_test test/global_planner_test.cc)
 target_link_libraries(global_planner_test PRIVATE navigation2d_core)
 add_test(NAME global_planner_test COMMAND global_planner_test)
+add_executable(frontier_explorer_test test/frontier_explorer_test.cc)
+target_link_libraries(frontier_explorer_test PRIVATE navigation2d_core)
+add_test(NAME frontier_explorer_test COMMAND frontier_explorer_test)
+add_executable(navigation_recovery_test test/navigation_recovery_test.cc)
+target_link_libraries(navigation_recovery_test PRIVATE navigation2d_core)
+add_test(NAME navigation_recovery_test COMMAND navigation_recovery_test)

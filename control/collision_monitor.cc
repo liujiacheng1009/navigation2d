@@ -81,11 +81,20 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
   }
 
   CollisionMonitorAction requested = CollisionMonitorAction::kNone;
-  if (min_distance <= config_.collision_monitor_stop_distance ||
-      ttc <= config_.control_period)
+  // A lidar return beside (or slightly behind) the footprint is not a
+  // collision with the *commanded* motion.  Treating every such return as an
+  // emergency stop permanently latches the robot at shelf ends and doorway
+  // jambs: the controller is unable to turn or move away, so the recovery
+  // tree times out despite a valid global path.  The static/local costmap
+  // still rejects any swept-footprint collision; the live monitor's stop
+  // authority is deliberately limited to a collision predicted along the
+  // command trajectory on the next control step.
+  if (ttc <= config_.control_period)
     requested = CollisionMonitorAction::kStop;
-  else if (min_distance <= config_.collision_monitor_slowdown_distance ||
-           std::isfinite(ttc))
+  // Side walls in a narrow but traversable doorway must not throttle the
+  // robot indefinitely. Slow down only when the commanded swept footprint
+  // actually approaches a collision; retain the all-direction emergency stop.
+  else if (std::isfinite(ttc))
     requested = CollisionMonitorAction::kSlowdown;
 
   if (requested != CollisionMonitorAction::kNone) {

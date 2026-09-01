@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cmath>
 #include <limits>
 
 #include "navigation2d/planning/global_planner.h"
@@ -15,6 +16,10 @@ struct PathSearchState {
   std::size_t size = 0;
   std::size_t nearest = 0;
   std::size_t last_evaluations = 0;
+  double first_x = 0.;
+  double first_y = 0.;
+  double last_x = 0.;
+  double last_y = 0.;
 };
 
 namespace path_tracking_internal {
@@ -73,7 +78,14 @@ inline std::size_t FindNearestPathPoint(const Path& path, const Pose2d& pose,
                                         PathSearchState* state) {
   using namespace path_tracking_internal;
   if (path.empty()) return 0;
-  const bool same_path = state->data == path.data() && state->size == path.size();
+  // A planner commonly assigns a new path into the same vector allocation.
+  // Pointer + size alone then aliases a different route and incorrectly keeps
+  // the old monotonic progress index.
+  const bool same_path = state->data == path.data() && state->size == path.size() &&
+      std::abs(state->first_x - X(path.front())) < 1e-9 &&
+      std::abs(state->first_y - Y(path.front())) < 1e-9 &&
+      std::abs(state->last_x - X(path.back())) < 1e-9 &&
+      std::abs(state->last_y - Y(path.back())) < 1e-9;
   std::size_t evaluations = 0;
   std::size_t nearest = 0;
   if (same_path) {
@@ -97,6 +109,10 @@ inline std::size_t FindNearestPathPoint(const Path& path, const Pose2d& pose,
   state->size = path.size();
   state->nearest = nearest;
   state->last_evaluations = evaluations;
+  state->first_x = X(path.front());
+  state->first_y = Y(path.front());
+  state->last_x = X(path.back());
+  state->last_y = Y(path.back());
   return nearest;
 }
 

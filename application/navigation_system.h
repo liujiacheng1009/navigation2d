@@ -21,6 +21,12 @@ struct NavigationState {
   int emergency_stops = 0;
   int recoveries = 0;
   double global_path_length_m = 0.;
+  // Route-coordinate telemetry for recovery decisions.  `path_progress_m`
+  // is monotonic within one global plan; the two flags identify whether a
+  // zero command came from the tracker itself or from live safety filtering.
+  double path_progress_m = 0.;
+  bool controller_commanded_motion = false;
+  bool safety_stopped_motion = false;
   // Duration of the latest LocalController::Compute call only. This excludes
   // sensing, costmap updates, global replanning, simulation and safety filtering.
   double controller_solve_us = 0.;
@@ -49,6 +55,10 @@ class NavigationSystem {
   void SetGoal(Pose2d goal);
   void ClearGoal();
   void UpdateLaserScan(const Pose2d& sensor_pose, const LaserScan& scan);
+  // Keeps live range data out of the global static-map graph when an online
+  // mapper already owns static occupancy integration.  CollisionMonitor
+  // still guards every commanded motion.
+  void UpdateCollisionMonitorLaserScan(const Pose2d& sensor_pose, const LaserScan& scan);
   void UpdatePointCloud(const Pose2d& sensor_pose, const PointCloud2d& cloud);
   // Supplies tracker output in the map frame. Predictions are consumed by the
   // constrained MPC controller; legacy controllers safely ignore them.

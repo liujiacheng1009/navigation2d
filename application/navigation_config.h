@@ -48,6 +48,7 @@ struct NavigationConfig {
   double recovery_duration = 1.;
   double recovery_linear_velocity = -.08;
   double recovery_angular_velocity = .4;
+  int max_recovery_attempts = 3;
   double dynamic_obstacle_radius = .20;
   int lattice_yaw_bins = 32;
   double lattice_primitive_length = .15;

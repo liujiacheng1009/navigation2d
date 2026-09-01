@@ -22,6 +22,70 @@
 namespace navigation2d {
 namespace {
 double NormalizeAngle(double value) { return std::atan2(std::sin(value), std::cos(value)); }
+Path DensifyPath(const Path& sparse, double maximum_step) {
+  if (sparse.size() < 2) return sparse;
+  Path dense;
+  dense.reserve(sparse.size());
+  dense.push_back(sparse.front());
+  for (std::size_t index = 1; index < sparse.size(); ++index) {
+    const auto start = sparse[index - 1].translation();
+    const auto segment = sparse[index].translation() - start;
+    const double length = segment.norm();
+    if (length <= 1e-9) continue;
+    const int steps = std::max(1, static_cast<int>(std::ceil(length / maximum_step)));
+    const double yaw = std::atan2(segment.y(), segment.x());
+    for (int step = 1; step <= steps; ++step) {
+      const double ratio = static_cast<double>(step) / steps;
+      const auto point = start + ratio * segment;
+      dense.push_back(MakePose2d(point.x(), point.y(), yaw));
+    }
+  }
+  if (!dense.empty()) dense.back() = MakePose2d(X(sparse.back()), Y(sparse.back()), Yaw(sparse.back()));
+  return dense;
+}
+
+bool PathFootprintValid(const Path& path, const LayeredCostmap& costmap, double robot_radius) {
+  return !path.empty() && std::all_of(path.begin(), path.end(), [&](const Pose2d& pose) {
+    return !costmap.lethal(X(pose), Y(pose), robot_radius);
+  });
+}
+// Project onto the *ordered* route, never onto an unconstrained cloud of
+// waypoints.  The returned coordinate is arc length from the path start.
+//
+// The small forward window is intentional: a path may pass close to itself
+// in a warehouse aisle.  A global closest-point query can then teleport the
+// progress state across a different branch and incorrectly declare motion.
+double PathProgress(const Path& path, const Pose2d& pose, double minimum_progress) {
+  if (path.size() < 2) return 0.;
+  constexpr double kBackwardSlack = .15;
+  constexpr double kForwardWindow = 1.25;
+  double arc = 0., best_arc = std::max(0., minimum_progress);
+  double best_distance = std::numeric_limits<double>::infinity();
+  const double begin = std::max(0., minimum_progress - kBackwardSlack);
+  const double end = minimum_progress + kForwardWindow;
+  for (std::size_t i = 1; i < path.size(); ++i) {
+    const auto& first = path[i - 1].translation();
+    const auto& second = path[i].translation();
+    const auto segment = second - first;
+    const double length = segment.norm();
+    if (length <= 1e-9) continue;
+    const double segment_end = arc + length;
+    if (segment_end < begin) { arc = segment_end; continue; }
+    if (arc > end) break;
+    const double t = std::clamp((pose.translation() - first).dot(segment) /
+                                    (length * length), 0., 1.);
+    const double projected_arc = arc + t * length;
+    if (projected_arc >= begin && projected_arc <= end) {
+      const double distance = (pose.translation() - (first + t * segment)).norm();
+      if (distance < best_distance) {
+        best_distance = distance;
+        best_arc = projected_arc;
+      }
+    }
+    arc = segment_end;
+  }
+  return best_arc;
+}
 void AddPathMetrics(const Path& path, const LayeredCostmap& costmap, double robot_radius,
                     GlobalPlanningDiagnostics* diagnostics) {
   planning_internal::DistanceField field(costmap);
@@ -61,9 +125,15 @@ class NavigationSystem::Impl {
   }
 
   void Replan(const Pose2d& pose) {
+    ++state.replans;
     try {
       const auto planning_started = std::chrono::steady_clock::now();
-      path = planner->Plan(costmap, pose, *goal); ++state.replans;
+      path = DensifyPath(planner->Plan(costmap, pose, *goal), .08);
+      if (!PathFootprintValid(path, costmap, config.robot_radius))
+        throw std::runtime_error("planned path failed dense footprint validation");
+      // A replan is a new ordered route contract. Reset the controller's
+      // internal projection state even when the new path has similar endpoints.
+      controller = MakeController(config);
       state.global_planning = planner->Diagnostics();
       const double planning_elapsed = std::chrono::duration<double>(
           std::chrono::steady_clock::now() - planning_started).count();
@@ -79,10 +149,17 @@ class NavigationSystem::Impl {
       for (std::size_t i = 1; i < path.size(); ++i)
         path_length += (path[i].translation() - path[i - 1].translation()).norm();
       if (state.global_path_length_m == 0.) state.global_path_length_m = path_length;
+      best_path_progress_m = 0.;
+      state.path_progress_m = 0.;
+      controller_blocked_cycles = 0;
+      rotation_without_progress_rad = 0.;
+      planning_failures = 0;
       state.status = NavigationStatus::kNavigating;
     } catch (const std::runtime_error&) {
-      path.clear(); state.command = {}; state.status = NavigationStatus::kBlocked;
-      ++state.emergency_stops;
+      path.clear(); state.command = {};
+      ++planning_failures;
+      state.status = planning_failures > config.max_recovery_attempts ?
+          NavigationStatus::kBlocked : NavigationStatus::kNavigating;
     }
   }
 
@@ -97,9 +174,15 @@ class NavigationSystem::Impl {
   bool observation_changed = false;
   double next_replan_time = 0.;
   double last_progress_time = 0.;
-  Pose2d last_progress_pose;
+  // Progress belongs to the route coordinate, not to the Euclidean distance
+  // of the goal.  The latter regresses on every legitimate detour around a
+  // shelf and was the source of unnecessary turn-in-place recovery cycles.
+  double best_path_progress_m = 0.;
   bool progress_initialized = false;
-  int recovery_steps_remaining = 0;
+  int recovery_attempts = 0;
+  int controller_blocked_cycles = 0;
+  int planning_failures = 0;
+  double rotation_without_progress_rad = 0.;
   std::vector<PredictedObstacle> dynamic_obstacles;
 };
 
@@ -113,6 +196,11 @@ void NavigationSystem::SetGoal(Pose2d goal) {
   impl_->goal = goal; impl_->path.clear(); impl_->state.status = NavigationStatus::kNavigating;
   impl_->state.global_path_length_m = 0.;
   impl_->next_replan_time = 0.; impl_->progress_initialized = false;
+  impl_->best_path_progress_m = 0.;
+  impl_->state.path_progress_m = 0.;
+  impl_->recovery_attempts = 0; impl_->controller_blocked_cycles = 0;
+  impl_->planning_failures = 0;
+  impl_->rotation_without_progress_rad = 0.;
 }
 
 void NavigationSystem::ClearGoal() {
@@ -125,6 +213,11 @@ void NavigationSystem::UpdateLaserScan(const Pose2d& sensor_pose, const LaserSca
   const auto before = impl_->costmap.digest();
   impl_->costmap.UpdateObstacleLayer(sensor_pose, scan);
   impl_->observation_changed = impl_->observation_changed || before != impl_->costmap.digest();
+}
+
+void NavigationSystem::UpdateCollisionMonitorLaserScan(
+    const Pose2d& sensor_pose, const LaserScan& scan) {
+  impl_->collision_monitor.UpdateLaserScan(sensor_pose, scan);
 }
 
 void NavigationSystem::UpdatePointCloud(const Pose2d& sensor_pose, const PointCloud2d& cloud) {
@@ -144,16 +237,40 @@ void NavigationSystem::UpdateGuidanceCandidates(std::vector<GuidanceCandidate> c
 
 NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d measured_velocity,
                                                  double timestamp) {
+  // Treat odometry as a measured input, not an unlimited control state. Some
+  // simulator diff-drive backends emit a one-sample angular derivative across
+  // yaw wrapping (observed at >120 rad/s). Feeding that value into acceleration
+  // limiting makes every physically valid command unreachable for many cycles.
+  // Project feedback onto the robot's declared actuation envelope; pose itself
+  // remains the unmodified ground-truth pose supplied by the caller.
+  if (!std::isfinite(measured_velocity.linear)) measured_velocity.linear = 0.;
+  if (!std::isfinite(measured_velocity.angular)) measured_velocity.angular = 0.;
+  measured_velocity.linear = std::clamp(
+      measured_velocity.linear, -impl_->config.max_reverse_velocity,
+      impl_->config.desired_linear_velocity);
+  measured_velocity.angular = std::clamp(
+      measured_velocity.angular, -impl_->config.max_angular_velocity,
+      impl_->config.max_angular_velocity);
   impl_->state.controller_solve_us = 0.;
+  impl_->state.controller_commanded_motion = false;
+  impl_->state.safety_stopped_motion = false;
   if (!impl_->goal) { impl_->state.command = {}; impl_->state.status = NavigationStatus::kIdle; return impl_->state; }
   if (!impl_->progress_initialized) {
-    impl_->last_progress_pose = pose; impl_->last_progress_time = timestamp;
+    impl_->last_progress_time = timestamp;
     impl_->progress_initialized = true;
   }
-  if (impl_->observation_changed || impl_->path.empty() || timestamp >= impl_->next_replan_time) {
+  // A global path is a route contract, not a high-rate control signal.  The
+  // local collision layer sees every scan; recomputing the same static global
+  // map path while the robot moves changes its grid anchor and makes the
+  // controller chase a discontinuous reference. Replan only when no route
+  // exists (initial planning or after recovery invalidated it).
+  if (impl_->path.empty()) {
     impl_->Replan(pose); impl_->observation_changed = false;
-    impl_->next_replan_time = timestamp + impl_->config.global_replan_period;
+    impl_->last_progress_time = timestamp;
   }
+  // Planning can legitimately fail while an online frontier map is changing.
+  // Do not run a stale progress watchdog without a route to measure against.
+  if (impl_->path.empty()) return impl_->state;
   const double goal_distance = (impl_->goal->translation() - pose.translation()).norm();
   if (goal_distance <= impl_->config.goal_xy_tolerance) {
     const double yaw_error = NormalizeAngle(Yaw(*impl_->goal) - Yaw(pose));
@@ -169,27 +286,49 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
     impl_->state.status = NavigationStatus::kNavigating;
     return impl_->state;
   }
-  if ((pose.translation() - impl_->last_progress_pose.translation()).norm() >=
-      impl_->config.progress_radius) {
-    impl_->last_progress_pose = pose; impl_->last_progress_time = timestamp;
-  } else if (timestamp - impl_->last_progress_time > impl_->config.progress_timeout) {
-    ++impl_->state.recoveries; impl_->last_progress_time = timestamp;
-    impl_->recovery_steps_remaining = static_cast<int>(
-        std::ceil(impl_->config.recovery_duration / impl_->config.control_period));
+  // Translating in a circle is not navigation progress.  Measure progress in
+  // the path's arc-length coordinate instead of straight-line distance to the
+  // goal: a correct path around an obstacle can temporarily move farther from
+  // the goal, but it never moves backward along its committed route.
+  const double path_progress = PathProgress(
+      impl_->path, pose, impl_->best_path_progress_m);
+  impl_->state.path_progress_m = path_progress;
+  if (path_progress >= impl_->best_path_progress_m + impl_->config.progress_radius) {
+    impl_->best_path_progress_m = path_progress;
+    impl_->last_progress_time = timestamp;
+    impl_->recovery_attempts = 0;
+    impl_->rotation_without_progress_rad = 0.;
+  } else if (timestamp - impl_->last_progress_time > impl_->config.progress_timeout &&
+             !(std::abs(impl_->state.command.linear) <= 1e-4 &&
+               std::abs(impl_->state.command.angular) > 1e-4)) {
+    ++impl_->state.recoveries; ++impl_->recovery_attempts;
+    impl_->last_progress_time = timestamp;
+    if (impl_->recovery_attempts > impl_->config.max_recovery_attempts) {
+      impl_->state.command = {};
+      impl_->state.status = NavigationStatus::kBlocked;
+      return impl_->state;
+    }
+    // Replan from the pose actually reached. Deliberate in-place alignment is
+    // supervised separately by the accumulated rotation budget below: a
+    // translation-only progress watchdog must not cancel a valid alignment
+    // before the controller has completed it. Scripted rotate/reverse motions
+    // are not a substitute for a planner/controller-consistent route.
+    impl_->path.clear();
+    impl_->next_replan_time = 0.;
+    impl_->state.command = {};
+    return impl_->state;
   }
-  if (impl_->path.empty() && impl_->recovery_steps_remaining == 0) return impl_->state;
 
   Twist2d command;
-  if (impl_->recovery_steps_remaining > 0) {
-    command = {std::max(-impl_->config.max_reverse_velocity,
-                        impl_->config.recovery_linear_velocity), 0.};
-    if (impl_->controller->CollisionImminent(pose, command, impl_->costmap))
-      command = {0., impl_->config.recovery_angular_velocity};
-    --impl_->recovery_steps_remaining;
-  } else {
+  {
     const auto solve_started = std::chrono::steady_clock::now();
     command = impl_->controller->Compute(impl_->path, pose, measured_velocity, impl_->costmap,
                                          impl_->dynamic_obstacles);
+    impl_->state.controller_commanded_motion =
+        std::abs(command.linear) > 1e-4 || std::abs(command.angular) > 1e-4;
+    if (std::abs(command.linear) <= 1e-4 && std::abs(command.angular) > 1e-4)
+      impl_->rotation_without_progress_rad +=
+          std::abs(command.angular) * impl_->config.control_period;
     impl_->state.controller_solve_us = std::chrono::duration<double, std::micro>(
         std::chrono::steady_clock::now() - solve_started).count();
     impl_->state.controller_diagnostics = impl_->controller->Diagnostics();
@@ -200,6 +339,39 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
     const auto monitored = impl_->collision_monitor.Filter(pose, command, timestamp);
     command = monitored.command;
     impl_->state.collision_monitor_action = monitored.action;
+    impl_->state.safety_stopped_motion =
+        impl_->state.controller_commanded_motion &&
+        std::abs(command.linear) <= 1e-4 && std::abs(command.angular) <= 1e-4;
+    if (!impl_->state.controller_commanded_motion && !impl_->state.safety_stopped_motion) {
+      ++impl_->controller_blocked_cycles;
+      if (impl_->controller_blocked_cycles >= 3) {
+        ++impl_->state.recoveries;
+        ++impl_->recovery_attempts;
+        impl_->controller_blocked_cycles = 0;
+        impl_->path.clear();
+        impl_->state.command = {};
+        if (impl_->recovery_attempts > impl_->config.max_recovery_attempts)
+          impl_->state.status = NavigationStatus::kBlocked;
+        return impl_->state;
+      }
+    } else {
+      impl_->controller_blocked_cycles = 0;
+    }
+    // A differential drive may need an in-place alignment at a sharp corner,
+    // but more than one complete accumulated revolution without translation
+    // proves that the current route/controller pairing is not converging.
+    if (impl_->rotation_without_progress_rad >= 2. * std::acos(-1.)) {
+      ++impl_->state.recoveries;
+      ++impl_->recovery_attempts;
+      impl_->rotation_without_progress_rad = 0.;
+      impl_->path.clear();
+      impl_->state.command = {};
+      // The pose did not translate, so replanning the identical fixed map
+      // snapshot internally would reproduce the same route. Escalate once to
+      // the node, which can rebuild from the newest online map.
+      impl_->state.status = NavigationStatus::kBlocked;
+      return impl_->state;
+    }
     const double dynamic_ttc = MinimumDynamicTtc(
         pose, command, impl_->dynamic_obstacles, impl_->config);
     impl_->state.minimum_ttc_s = monitored.time_to_collision_s > 0. && dynamic_ttc > 0. ?
