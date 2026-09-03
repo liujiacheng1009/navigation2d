@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -46,7 +47,10 @@ using Goal = navigation2d::ExplorationGoal;
 
 navigation2d::FrontierExplorerConfig ExplorerConfig() {
   navigation2d::FrontierExplorerConfig config;
-  config.minimum_frontier_cells = 12;
+  // Maze doorways often produce short but useful frontier components.  A
+  // larger threshold silently drops those branches before they reach the
+  // planner; noise is handled by the stability observer below.
+  config.minimum_frontier_cells = 6;
   // Keep frontier generation consistent with the navigation costmap: a goal
   // must leave room for the physical footprint and its obstacle buffer, not
   // merely be free in the raw occupancy image.
@@ -143,6 +147,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         "/odom", rclcpp::SensorDataQoS(),
         [this](nav_msgs::msg::Odometry::ConstSharedPtr value) {
           velocity_ = {value->twist.twist.linear.x, value->twist.twist.angular.z};
+          velocity_stamp_ = rclcpp::Time(value->header.stamp);
         });
     scan_subscription_ = create_subscription<sensor_msgs::msg::LaserScan>(
         "/scan", rclcpp::SensorDataQoS(),
@@ -163,6 +168,16 @@ class AutonomousExplorer final : public rclcpp::Node {
   navigation2d::Pose2d LocalPose(const geometry_msgs::msg::Pose& pose) const {
     return navigation2d::MakePose2d(pose.position.x - navigation_origin_x_,
                                     pose.position.y - navigation_origin_y_, Yaw(pose.orientation));
+  }
+
+  navigation2d::Twist2d FreshVelocity(const rclcpp::Time& reference) const {
+    if (velocity_stamp_.nanoseconds() == 0) return {};
+    const double age = (reference - velocity_stamp_).seconds();
+    // Do not feed a stale encoder sample into acceleration limiting or stall
+    // diagnosis. Pose feedback remains the authoritative accumulated-motion
+    // signal when the odometry publisher is delayed by simulation scheduling.
+    if (!std::isfinite(age) || age < -.20 || age > .20) return {};
+    return velocity_;
   }
 
   navigation2d::LaserScan ConvertScan() const {
@@ -199,9 +214,44 @@ class AutonomousExplorer final : public rclcpp::Node {
         (pose_->pose.position.x - navigation_origin_x_) / map_->info.resolution));
     const int robot_row = static_cast<int>(std::floor(
         (pose_->pose.position.y - navigation_origin_y_) / map_->info.resolution));
-    const double snapshot_clearance = .34;
+    // The simulator's ground-truth pose guarantees that the complete base
+    // footprint is free even when SLAM has not yet converted the cells under
+    // the robot from unknown.  Keep that local evidence slightly wider than
+    // the effective planner radius (robot radius + raster half-diagonal), so
+    // a valid current pose is not rejected as "start occupied" on a replan
+    // after a tight-corner approach.  This only clears the measured current
+    // footprint; all cells ahead remain lethal unless observed free.
+    const double snapshot_clearance = .40;
     const int robot_clearance = static_cast<int>(
         std::ceil(snapshot_clearance / map_->info.resolution));
+    // Near-field lidar is fresher than the online occupancy grid. Preserve
+    // only ray interiors (never the hit endpoint) as temporary free evidence
+    // for this plan, allowing a certified narrow passage to be entered before
+    // the mapper has committed every cell. The hard footprint check remains
+    // authoritative and the evidence expires with this plan.
+    std::unordered_set<std::size_t> near_field_free;
+    if (scan_ && pose_) {
+      const double yaw = Yaw(pose_->pose.orientation);
+      const double sensor_x = pose_->pose.position.x + .18 * std::cos(yaw);
+      const double sensor_y = pose_->pose.position.y + .18 * std::sin(yaw);
+      const double evidence_range = std::min(3.0, static_cast<double>(scan_->range_max));
+      const double step = std::max(.5 * map_->info.resolution, .02);
+      for (std::size_t beam = 0; beam < scan_->ranges.size(); ++beam) {
+        const double range = scan_->ranges[beam];
+        if (!std::isfinite(range) || range < scan_->range_min || range > evidence_range) continue;
+        const double angle = yaw + scan_->angle_min + static_cast<double>(beam) * scan_->angle_increment;
+        const double usable = std::max(0., range - std::max(.06, .5 * map_->info.resolution));
+        for (double distance = 0.; distance < usable; distance += step) {
+          const double x = sensor_x + distance * std::cos(angle);
+          const double y = sensor_y + distance * std::sin(angle);
+          const int col = static_cast<int>(std::floor((x - navigation_origin_x_) / map_->info.resolution));
+          const int row = static_cast<int>(std::floor((y - navigation_origin_y_) / map_->info.resolution));
+          if (col < 0 || row < 0 || col >= static_cast<int>(map_->info.width) ||
+              row >= static_cast<int>(map_->info.height)) continue;
+          near_field_free.insert(static_cast<std::size_t>(row) * map_->info.width + col);
+        }
+      }
+    }
     for (std::size_t index = 0; index < map_->data.size(); ++index) {
       if (index) output << ',';
       // Navigation2D must never plan through unknown space. Frontier targets
@@ -213,7 +263,8 @@ class AutonomousExplorer final : public rclcpp::Node {
       // The robot's current footprint is physically known to be free. SLAM's
       // confidence threshold can otherwise leave isolated unknown cells below
       // the base and make every first plan fail its start-collision check.
-      output << ((map_->data[index] == 0 || under_robot) ? 0 : 255);
+      const bool lidar_evidence = map_->data[index] < 0 && near_field_free.count(index) > 0;
+      output << ((map_->data[index] == 0 || under_robot || lidar_evidence) ? 0 : 255);
     }
     output << "]}";
     output.close();
@@ -264,8 +315,9 @@ class AutonomousExplorer final : public rclcpp::Node {
       returning_ = returning;
       goal_started_ = now();
       if (scan_) FeedScan();
+      const auto initial_time = now();
       const auto initial_state = navigation_->ComputeCommand(
-          LocalPose(pose_->pose), velocity_, now().seconds());
+          LocalPose(pose_->pose), FreshVelocity(initial_time), initial_time.seconds());
       const double goal_distance = std::hypot(
           goal.x - pose_->pose.position.x, goal.y - pose_->pose.position.y);
       if (goal_distance > config.goal_xy_tolerance &&
@@ -349,8 +401,11 @@ class AutonomousExplorer final : public rclcpp::Node {
     const auto goals = explorer_.BuildTour(pose_->pose.position.x, pose_->pose.position.y);
     for (const auto& goal : goals) committed_tour_.push_back(goal);
     ++tour_revision_;
-    RCLCPP_INFO(get_logger(), "Frontier graph tour %zu contains %zu reachable viewpoints",
-                tour_revision_, committed_tour_.size());
+    RCLCPP_INFO(get_logger(),
+                "Frontier graph tour %zu: raw_cells=%zu raw_clusters=%zu candidates=%zu stable=%zu",
+                tour_revision_, explorer_.raw_frontier_cells(),
+                explorer_.raw_frontier_clusters(), explorer_.candidate_frontier_goals(),
+                committed_tour_.size());
   }
 
   void SelectNextGoal() {
@@ -378,22 +433,56 @@ class AutonomousExplorer final : public rclcpp::Node {
       if (StartNavigation(goal, false)) {
         empty_frontier_cycles_ = 0;
         no_executable_frontier_cycles_ = 0;
+        frontier_probe_until_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+        frontier_probe_count_ = 0;
         return;
       }
-      explorer_.RecordAttempt(goal, false);
+      // A pre-execution rejection (occupied start/goal or stale map) is not a
+      // failed frontier. Drop this stale tour entry and let the next map
+      // revision regenerate it without blacklisting the region.
       committed_tour_.pop_front();
       ++attempted;
     }
     geometry_msgs::msg::Twist stop;
     command_publisher_->publish(stop);
-    if (!committed_tour_.empty() || attempted > 0) {
+    if (!committed_tour_.empty() || attempted > 0 || explorer_.raw_frontier_cells() > 0) {
+      const std::size_t known_now = KnownCells();
+      if (known_now > last_no_executable_known_cells_) {
+        // A scan made progress even though the previous batch had no route;
+        // give the new frontier geometry a fresh budget.
+        no_executable_frontier_cycles_ = 0;
+        last_no_executable_known_cells_ = known_now;
+        frontier_probe_count_ = 0;
+      }
       ++no_executable_frontier_cycles_;
-      PublishStatus("SELECTING", "frontiers locally blocked; waiting for map update");
-      // Three independent, freshly-ranked candidate batches without one
-      // executable plan means continuing to churn cannot improve coverage.
-      // Preserve the actual map and return over the observed corridor instead
-      // of clearing blacklist state and blindly retrying the same walls.
-      if (no_executable_frontier_cycles_ >= 3) BeginReturn(true);
+      if (explorer_.raw_frontier_cells() > 0 && explorer_.candidate_frontier_goals() == 0) {
+        // The frontier is sensor-derived but currently has no safe viewpoint.
+        // Perform a bounded in-place scan from the current safe pose so the
+        // lidar can reveal the doorway/unknown boundary before giving up.
+        if (now() >= frontier_probe_until_ && frontier_probe_count_ < 3) {
+          frontier_probe_until_ = now() + rclcpp::Duration::from_seconds(2.0);
+          ++frontier_probe_count_;
+          RCLCPP_INFO(get_logger(),
+                      "Starting bounded frontier-entry scan %d/3: raw_cells=%zu clusters=%zu",
+                      frontier_probe_count_, explorer_.raw_frontier_cells(),
+                      explorer_.raw_frontier_clusters());
+        }
+        if (now() < frontier_probe_until_) {
+          geometry_msgs::msg::Twist probe;
+          probe.angular.z = 0.35;
+          command_publisher_->publish(probe);
+          PublishStatus("SELECTING", "scanning blocked frontier entrance for map growth");
+          return;
+        }
+      }
+      PublishStatus("SELECTING", explorer_.raw_frontier_cells() > 0 &&
+          explorer_.candidate_frontier_goals() == 0
+          ? "frontier candidates blocked by geometry; waiting for map update"
+          : "frontiers locally blocked; waiting for map update");
+      // Do not convert a transient maze doorway disagreement into completion.
+      // Only give up after a substantially longer *stagnant* window; the
+      // result is marked partial so callers cannot mistake it for exhaustion.
+      if (no_executable_frontier_cycles_ >= 30) BeginReturn(true);
       return;
     }
     ++empty_frontier_cycles_;
@@ -455,10 +544,11 @@ class AutonomousExplorer final : public rclcpp::Node {
 
   void BeginReturn(bool force_return = false) {
     if (!start_pose_) return;
-    if (force_return)
+    if (force_return) {
+      partial_return_ = true;
       RCLCPP_WARN(get_logger(),
                   "No executable frontier after bounded retries; returning safely with current map");
-    else if (!explorer_.CompletionEligible(initial_known_cells_))
+    } else if (!explorer_.CompletionEligible(initial_known_cells_))
       RCLCPP_WARN(get_logger(),
                   "No frontier survived a stable completion window; returning with reachable map coverage");
     // Return is a fresh global query on the final online map. Unknown remains
@@ -525,7 +615,8 @@ class AutonomousExplorer final : public rclcpp::Node {
       snapshot << "]}";
     }
     std::ofstream output(result_path_);
-    output << "{\n  \"status\": \"" << (success ? "COMPLETE" : "FAILED") << "\",\n"
+    const char* result_status = !success ? "FAILED" : (partial_return_ ? "PARTIAL" : "COMPLETE");
+    output << "{\n  \"status\": \"" << result_status << "\",\n"
            << "  \"message\": \"" << final_message << "\",\n"
            << "  \"pose_source\": \"ground_truth\",\n"
            << "  \"map_source\": \"ground_truth_scan_insertion\",\n"
@@ -538,7 +629,7 @@ class AutonomousExplorer final : public rclcpp::Node {
            << "  \"completed_goals\": " << explorer_.completed_goals() << ",\n"
            << "  \"failed_goals\": " << explorer_.failed_goals() << ",\n"
            << "  \"return_error_m\": " << return_error << "\n}\n";
-    PublishStatus(success ? "COMPLETE" : "FAILED", final_message);
+    PublishStatus(!success ? "FAILED" : (partial_return_ ? "PARTIAL" : "COMPLETE"), final_message);
   }
 
   void PublishStatus(const std::string& state, const std::string& message) {
@@ -561,6 +652,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       started_ = now();
       mission_started_ = true;
       initial_known_cells_ = KnownCells();
+      last_no_executable_known_cells_ = initial_known_cells_;
       bootstrap_until_ = now() + rclcpp::Duration::from_seconds(8.0);
       next_selection_ = bootstrap_until_;
       PublishStatus("WAITING", "ground-truth pose ready; waiting for a stable online map");
@@ -572,6 +664,10 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (now() < bootstrap_until_) {
       geometry_msgs::msg::Twist stop;
       command_publisher_->publish(stop);
+      return;
+    }
+    if (returning_ && !navigation_) {
+      BeginReturn(partial_return_);
       return;
     }
     if (!navigation_) {
@@ -588,7 +684,10 @@ class AutonomousExplorer final : public rclcpp::Node {
     // another frontier. Keep tracking this safe standoff pose until the
     // controller reports success or an actual navigation failure.
     const auto local_pose = LocalPose(pose_->pose);
-    const auto state = navigation_->ComputeCommand(local_pose, velocity_, now().seconds());
+    const auto tick_time = now();
+    const auto measured_velocity = FreshVelocity(tick_time);
+    const auto state = navigation_->ComputeCommand(local_pose, measured_velocity,
+                                                    tick_time.seconds());
     last_backend_ = BackendName(state.controller_diagnostics.backend);
     if (state.controller_diagnostics.backend == navigation2d::ControllerBackend::kAcados)
       ++acados_commands_;
@@ -614,7 +713,7 @@ class AutonomousExplorer final : public rclcpp::Node {
                   static_cast<int>(state.controller_diagnostics.maneuver),
                   state.controller_diagnostics.intentional_stop ? "yes" : "no",
                   static_cast<int>(state.collision_monitor_action), state.minimum_ttc_s,
-                  velocity_.linear, velocity_.angular,
+                  measured_velocity.linear, measured_velocity.angular,
                   state.planning_failure_reason.empty() ? "none" :
                       state.planning_failure_reason.c_str());
     }
@@ -651,7 +750,10 @@ class AutonomousExplorer final : public rclcpp::Node {
       if (returning_) {
         Finish(false, "final online-map return path execution failed");
       } else {
-        explorer_.RecordAttempt(active_goal_, false);
+        // Controller timeout/safety veto is an execution retry condition, not
+        // proof that the frontier is unreachable. Do not consume the
+        // frontier's failure budget or blacklist it; the next map revision
+        // will regenerate a fresh approach viewpoint.
         if (!committed_tour_.empty()) committed_tour_.pop_front();
         next_selection_ = now();
         PublishStatus("SELECTING", "frontier failed; continuing committed tour");
@@ -671,6 +773,8 @@ class AutonomousExplorer final : public rclcpp::Node {
   std::size_t initial_known_cells_ = 0;
   int empty_frontier_cycles_ = 0;
   int no_executable_frontier_cycles_ = 0;
+  std::size_t last_no_executable_known_cells_ = 0;
+  bool partial_return_ = false;
   int latest_map_replans_ = 0;
   int reported_recoveries_ = 0;
   std::uint64_t acados_commands_ = 0;
@@ -686,6 +790,9 @@ class AutonomousExplorer final : public rclcpp::Node {
   rclcpp::Time goal_started_{0, 0, RCL_ROS_TIME};
   rclcpp::Time next_selection_{0, 0, RCL_ROS_TIME};
   rclcpp::Time bootstrap_until_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time frontier_probe_until_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time velocity_stamp_{0, 0, RCL_ROS_TIME};
+  int frontier_probe_count_ = 0;
   std::optional<nav_msgs::msg::OccupancyGrid> map_;
   std::optional<geometry_msgs::msg::PoseStamped> pose_, start_pose_;
   std::optional<sensor_msgs::msg::LaserScan> scan_;

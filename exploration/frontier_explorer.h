@@ -68,6 +68,10 @@ class FrontierExplorer {
   std::size_t KnownCells() const;
   int completed_goals() const { return completed_goals_; }
   int failed_goals() const { return failed_goals_; }
+  std::size_t raw_frontier_cells() const { return raw_frontier_cells_; }
+  std::size_t raw_frontier_clusters() const { return raw_frontier_clusters_; }
+  std::size_t executable_frontier_goals() const { return executable_frontier_goals_; }
+  std::size_t candidate_frontier_goals() const { return candidate_frontier_goals_; }
 
  private:
   bool Free(int col, int row) const;
@@ -94,6 +98,10 @@ class FrontierExplorer {
   std::uint64_t stability_observation_ = 0;
   int completed_goals_ = 0;
   int failed_goals_ = 0;
+  std::size_t raw_frontier_cells_ = 0;
+  std::size_t raw_frontier_clusters_ = 0;
+  std::size_t executable_frontier_goals_ = 0;
+  std::size_t candidate_frontier_goals_ = 0;
 };
 
 }  // namespace navigation2d
