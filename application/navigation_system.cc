@@ -18,6 +18,7 @@
 #include "navigation2d/planning/global_planner.h"
 #include "navigation2d/planning/planner_factory.h"
 #include "navigation2d/planning/collision_checker.h"
+#include "navigation2d/planning/astar_planner.h"
 
 namespace navigation2d {
 namespace {
@@ -48,6 +49,24 @@ bool PathFootprintValid(const Path& path, const LayeredCostmap& costmap, double 
   return !path.empty() && std::all_of(path.begin(), path.end(), [&](const Pose2d& pose) {
     return !costmap.lethal(X(pose), Y(pose), robot_radius);
   });
+}
+
+// GridSearch and the continuous controller must agree on the clearance of a
+// route.  `LayeredCostmap::lethal` evaluates continuous poses against raster
+// cell boxes; reserve one cell half-diagonal in the planning contract so a
+// path accepted by A*/Theta* is not rejected at the first RPP arc sample.
+double EffectivePlanningRadius(const NavigationConfig& config,
+                               const LayeredCostmap& costmap) {
+  return config.robot_radius + std::sqrt(.5) * costmap.grid().resolution();
+}
+
+std::unique_ptr<GlobalPlanner> MakePlannerWithEffectiveRadius(
+    const NavigationConfig& config, const LayeredCostmap& costmap) {
+  // The state-lattice planner owns a richer NavigationConfig (including its
+  // primitive geometry), so keep its factory path intact. Grid planners accept
+  // the explicit clearance contract directly.
+  if (config.planner == "state_lattice") return MakeGlobalPlanner(config);
+  return MakeGlobalPlanner(config.planner, EffectivePlanningRadius(config, costmap));
 }
 // Project onto the *ordered* route, never onto an unconstrained cloud of
 // waypoints.  The returned coordinate is arc length from the path start.
@@ -130,10 +149,79 @@ class NavigationSystem::Impl {
  public:
   Impl(NavigationConfig value, const std::string& map_path)
       : config(std::move(value)), costmap(Grid2d::Load(map_path), config),
-        planner(MakeGlobalPlanner(config)), controller(MakeController(config)),
+        planner(MakePlannerWithEffectiveRadius(config, costmap)),
+        controller(MakeController(config)),
         collision_monitor(config) {
     if (std::abs(costmap.grid().resolution() - config.map_resolution) > 1e-9)
       throw std::runtime_error("map resolution does not match navigation configuration");
+  }
+
+  void ResetCommandStallWatch() {
+    command_stall_watch_initialized = false;
+    command_without_motion_cycles = 0;
+  }
+
+  // Return true only when a non-zero command has persisted for a full
+  // execution window without measurable *accumulated* motion.  Using the
+  // pose/path delta in addition to instantaneous odometry prevents a single
+  // contact impulse or noisy encoder sample from masking a real stall.
+  bool CommandStalled(const Pose2d& pose, double route_progress_m,
+                      Twist2d measured_velocity, double heading_error,
+                      double timestamp, bool commanded, bool translation_expected) {
+    if (!commanded) {
+      ResetCommandStallWatch();
+      return false;
+    }
+    if (!command_stall_watch_initialized) {
+      command_stall_watch_initialized = true;
+      command_stall_watch_start = timestamp;
+      command_stall_watch_last_timestamp = timestamp;
+      command_stall_watch_pose = pose;
+      command_stall_watch_progress_m = route_progress_m;
+      command_stall_watch_heading_error = std::abs(heading_error);
+      command_stall_watch_measured_distance_m = 0.;
+      command_stall_watch_measured_rotation_rad = 0.;
+      command_without_motion_cycles = 0;
+      return false;
+    }
+    const double dt = std::clamp(timestamp - command_stall_watch_last_timestamp,
+                                 0., .20);
+    command_stall_watch_last_timestamp = timestamp;
+    command_stall_watch_measured_distance_m += std::abs(measured_velocity.linear) * dt;
+    command_stall_watch_measured_rotation_rad += std::abs(measured_velocity.angular) * dt;
+    const double displacement =
+        (pose.translation() - command_stall_watch_pose.translation()).norm();
+    const double yaw_change = std::abs(NormalizeAngle(Yaw(pose) -
+                                                       Yaw(command_stall_watch_pose)));
+    const double route_delta = route_progress_m - command_stall_watch_progress_m;
+    const double heading_improvement = command_stall_watch_heading_error -
+        std::abs(heading_error);
+    // A normal command at the configured minimum speed moves several
+    // centimetres during this window.  These thresholds tolerate raster and
+    // pose callback quantisation while remaining below the expected motion.
+    // A fresh odometry stream can prove that the base is moving even when a
+    // low-speed command advances less than one raster cell in this window.
+    // This integral is deliberately fed only by timestamp-checked samples at
+    // the ROS boundary; stale samples are converted to zero before reaching
+    // NavigationSystem.
+    // When the controller asks for translation, rotation alone is not proof
+    // of progress: a differential base can spin against a wall while still
+    // reporting a changing yaw.  Yaw is accepted as motion evidence only for
+    // an explicitly rotation-only command.
+    // For a rotation-only command, measured angular motion or a meaningful
+    // pose yaw change proves that the base is actually turning. Heading-error
+    // improvement is an additional signal for delayed odometry. Translation
+    // commands intentionally do not accept yaw alone: a base can spin against
+    // a wall while its requested translation remains unexecuted.
+    if (displacement >= .025 || route_delta >= .02 ||
+        (!translation_expected && (yaw_change >= .03 || heading_improvement >= .03)) ||
+        command_stall_watch_measured_distance_m >= .015 ||
+        (!translation_expected && command_stall_watch_measured_rotation_rad >= .03)) {
+      ResetCommandStallWatch();
+      return false;
+    }
+    ++command_without_motion_cycles;
+    return timestamp - command_stall_watch_start >= .9;
   }
 
   void Replan(const Pose2d& pose) {
@@ -141,8 +229,19 @@ class NavigationSystem::Impl {
     try {
       const auto planning_started = std::chrono::steady_clock::now();
       path = DensifyPath(planner->Plan(costmap, pose, *goal), .08);
-      if (!PathFootprintValid(path, costmap, config.robot_radius))
-        throw std::runtime_error("planned path failed dense footprint validation");
+      const double planning_radius = EffectivePlanningRadius(config, costmap);
+      if (!PathFootprintValid(path, costmap, planning_radius)) {
+        // Theta*'s long visibility chords can cut across the inside of a
+        // maze corner after densification.  Retry once with the grid path,
+        // which preserves the collision-free cell sequence and gives RPP a
+        // conservative route instead of rejecting the whole frontier.
+        if (config.planner == "theta_star") {
+          AStarPlanner corner_safe_planner(planning_radius);
+          path = DensifyPath(corner_safe_planner.Plan(costmap, pose, *goal), .08);
+        }
+        if (!PathFootprintValid(path, costmap, planning_radius))
+          throw std::runtime_error("planned path failed dense footprint validation");
+      }
       // A replan is a new ordered route contract. Reset the controller's
       // internal projection state even when the new path has similar endpoints.
       controller = MakeController(config);
@@ -168,10 +267,12 @@ class NavigationSystem::Impl {
       best_alignment_score = std::numeric_limits<double>::infinity();
       controller_blocked_cycles = 0;
       rotation_without_progress_rad = 0.;
+      ResetCommandStallWatch();
       planning_failures = 0;
       state.status = NavigationStatus::kNavigating;
     } catch (const std::runtime_error& error) {
       path.clear(); state.command = {};
+      ResetCommandStallWatch();
       state.planning_failure_reason = error.what();
       ++planning_failures;
       state.status = planning_failures > config.max_recovery_attempts ?
@@ -197,6 +298,23 @@ class NavigationSystem::Impl {
   bool progress_initialized = false;
   int recovery_attempts = 0;
   int controller_blocked_cycles = 0;
+  // A non-zero command with no measured body motion is a physical execution
+  // failure, not a planner result.  Keep a short temporal debounce so the
+  // first sample after a goal handoff is harmless, then invalidate the route
+  // and let the caller replan from the measured pose/map.
+  int command_without_motion_cycles = 0;
+  // Windowed execution-stall watch.  A single odometry sample can contain a
+  // contact/slip impulse, so instantaneous velocity thresholds are not
+  // sufficient.  Keep the pose and route progress at the start of a
+  // non-zero command streak and judge accumulated motion instead.
+  bool command_stall_watch_initialized = false;
+  double command_stall_watch_start = 0.;
+  double command_stall_watch_last_timestamp = 0.;
+  Pose2d command_stall_watch_pose;
+  double command_stall_watch_progress_m = 0.;
+  double command_stall_watch_heading_error = 0.;
+  double command_stall_watch_measured_distance_m = 0.;
+  double command_stall_watch_measured_rotation_rad = 0.;
   int planning_failures = 0;
   double rotation_without_progress_rad = 0.;
   double best_alignment_score = std::numeric_limits<double>::infinity();
@@ -219,6 +337,7 @@ void NavigationSystem::SetGoal(Pose2d goal) {
   impl_->best_path_progress_m = 0.;
   impl_->state.path_progress_m = 0.;
   impl_->recovery_attempts = 0; impl_->controller_blocked_cycles = 0;
+  impl_->command_without_motion_cycles = 0;
   impl_->planning_failures = 0;
   impl_->rotation_without_progress_rad = 0.;
   impl_->state.phase = NavigationPhase::kAlignToPath;
@@ -379,6 +498,26 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
     impl_->state.safety_stopped_motion = impl_->state.controller_commanded_motion &&
         std::abs(docking.linear) <= 1e-4 && std::abs(docking.angular) <= 1e-4;
     impl_->state.minimum_ttc_s = monitored.time_to_collision_s;
+    const bool docking_commanded = impl_->state.controller_commanded_motion &&
+        (std::abs(docking.linear) > 1e-4 || std::abs(docking.angular) > 1e-4) &&
+        !impl_->state.safety_stopped_motion;
+    if (impl_->CommandStalled(pose, 0., measured_velocity, yaw_error, timestamp,
+                               docking_commanded,
+                               std::abs(docking.linear) > 1e-3)) {
+      ++impl_->state.recoveries;
+      ++impl_->recovery_attempts;
+      impl_->command_without_motion_cycles = 0;
+      impl_->path.clear();
+      impl_->state.planning_failure_reason =
+          "docking command produced no measured motion";
+      impl_->state.command = {};
+      // This is an execution failure, so surface it immediately.  The ROS
+      // owner will rebuild NavigationSystem from the newest online map; an
+      // internal replan would only reuse the stale raster that led to the
+      // contact in the first place.
+      impl_->state.status = NavigationStatus::kBlocked;
+      return impl_->state;
+    }
     if (timestamp - impl_->last_progress_time > impl_->config.progress_timeout * 3.) {
       impl_->state.command = {};
       impl_->state.status = NavigationStatus::kBlocked;
@@ -449,6 +588,12 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
 
   Twist2d command;
   {
+    double route_heading_error = 0.;
+    if (impl_->path.size() >= 2) {
+      const auto tangent = impl_->path[1].translation() - impl_->path[0].translation();
+      route_heading_error = NormalizeAngle(
+          std::atan2(tangent.y(), tangent.x()) - Yaw(pose));
+    }
     const auto solve_started = std::chrono::steady_clock::now();
     command = impl_->controller->Compute(impl_->path, pose, measured_velocity, impl_->costmap,
                                          impl_->dynamic_obstacles);
@@ -472,6 +617,26 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
     impl_->state.safety_stopped_motion =
         impl_->state.controller_commanded_motion &&
         std::abs(command.linear) <= 1e-4 && std::abs(command.angular) <= 1e-4;
+    const bool command_reached_base = impl_->state.controller_commanded_motion &&
+        (std::abs(command.linear) > 1e-4 || std::abs(command.angular) > 1e-4) &&
+        !impl_->state.safety_stopped_motion &&
+        !impl_->state.controller_diagnostics.intentional_stop;
+    if (impl_->CommandStalled(pose, path_progress, measured_velocity, route_heading_error,
+                               timestamp, command_reached_base,
+                               std::abs(command.linear) > 1e-3)) {
+      ++impl_->state.recoveries;
+      ++impl_->recovery_attempts;
+      impl_->command_without_motion_cycles = 0;
+      impl_->path.clear();
+      impl_->state.planning_failure_reason =
+          "controller command produced no measured motion";
+      impl_->state.command = {};
+      // Do not hide a physical execution stall behind another identical
+      // controller cycle.  The caller must observe kBlocked and replan from
+      // its latest sensed map/pose, preserving the failure semantics.
+      impl_->state.status = NavigationStatus::kBlocked;
+      return impl_->state;
+    }
     if (!impl_->state.controller_commanded_motion && !impl_->state.safety_stopped_motion &&
         !impl_->state.controller_diagnostics.intentional_stop) {
       ++impl_->controller_blocked_cycles;

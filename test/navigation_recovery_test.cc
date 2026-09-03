@@ -57,4 +57,26 @@ int main() {
   assert(state.command.angular < 0.);
   state = docking.ComputeCommand(navigation2d::MakePose2d(.99, 1., .02), {}, .12);
   assert(state.status == navigation2d::NavigationStatus::kSucceeded);
+
+  // A command that remains non-zero while the measured base stays still is
+  // an execution stall (for example, a wheel/body contact), not a valid
+  // controller state.  Debounce it for a short handoff window, then
+  // invalidate the route so the caller can replan from the measured pose.
+  navigation2d::NavigationConfig stall_config = config;
+  stall_config.robot_radius = .15;
+  stall_config.progress_timeout = 10.;
+  stall_config.max_recovery_attempts = 3;
+  navigation2d::NavigationSystem stalled(stall_config, path);
+  stalled.SetGoal(navigation2d::MakePose2d(4., 1.5, 0.));
+  navigation2d::NavigationState stalled_state;
+  for (int step = 0; step < 20; ++step) {
+    stalled.UpdateLaserScan(navigation2d::MakePose2d(1., 1.5, 0.), scan);
+    stalled_state = stalled.ComputeCommand(
+        navigation2d::MakePose2d(1., 1.5, 0.), {}, step * .06);
+    if (stalled_state.status == navigation2d::NavigationStatus::kBlocked) break;
+  }
+  assert(stalled_state.status == navigation2d::NavigationStatus::kBlocked);
+  assert(stalled_state.recoveries >= 1);
+  assert(stalled_state.planning_failure_reason ==
+         "controller command produced no measured motion");
 }
