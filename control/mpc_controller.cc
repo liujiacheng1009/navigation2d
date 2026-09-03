@@ -152,10 +152,14 @@ Twist2d MpcController::Compute(const Path& path, const Pose2d& pose, Twist2d cur
 
 bool MpcController::CollisionImminent(const Pose2d& pose, Twist2d command,
                                       const LayeredCostmap& costmap) const {
+  // The global planner/path validator owns the rasterization margin.  Keep
+  // the local controller's swept check on the declared physical footprint so
+  // a legal narrow-gate turn is not rejected twice.
+  const double collision_radius = config_.robot_radius;
   Pose2d projected = pose;
   for (double time = 0.; time < config_.collision_horizon; time += config_.control_period) {
     projected = Integrate(projected, command, config_.control_period);
-    if (costmap.lethal(X(projected), Y(projected), config_.robot_radius)) return true;
+    if (costmap.lethal(X(projected), Y(projected), collision_radius)) return true;
   }
   return false;
 }

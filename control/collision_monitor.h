@@ -10,7 +10,16 @@
 
 namespace navigation2d {
 
-enum class CollisionMonitorAction { kNone, kSlowdown, kStop, kSourceTimeout };
+enum class CollisionMonitorAction {
+  kNone,
+  kSlowdown,
+  kStop,
+  // The lidar reported a return below its declared minimum range.  This is
+  // not an ordinary clear ray: it means an obstacle is in the sensor blind
+  // zone, so a command moving toward that return must be stopped.
+  kBlindZoneStop,
+  kSourceTimeout,
+};
 
 struct CollisionMonitorResult {
   Twist2d command;
@@ -33,6 +42,7 @@ class CollisionMonitor {
   void UpdatePoints(const Pose2d& sensor_pose, std::vector<Eigen::Vector2d> points);
   NavigationConfig config_;
   std::vector<Eigen::Vector2d> points_;
+  std::vector<Eigen::Vector2d> blind_zone_points_;
   bool observation_pending_ = false;
   bool has_observation_ = false;
   double last_observation_time_ = 0.;

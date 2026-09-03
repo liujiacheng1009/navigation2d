@@ -249,13 +249,19 @@ bool RegulatedPurePursuit::CollisionImminent(const Pose2d& pose, Twist2d command
   // new static collision. This also lets a legal, millimetre-clear pose align
   // away from an obstacle instead of being trapped by rasterisation.
   if (std::abs(command.linear) <= 1e-9) return false;
+  // The global planner/path validator already reserves the occupancy-cell
+  // half-diagonal.  The controller must use the declared physical footprint
+  // here: applying the raster margin a second time makes a legal narrow-gate
+  // turn enter the stop/rotate state forever.  Continuous arc sampling still
+  // protects the actual footprint at every control step.
+  const double collision_radius = config_.robot_radius;
   Pose2d projected = pose;
   for (double t = 0.; t <= config_.collision_horizon; t += config_.control_period) {
     const double yaw = Angle(Yaw(projected) + command.angular * config_.control_period);
     projected = MakePose2d(X(projected) + command.linear * std::cos(yaw) * config_.control_period,
                            Y(projected) + command.linear * std::sin(yaw) * config_.control_period,
                            yaw);
-    if (costmap.lethal(X(projected), Y(projected), config_.robot_radius)) return true;
+    if (costmap.lethal(X(projected), Y(projected), collision_radius)) return true;
   }
   return false;
 }

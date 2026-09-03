@@ -50,6 +50,26 @@ int main() {
   result = rotation_monitor.Filter(pose, {.2, 0.}, 3.05);
   assert(result.action == navigation2d::CollisionMonitorAction::kNone);
 
+  // A below-minimum lidar return is a near-field obstacle, not a free ray.
+  // With the sensor 0.18 m ahead of the base, range_min=0.15 places the
+  // synthetic return 0.33 m from the robot centre: a forward command must
+  // stop, while a command moving away may release the latch.
+  navigation2d::NavigationConfig blind_config = config;
+  blind_config.collision_monitor_trigger_cycles = 1;
+  blind_config.collision_monitor_release_cycles = 1;
+  navigation2d::CollisionMonitor blind_monitor(blind_config);
+  scan.angle_min = 0.; scan.angle_increment = .1; scan.range_min = .15;
+  scan.ranges = {-std::numeric_limits<double>::infinity()};
+  const auto base_pose = navigation2d::MakePose2d(0., 0., 0.);
+  const auto sensor_pose = navigation2d::MakePose2d(.18, 0., 0.);
+  blind_monitor.UpdateLaserScan(sensor_pose, scan);
+  result = blind_monitor.Filter(base_pose, {.05, 0.}, 4.);
+  assert(result.action == navigation2d::CollisionMonitorAction::kBlindZoneStop);
+  assert(result.command.linear == 0.);
+  result = blind_monitor.Filter(base_pose, {-.05, 0.}, 4.05);
+  assert(result.action == navigation2d::CollisionMonitorAction::kNone);
+  assert(result.command.linear < 0.);
+
   const char* map_path = "/tmp/navigation2d_safe_corridor_test.json";
   std::ofstream output(map_path);
   output << R"({"width":60,"height":40,"resolution":0.1,"cells":[)";
@@ -129,4 +149,14 @@ int main() {
   corner_command = corner_rpp.Compute(corner_path, aligned_corner_pose, {}, corner_costmap);
   assert(corner_command.linear > 0.);
   assert(corner_rpp.Diagnostics().maneuver == navigation2d::ControllerManeuver::kTracking);
+
+  // The local controller checks the physical footprint continuously.  A pose
+  // whose centre is 0.275 m from the occupied cell must be rejected before
+  // the base reaches contact; the raster half-diagonal is applied by the
+  // global planner/path validator, not twice in RPP.
+  corner_costmap.ClearObstacle(1.325, 1.0);
+  corner_costmap.MarkObstacle(1.025, 1.0);
+  navigation2d::RegulatedPurePursuit margin_rpp(corner_config);
+  assert(margin_rpp.CollisionImminent(
+      navigation2d::MakePose2d(1.350, 1.0, M_PI), {.048, 0.}, corner_costmap));
 }
