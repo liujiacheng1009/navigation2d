@@ -232,10 +232,19 @@ Twist2d RegulatedPurePursuit::Compute(const Path& path, const Pose2d& pose, Twis
   target.linear = std::clamp(target.linear, current.linear - dv, current.linear + dv);
   target.angular = std::clamp(target.angular, current.angular - dw, current.angular + dw);
   if (CollisionImminent(pose, target, costmap)) {
-    // The geometric target can be safe while the acceleration-limited command
-    // is not (for example residual forward speed when a shelf corner requires
-    // rotation). Enter the same explicit braking/alignment state instead of
-    // returning an unlabelled zero forever.
+    // Preserve the executable prefix: shorten the current control arc before
+    // abandoning the route.  A binary search gives the largest safe command
+    // without rejecting a path merely because its nominal horizon reaches a
+    // corner.  This is local (eight collision checks), not a full-route scan.
+    Twist2d safe{};
+    double low = 0., high = 1.;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+      const double scale = .5 * (low + high);
+      const Twist2d candidate{target.linear * scale, target.angular * scale};
+      if (CollisionImminent(pose, candidate, costmap)) high = scale;
+      else { low = scale; safe = candidate; }
+    }
+    if (low > 1e-3) return safe;
     if (!begin_path_alignment()) return {};
     return stopping_command();
   }
@@ -244,16 +253,10 @@ Twist2d RegulatedPurePursuit::Compute(const Path& path, const Pose2d& pose, Twis
 
 bool RegulatedPurePursuit::CollisionImminent(const Pose2d& pose, Twist2d command,
                                              const LayeredCostmap& costmap) const {
-  // RPP currently uses a circular footprint. An in-place rotation therefore
-  // has exactly the same occupied set as the current pose and cannot create a
-  // new static collision. This also lets a legal, millimetre-clear pose align
-  // away from an obstacle instead of being trapped by rasterisation.
-  if (std::abs(command.linear) <= 1e-9) return false;
-  // The global planner/path validator already reserves the occupancy-cell
-  // half-diagonal.  The controller must use the declared physical footprint
-  // here: applying the raster margin a second time makes a legal narrow-gate
-  // turn enter the stop/rotate state forever.  Continuous arc sampling still
-  // protects the actual footprint at every control step.
+  // The controller uses the same circular footprint as the global planner.
+  // Pure rotation is not exempt: if the current footprint is already in
+  // contact (for example after a discretized corner cut), publishing another
+  // rotation would only spin the wheels against the obstacle.
   const double collision_radius = config_.robot_radius;
   Pose2d projected = pose;
   for (double t = 0.; t <= config_.collision_horizon; t += config_.control_period) {
