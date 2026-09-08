@@ -49,6 +49,10 @@ struct NavigationState {
   int incremental_replans = 0;
   std::size_t incremental_repaired_states = 0;
   std::uint64_t costmap_digest = 0;
+  // First-segment identity: pose cell, start yaw bin and the first ~1 m of
+  // the committed route.  Callers cool a failed signature so the next plan
+  // cannot replay the same in-place alignment.
+  std::uint64_t path_signature = 0;
 };
 
 // Product-facing navigation core. Pose/velocity come from localization and the
@@ -65,6 +69,7 @@ class NavigationSystem {
 
   void SetGoal(Pose2d goal);
   void ClearGoal();
+  void BanPathSignatures(std::vector<std::uint64_t> signatures);
   void UpdateLaserScan(const Pose2d& sensor_pose, const LaserScan& scan);
   // Keeps live range data out of the global static-map graph when an online
   // mapper already owns static occupancy integration.  CollisionMonitor

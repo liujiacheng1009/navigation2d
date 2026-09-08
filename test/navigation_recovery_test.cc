@@ -1,6 +1,7 @@
 #include "navigation2d/application/navigation_system.h"
 
 #include <cassert>
+#include <cmath>
 #include <fstream>
 #include <limits>
 
@@ -79,4 +80,57 @@ int main() {
   assert(stalled_state.recoveries >= 1);
   assert(stalled_state.planning_failure_reason ==
          "controller command produced no measured motion");
+
+  // A long first ComputeCommand is planning, not execution.  Two samples
+  // whose timestamps are 1 s apart must not count as a 0.9 s stall.
+  navigation2d::NavigationSystem probe_stall(stall_config, path);
+  probe_stall.SetGoal(navigation2d::MakePose2d(4., 1.5, 0.));
+  probe_stall.UpdateLaserScan(navigation2d::MakePose2d(1., 1.5, 0.), scan);
+  auto probe_state = probe_stall.ComputeCommand(
+      navigation2d::MakePose2d(1., 1.5, 0.), {}, 0.);
+  assert(probe_state.status != navigation2d::NavigationStatus::kBlocked);
+  probe_state = probe_stall.ComputeCommand(
+      navigation2d::MakePose2d(1., 1.5, 0.), {}, 1.);
+  assert(probe_state.status != navigation2d::NavigationStatus::kBlocked);
+
+  // A path that starts behind the robot must rotate in place.  A coupled
+  // crawl+turn command is a failed translation even when yaw is changing.
+  navigation2d::NavigationConfig align_config = config;
+  align_config.progress_timeout = 10.;
+  align_config.max_recovery_attempts = 3;
+  navigation2d::NavigationSystem aligning(align_config, path);
+  aligning.SetGoal(navigation2d::MakePose2d(4., 1.5, 0.));
+  navigation2d::Pose2d align_pose = navigation2d::MakePose2d(1., 1.5, std::acos(-1.));
+  navigation2d::NavigationState align_state;
+  for (int step = 0; step < 40; ++step) {
+    aligning.UpdateLaserScan(align_pose, scan);
+    align_state = aligning.ComputeCommand(align_pose, {0., align_state.command.angular},
+                                          step * .06);
+    if (align_state.phase == navigation2d::NavigationPhase::kTrackPath) break;
+    assert(align_state.status == navigation2d::NavigationStatus::kNavigating);
+    assert(std::abs(align_state.command.linear) < .02);
+    assert(std::abs(align_state.command.angular) > 1e-3);
+    const double yaw = navigation2d::Yaw(align_pose) + align_state.command.angular * .06;
+    align_pose = navigation2d::MakePose2d(1., 1.5, yaw);
+  }
+  assert(align_state.phase == navigation2d::NavigationPhase::kTrackPath);
+  assert(align_state.status != navigation2d::NavigationStatus::kBlocked);
+
+  // A cooled first-segment signature must not be accepted again from the
+  // same start pose.  A* is deterministic here, so the only legal outcome
+  // is an explicit replay rejection rather than another identical prefix.
+  navigation2d::NavigationSystem signed_route(config, path);
+  signed_route.SetGoal(navigation2d::MakePose2d(4., 1.5, 0.));
+  signed_route.UpdateLaserScan(navigation2d::MakePose2d(1., 1.5, 0.), scan);
+  const auto signed_state = signed_route.ComputeCommand(
+      navigation2d::MakePose2d(1., 1.5, 0.), {}, 0.);
+  assert(signed_state.path_signature != 0);
+  assert(signed_state.global_path_length_m > 0.);
+  signed_route.BanPathSignatures({signed_state.path_signature});
+  signed_route.SetGoal(navigation2d::MakePose2d(4., 1.5, 0.));
+  signed_route.UpdateLaserScan(navigation2d::MakePose2d(1., 1.5, 0.), scan);
+  const auto replay = signed_route.ComputeCommand(
+      navigation2d::MakePose2d(1., 1.5, 0.), {}, .06);
+  assert(replay.global_path_length_m <= 0.);
+  assert(replay.planning_failure_reason == "failed first-segment replay");
 }

@@ -3,10 +3,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <optional>
 #include <limits>
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 #include "navigation2d/control/regulated_pure_pursuit.h"
 #include "navigation2d/control/collision_monitor.h"
 #include "navigation2d/control/dwa_controller.h"
@@ -23,6 +26,44 @@
 namespace navigation2d {
 namespace {
 double NormalizeAngle(double value) { return std::atan2(std::sin(value), std::cos(value)); }
+
+std::uint64_t MixSignature(std::uint64_t hash, std::uint64_t value) {
+  hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+  return hash;
+}
+
+std::uint64_t FirstSegmentSignature(const Path& path, const Pose2d& pose, double resolution) {
+  if (resolution <= 1e-9) resolution = .05;
+  int yaw_bin = static_cast<int>(std::lround(Yaw(pose) * 16. / (2. * std::acos(-1.)))) % 16;
+  if (yaw_bin < 0) yaw_bin += 16;
+  std::uint64_t hash = 0;
+  hash = MixSignature(hash, static_cast<std::uint64_t>(
+      static_cast<int>(std::floor(X(pose) / resolution)) + 100000));
+  hash = MixSignature(hash, static_cast<std::uint64_t>(
+      static_cast<int>(std::floor(Y(pose) / resolution)) + 100000));
+  hash = MixSignature(hash, static_cast<std::uint64_t>(yaw_bin));
+  double arc = 0.;
+  int edges = 0;
+  for (std::size_t index = 1; index < path.size() && edges < 3 && arc < 1.; ++index) {
+    const auto delta = path[index].translation() - path[index - 1].translation();
+    const double length = delta.norm();
+    if (length <= 1e-4) {
+      int yaw_delta = static_cast<int>(std::lround(
+          NormalizeAngle(Yaw(path[index]) - Yaw(path[index - 1])) * 16. /
+          (2. * std::acos(-1.))));
+      hash = MixSignature(hash, 0x1000ULL + static_cast<std::uint64_t>(yaw_delta + 32));
+      ++edges;
+      continue;
+    }
+    hash = MixSignature(hash, static_cast<std::uint64_t>(
+        static_cast<int>(std::floor(X(path[index]) / resolution)) + 200000));
+    hash = MixSignature(hash, static_cast<std::uint64_t>(
+        static_cast<int>(std::floor(Y(path[index]) / resolution)) + 200000));
+    arc += length;
+    ++edges;
+  }
+  return hash;
+}
 Path DensifyPath(const Path& sparse, double maximum_step) {
   if (sparse.size() < 2) return sparse;
   Path dense;
@@ -221,26 +262,71 @@ class NavigationSystem::Impl {
       return false;
     }
     ++command_without_motion_cycles;
-    return timestamp - command_stall_watch_start >= .9;
+    // Timestamps can jump by a second when the first ComputeCommand spends
+    // that time planning and never publishes cmd_vel.  Require a real
+    // control-cycle count so a probe sample cannot expire the window.
+    const int min_cycles = std::max(8,
+        static_cast<int>(std::ceil(.9 / std::max(.02, config.control_period))));
+    return command_without_motion_cycles >= min_cycles &&
+        timestamp - command_stall_watch_start >= .9;
   }
 
   void Replan(const Pose2d& pose) {
     ++state.replans;
     try {
       const auto planning_started = std::chrono::steady_clock::now();
-      path = DensifyPath(planner->Plan(costmap, pose, *goal), .08);
-      const double planning_radius = EffectivePlanningRadius(config, costmap);
+      const double planning_radius = config.planner == "state_lattice"
+          ? config.robot_radius : EffectivePlanningRadius(config, costmap);
+      const auto plan_or_grid_fallback = [&]() {
+        try {
+          return DensifyPath(planner->Plan(costmap, pose, *goal), .08);
+        } catch (const std::runtime_error&) {
+          // Lattice rejects a yaw-aware start/goal that the circular A*
+          // contract still accepts.  Do not abandon a frontier or the home
+          // pose because the polygon check and the execution footprint disagree.
+          if (config.planner != "state_lattice") throw;
+          return DensifyPath(AStarPlanner(planning_radius).Plan(costmap, pose, *goal), .08);
+        }
+      };
+      path = plan_or_grid_fallback();
+      // State-lattice primitives already perform yaw-aware polygon
+      // swept-footprint validation.  Do not apply the grid planner's extra
+      // half-cell radius a second time, which rejects valid primitives near
+      // narrow passages.
       if (!PathFootprintValid(path, costmap, planning_radius)) {
         // Theta*'s long visibility chords can cut across the inside of a
-        // maze corner after densification.  Retry once with the grid path,
-        // which preserves the collision-free cell sequence and gives RPP a
-        // conservative route instead of rejecting the whole frontier.
-        if (config.planner == "theta_star") {
+        // maze corner after densification.  Lattice densify can do the same
+        // at a shelf corner; retry once with the grid path.
+        if (config.planner == "theta_star" || config.planner == "state_lattice") {
           AStarPlanner corner_safe_planner(planning_radius);
           path = DensifyPath(corner_safe_planner.Plan(costmap, pose, *goal), .08);
         }
         if (!PathFootprintValid(path, costmap, planning_radius))
           throw std::runtime_error("planned path failed dense footprint validation");
+      }
+      state.path_signature = FirstSegmentSignature(path, pose, costmap.grid().resolution());
+      if (banned_path_signatures.count(state.path_signature) > 0) {
+        // Same pose/yaw still yields the same lattice rotate-then-drive
+        // prefix.  One A* retry changes the first segment; repeating the
+        // cooled signature is an execution replay, not a new plan.
+        if (config.planner != "astar") {
+          AStarPlanner alternate(planning_radius);
+          Path alternate_path = DensifyPath(alternate.Plan(costmap, pose, *goal), .08);
+          if (PathFootprintValid(alternate_path, costmap, planning_radius)) {
+            const auto alternate_signature =
+                FirstSegmentSignature(alternate_path, pose, costmap.grid().resolution());
+            if (banned_path_signatures.count(alternate_signature) == 0) {
+              path = std::move(alternate_path);
+              state.path_signature = alternate_signature;
+            } else {
+              throw std::runtime_error("failed first-segment replay");
+            }
+          } else {
+            throw std::runtime_error("failed first-segment replay");
+          }
+        } else {
+          throw std::runtime_error("failed first-segment replay");
+        }
       }
       // A replan is a new ordered route contract. Reset the controller's
       // internal projection state even when the new path has similar endpoints.
@@ -272,6 +358,7 @@ class NavigationSystem::Impl {
       state.status = NavigationStatus::kNavigating;
     } catch (const std::runtime_error& error) {
       path.clear(); state.command = {};
+      state.path_signature = 0;
       ResetCommandStallWatch();
       state.planning_failure_reason = error.what();
       ++planning_failures;
@@ -322,6 +409,7 @@ class NavigationSystem::Impl {
   double best_docking_yaw_error = std::numeric_limits<double>::infinity();
   bool docking_position_reached = false;
   std::vector<PredictedObstacle> dynamic_obstacles;
+  std::unordered_set<std::uint64_t> banned_path_signatures;
 };
 
 NavigationSystem::NavigationSystem(NavigationConfig config, const std::string& map_path)
@@ -351,6 +439,12 @@ void NavigationSystem::SetGoal(Pose2d goal) {
   impl_->state.published_command = {};
   impl_->state.collision_monitor_action = CollisionMonitorAction::kNone;
   impl_->state.planning_failure_reason.clear();
+  impl_->state.path_signature = 0;
+}
+
+void NavigationSystem::BanPathSignatures(std::vector<std::uint64_t> signatures) {
+  impl_->banned_path_signatures.clear();
+  impl_->banned_path_signatures.insert(signatures.begin(), signatures.end());
 }
 
 void NavigationSystem::ClearGoal() {
@@ -559,9 +653,80 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
     if (std::abs(heading_error) < .25 || path_progress >= impl_->config.progress_radius) {
       impl_->state.phase = NavigationPhase::kTrackPath;
       impl_->last_progress_time = timestamp;
+    } else {
+      // Align is a rotation-only contract.  RPP's first tracking sample from
+      // rest is accel-limited to about (0.05, 0.11); CommandStalled then
+      // treats that as a failed translation and ignores yaw, so a valid
+      // 17 m home path is torn down before the base has finished turning.
+      const double dv = impl_->config.max_linear_acceleration * impl_->config.control_period;
+      const double dw = impl_->config.max_angular_acceleration * impl_->config.control_period;
+      Twist2d align{0., std::clamp(2.2 * heading_error, -impl_->config.max_angular_velocity,
+                                   impl_->config.max_angular_velocity)};
+      align.linear = std::clamp(0., impl_->state.published_command.linear - dv,
+                                impl_->state.published_command.linear + dv);
+      align.angular = std::clamp(align.angular,
+          impl_->state.published_command.angular - dw,
+          impl_->state.published_command.angular + dw);
+      impl_->state.requested_command = align;
+      impl_->state.controller_commanded_motion =
+          std::abs(align.linear) > 1e-4 || std::abs(align.angular) > 1e-4;
+      impl_->rotation_without_progress_rad +=
+          std::abs(align.angular) * impl_->config.control_period;
+      if (DynamicCollisionImminent(pose, align, impl_->dynamic_obstacles, impl_->config))
+        align = {};
+      const auto monitored = impl_->collision_monitor.Filter(pose, align, timestamp);
+      align = monitored.command;
+      impl_->state.published_command = align;
+      impl_->state.collision_monitor_action = monitored.action;
+      impl_->state.safety_stopped_motion = impl_->state.controller_commanded_motion &&
+          std::abs(align.linear) <= 1e-4 && std::abs(align.angular) <= 1e-4;
+      impl_->state.minimum_ttc_s = monitored.time_to_collision_s;
+      impl_->state.controller_diagnostics.backend = ControllerBackend::kRpp;
+      impl_->state.controller_diagnostics.maneuver = ControllerManeuver::kRotateToPath;
+      impl_->state.controller_diagnostics.fallback_level = 6;
+      const bool align_commanded = impl_->state.controller_commanded_motion &&
+          (std::abs(align.linear) > 1e-4 || std::abs(align.angular) > 1e-4) &&
+          !impl_->state.safety_stopped_motion;
+      if (impl_->CommandStalled(pose, path_progress, measured_velocity, heading_error,
+                                 timestamp, align_commanded,
+                                 std::abs(align.linear) > 1e-3)) {
+        ++impl_->state.recoveries;
+        ++impl_->recovery_attempts;
+        impl_->path.clear();
+        impl_->state.planning_failure_reason =
+            "controller command produced no measured motion";
+        impl_->state.command = {};
+        impl_->state.status = NavigationStatus::kBlocked;
+        return impl_->state;
+      }
+      if (impl_->rotation_without_progress_rad >= 2. * std::acos(-1.)) {
+        ++impl_->state.recoveries;
+        ++impl_->recovery_attempts;
+        impl_->rotation_without_progress_rad = 0.;
+        impl_->path.clear();
+        impl_->state.command = {};
+        impl_->state.status = NavigationStatus::kBlocked;
+        return impl_->state;
+      }
+      impl_->state.command = align;
+      impl_->state.status = NavigationStatus::kNavigating;
+      impl_->state.costmap_digest = impl_->costmap.digest();
+      return impl_->state;
     }
   }
-  if (path_progress >= impl_->best_path_progress_m + impl_->config.progress_radius) {
+  // The path-progress watchdog is meaningful only while translating.  RPP
+  // legitimately emits v=0 while aligning to a sharp segment; arc length is
+  // then constant by definition.  Use the previous published command as the
+  // mode latch so the watchdog is already suspended on the next cycle.
+  const bool rotation_command_active =
+      std::abs(impl_->state.command.linear) <= 1e-3 &&
+      std::abs(impl_->state.command.angular) > 1e-3;
+  const bool stop_command_active =
+      std::abs(impl_->state.command.linear) <= 1e-3 &&
+      std::abs(impl_->state.command.angular) <= 1e-3;
+  if (rotation_command_active || stop_command_active) {
+    impl_->last_progress_time = timestamp;
+  } else if (path_progress >= impl_->best_path_progress_m + impl_->config.progress_radius) {
     impl_->best_path_progress_m = path_progress;
     impl_->last_progress_time = timestamp;
     impl_->recovery_attempts = 0;
