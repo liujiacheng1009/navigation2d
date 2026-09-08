@@ -893,7 +893,24 @@ class AutonomousExplorer final : public rclcpp::Node {
       }
     } else if (state.status == navigation2d::NavigationStatus::kBlocked ||
                (state.phase != navigation2d::NavigationPhase::kDockToGoal &&
-                (now() - goal_started_).seconds() > goal_timeout_s_)) {
+                (now() - goal_started_).seconds() > goal_timeout_s_) ||
+               // NavigationSystem's internal recovery can keep returning a
+               // nominal command while the robot has made no progress on the
+               // first path segment.  Do not wait for the full path-length
+               // timeout (130-160 s in the maze) before trying the escape.
+               // Three recovery cycles are enough to distinguish a transient
+               // controller reset from a genuinely stuck target.
+               (state.path_progress_m < .05 && state.recoveries >= 3 &&
+                (now() - goal_started_).seconds() > 20.0) ||
+               // A frontier can pass the static-map clearance test but still
+               // terminate against a wall after the live scan reveals the
+               // final approach is too tight.  RPP then commands pure
+               // rotation (linear ~= 0) indefinitely.  Treat that as a local
+               // approach failure after a short grace period so the recovery
+               // can back out and select a different viewpoint.
+               (state.path_progress_m < .05 && state.requested_command.linear < .01 &&
+                SectorMinRange(0., .45) > 0. && SectorMinRange(0., .45) < .30 &&
+                (now() - goal_started_).seconds() > 8.0)) {
       RCLCPP_WARN(get_logger(),
                   "Navigation2D frontier failed: status=%s phase=%d elapsed=%.1f replans=%d path=%.2f requested=(%.3f,%.3f) published=(%.3f,%.3f) controller_maneuver=%d intentional_stop=%s monitor_action=%d ttc=%.3f path_signature=%llu planner_error=%s",
                   state.status == navigation2d::NavigationStatus::kBlocked ? "blocked" : "timeout",
