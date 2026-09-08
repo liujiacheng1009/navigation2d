@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -27,6 +28,10 @@ struct ExplorationGoal {
   // informative viewpoint over several tiny fragments of the same boundary.
   double information_gain = 0.;
   double score = 0.;
+  // True when this goal was synthesized from leftover specks that failed
+  // the ordinary cluster/standoff tests.  Used only as one completing probe
+  // after the exploring tour is empty.
+  bool leftover_approach = false;
 };
 
 struct FrontierExplorerConfig {
@@ -52,6 +57,9 @@ class FrontierExplorer {
   explicit FrontierExplorer(FrontierExplorerConfig config = {});
   void UpdateMap(ExplorationGrid map);
   std::vector<ExplorationGoal> SelectGoals(double robot_x, double robot_y);
+  // One open-space approach to leftover free/unknown specks that failed the
+  // ordinary cluster/standoff tests.  Not part of the exploring tour.
+  std::optional<ExplorationGoal> SelectLeftoverApproach(double robot_x, double robot_y);
   // Builds a utility-ordered tour over the connected safe-space graph. Each
   // entry is a collision-safe viewpoint for a distinct reachable frontier.
   // The next viewpoint minimizes travel potential minus frontier information
@@ -75,6 +83,7 @@ class FrontierExplorer {
 
  private:
   bool Free(int col, int row) const;
+  bool ClearAt(int col, int row, double clearance) const;
   bool SafeViewpoint(int col, int row) const;
   bool HasFreeLineOfSight(int from_col, int from_row, int to_col, int to_row) const;
   bool Blacklisted(double x, double y) const;
