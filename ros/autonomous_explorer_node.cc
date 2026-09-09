@@ -80,6 +80,11 @@ const char* BackendName(navigation2d::ControllerBackend backend) {
 class AutonomousExplorer final : public rclcpp::Node {
  public:
   AutonomousExplorer() : Node("sweepnav_autonomous_explorer"), explorer_(ExplorerConfig()) {
+    pose_source_ = declare_parameter<std::string>("pose_source", "localization2d");
+    if (pose_source_ != "ground_truth" && pose_source_ != "localization2d") {
+      throw std::runtime_error(
+          "pose_source must be 'ground_truth' or 'localization2d'");
+    }
     result_path_ = std::getenv("SWEEPNAV_EXPLORATION_RESULT") != nullptr
         ? std::getenv("SWEEPNAV_EXPLORATION_RESULT") : "/tmp/exploration-result.json";
     snapshot_path_ = (std::filesystem::path(result_path_).parent_path() /
@@ -107,13 +112,14 @@ class AutonomousExplorer final : public rclcpp::Node {
           explorer_.UpdateMap(std::move(grid));
           ++map_revision_;
         });
-    // Planning-only evaluation deliberately bypasses Localization2D's pose.
-    // The online mapper still supplies its live occupancy grid, while the
-    // controller and explorer receive the simulator's exact pose expressed in
-    // the same initial-odometry/map coordinate system used by that grid.
-    truth_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
-        "/ground_truth", rclcpp::SensorDataQoS(),
-        [this](nav_msgs::msg::Odometry::ConstSharedPtr value) {
+    if (pose_source_ == "ground_truth") {
+      // Planning-only evaluation deliberately bypasses Localization2D's pose.
+      // The online mapper still supplies its live occupancy grid, while the
+      // controller and explorer receive the simulator's exact pose expressed in
+      // the same initial-odometry/map coordinate system used by that grid.
+      truth_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
+          "/ground_truth", rclcpp::SensorDataQoS(),
+          [this](nav_msgs::msg::Odometry::ConstSharedPtr value) {
           const auto& source = value->pose.pose;
           const double source_yaw = Yaw(source.orientation);
           if (!truth_origin_) {
@@ -143,7 +149,28 @@ class AutonomousExplorer final : public rclcpp::Node {
                 point.first - trajectory_.back().first, point.second - trajectory_.back().second);
             trajectory_.push_back(point);
           }
-        });
+          });
+    } else {
+      // In the joint localization/navigation evaluation the map and every
+      // planning/control decision use Localization2D's scan-matched map pose.
+      // Do not subscribe to /ground_truth here: it remains an offline oracle.
+      localization_pose_subscription_ =
+          create_subscription<geometry_msgs::msg::PoseStamped>(
+              "/localization2d/pose", rclcpp::SensorDataQoS(),
+              [this](geometry_msgs::msg::PoseStamped::ConstSharedPtr value) {
+                pose_ = *value;
+                const auto point = std::pair<double, double>{
+                    value->pose.position.x, value->pose.position.y};
+                if (trajectory_.empty() ||
+                    std::hypot(point.first - trajectory_.back().first,
+                               point.second - trajectory_.back().second) > .05) {
+                  if (!trajectory_.empty()) total_distance_m_ += std::hypot(
+                      point.first - trajectory_.back().first,
+                      point.second - trajectory_.back().second);
+                  trajectory_.push_back(point);
+                }
+              });
+    }
     odom_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
         "/odom", rclcpp::SensorDataQoS(),
         [this](nav_msgs::msg::Odometry::ConstSharedPtr value) {
@@ -158,7 +185,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         });
     timer_ = create_wall_timer(
         std::chrono::duration<double>(.06 / simulation_speed_), [this]() { Tick(); });
-    PublishStatus("WAITING", "waiting for ground-truth pose and online map");
+    PublishStatus("WAITING", "waiting for " + pose_source_ + " pose and online map");
   }
 
  private:
@@ -751,7 +778,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     std::filesystem::create_directories(std::filesystem::path(result_path_).parent_path());
     if (map_) {
       // Persist the exact online occupancy grid used by exploration, together
-      // with the true-pose trajectory.  The host-side renderer turns this
+      // with the trajectory from the selected pose source.  The host-side renderer turns this
       // into the reviewable PNG artifact after the mapper exits.
       std::ofstream snapshot(snapshot_path_);
       snapshot << "{\"width\":" << map_->info.width << ",\"height\":" << map_->info.height
@@ -773,8 +800,11 @@ class AutonomousExplorer final : public rclcpp::Node {
     const char* result_status = !success ? "FAILED" : (partial_return_ ? "PARTIAL" : "COMPLETE");
     output << "{\n  \"status\": \"" << result_status << "\",\n"
            << "  \"message\": \"" << final_message << "\",\n"
-           << "  \"pose_source\": \"ground_truth\",\n"
-           << "  \"map_source\": \"ground_truth_scan_insertion\",\n"
+           << "  \"pose_source\": \"" << pose_source_ << "\",\n"
+           << "  \"map_source\": \""
+           << (pose_source_ == "ground_truth" ? "ground_truth_scan_insertion"
+                                                : "localization2d_scan_matching")
+           << "\",\n"
            << "  \"planning\": \"navigation2d/theta_star+rpp\",\n"
            << "  \"last_controller_backend\": \"" << last_backend_ << "\",\n"
            << "  \"mppi_commands\": " << mppi_commands_ << ",\n"
@@ -801,7 +831,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (!map_ || !pose_ || !scan_ || KnownCells() < 100) return;
     if (!start_pose_) {
       start_pose_ = pose_;
-      // Simulation can advance rapidly while the truth mapper receives its
+      // Simulation can advance rapidly while the mapper receives its
       // first scans. Exploration time is a planning budget, so start it only
       // once pose, scan and a usable map are simultaneously available.
       started_ = now();
@@ -812,7 +842,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       last_progress_time_ = now();
       bootstrap_until_ = now() + rclcpp::Duration::from_seconds(8.0);
       next_selection_ = bootstrap_until_;
-      PublishStatus("WAITING", "ground-truth pose ready; waiting for a stable online map");
+      PublishStatus("WAITING", pose_source_ + " pose ready; waiting for a stable online map");
     }
     if (mission_started_ && (now() - started_).seconds() > max_duration_s_) {
       Finish(false, "exploration timed out");
@@ -1005,6 +1035,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   std::string last_backend_ = "not-run";
   bool returning_ = false, finished_ = false, mission_started_ = false;
   bool truth_origin_ = false;
+  std::string pose_source_;
   Goal active_goal_;
   std::deque<Goal> committed_tour_;
   rclcpp::Time started_{0, 0, RCL_ROS_TIME};
@@ -1027,6 +1058,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr inflated_costmap_publisher_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_subscription_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr truth_subscription_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr localization_pose_subscription_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_subscription_;
   rclcpp::TimerBase::SharedPtr timer_;
