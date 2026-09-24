@@ -96,6 +96,9 @@ class FrontierExplorer {
     double x = 0., y = 0.;
     double radius = 0.;
     std::size_t known_cells = 0;
+    // Successful observation viewpoints are cooled for a larger map-growth
+    // budget so the planner cannot immediately revisit the same room edge.
+    std::size_t required_growth = 600;
   };
   std::vector<BlacklistEntry> blacklist_;
   struct FrontierTrack {

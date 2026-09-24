@@ -56,7 +56,7 @@ bool FrontierExplorer::Blacklisted(double x, double y) const {
   return std::any_of(blacklist_.begin(), blacklist_.end(), [&](const auto& entry) {
     // A failed frontier becomes eligible again after the map has materially
     // expanded, since a new approach through a doorway may now be visible.
-    return known < entry.known_cells + 600 &&
+    return known < entry.known_cells + entry.required_growth &&
         std::hypot(x - entry.x, y - entry.y) < entry.radius;
   });
 }
@@ -634,7 +634,8 @@ void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded
   const double component_radius = std::max(
       config_.blacklist_radius,
       std::sqrt(static_cast<double>(std::max(1, goal.frontier_cells))) * map_.resolution);
-  blacklist_.push_back({goal.frontier_x, goal.frontier_y, component_radius, KnownCells()});
+  blacklist_.push_back({goal.frontier_x, goal.frontier_y, component_radius, KnownCells(),
+                        succeeded ? 5000u : 600u});
   if (succeeded) {
     ++completed_goals_;
   } else {

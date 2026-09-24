@@ -95,24 +95,59 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
   // contract is evaluated on an occupancy raster.  Match the planner's
   // one-cell half-diagonal guard so a command cannot enter the physical wall
   // during the small gap between the raster boundary and a real contact.
+  // Keep the live swept-footprint check slightly farther from sparse thin
+  // returns such as table legs than the raster footprint alone. This margin
+  // is safety clearance, not an inflated robot geometry.
   const double collision_radius = config_.robot_radius +
-      std::sqrt(.5) * config_.map_resolution;
+      std::sqrt(.5) * config_.map_resolution + .10;
   double ttc = std::numeric_limits<double>::infinity();
   bool blind_zone_closing = false;
+  bool slowdown_closing = false;
+  // Doorway alignment often contains a tiny residual linear command while
+  // the base is primarily rotating. Do not classify side-jamb returns as a
+  // translational collision during that alignment phase.
+  const bool translating = std::abs(command.linear) > .03;
   Pose2d projected = robot_pose;
   for (double time = config_.control_period;
+       translating &&
        time <= config_.collision_monitor_approach_horizon + 1e-9;
        time += config_.control_period) {
     projected = Integrate(projected, command, config_.control_period);
+    const double command_heading = Yaw(robot_pose);
+    const Eigen::Vector2d heading(std::cos(command_heading), std::sin(command_heading));
     const bool collision = std::any_of(points_.begin(), points_.end(), [&](const auto& point) {
       const double initial_distance = (point - robot_pose.translation()).norm();
       const double projected_distance = (point - projected.translation()).norm();
+      const Eigen::Vector2d relative = point - robot_pose.translation();
+      const double longitudinal = relative.dot(heading);
+      const double lateral = std::abs(relative.x() * heading.y() -
+                                      relative.y() * heading.x());
+      // Only returns in the commanded travel corridor participate in the
+      // swept translation test.  Door jambs beside the chassis must not be
+      // treated as a collision merely because the command also rotates.
+      const bool in_travel_corridor =
+          ((command.linear > 0. && longitudinal > 0.) ||
+           (command.linear < 0. && longitudinal < 0.)) &&
+          lateral <= collision_radius + .10;
+      const bool closing = projected_distance + 1e-5 < initial_distance;
+      const double clearance = initial_distance - config_.robot_radius;
+      if (in_travel_corridor && closing &&
+          clearance <= config_.collision_monitor_slowdown_distance)
+        slowdown_closing = true;
+      // Nav2-style separation of slowdown and stop zones: a return in the
+      // travel corridor is an emergency only inside the configured stop
+      // distance.  The older implementation stopped at
+      // collision_radius + .12, which made table legs and door jambs behave
+      // like an immediate collision.
+      const bool immediate_stop = in_travel_corridor && closing &&
+          clearance <= config_.collision_monitor_stop_distance;
       // Footprint clearing: a static obstacle cannot physically occupy the
       // robot's current solid body. Returns already inside the footprint are
       // self/noise/contact discretization and must not permanently latch the
       // base. The monitor guards newly swept space only.
-      return initial_distance > collision_radius &&
-             projected_distance <= collision_radius;
+      return immediate_stop || (in_travel_corridor &&
+             initial_distance > collision_radius &&
+             projected_distance <= collision_radius);
     });
     if (collision) { ttc = time; break; }
   }
@@ -127,7 +162,17 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
         blind_zone_points_.begin(), blind_zone_points_.end(), [&](const auto& point) {
           const double initial_distance = (point - robot_pose.translation()).norm();
           const double projected_distance = (point - one_step.translation()).norm();
-          return initial_distance > collision_radius + 1e-3 &&
+          const Eigen::Vector2d relative = point - robot_pose.translation();
+          const double heading_yaw = Yaw(robot_pose);
+          const Eigen::Vector2d heading(std::cos(heading_yaw), std::sin(heading_yaw));
+          const double longitudinal = relative.dot(heading);
+          const double lateral = std::abs(relative.x() * heading.y() -
+                                          relative.y() * heading.x());
+          const bool in_travel_corridor =
+              ((command.linear > 0. && longitudinal > 0.) ||
+               (command.linear < 0. && longitudinal < 0.)) &&
+              lateral <= collision_radius + .10;
+          return in_travel_corridor && initial_distance > collision_radius + 1e-3 &&
                  projected_distance + 1e-5 < initial_distance;
         });
     if (blind_zone_closing) ttc = std::min(ttc, config_.control_period);
@@ -149,7 +194,7 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
   // Side walls in a narrow but traversable doorway must not throttle the
   // robot indefinitely. Slow down only when the commanded swept footprint
   // actually approaches a collision; retain the all-direction emergency stop.
-  else if (std::isfinite(ttc))
+  else if (std::isfinite(ttc) || slowdown_closing)
     requested = CollisionMonitorAction::kSlowdown;
 
   if (requested != CollisionMonitorAction::kNone) {
@@ -162,7 +207,11 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
       latched_action_ = CollisionMonitorAction::kNone;
   }
   if (latched_action_ == CollisionMonitorAction::kStop ||
-      latched_action_ == CollisionMonitorAction::kBlindZoneStop) command = {};
+      latched_action_ == CollisionMonitorAction::kBlindZoneStop) {
+    // A safety filter must not turn an arc into an unvalidated pivot.
+    // Replanning/recovery belongs to the controller, not this filter.
+    command = {};
+  }
   else if (latched_action_ == CollisionMonitorAction::kSlowdown) {
     command.linear *= config_.collision_monitor_slowdown_ratio;
     command.angular *= config_.collision_monitor_slowdown_ratio;
