@@ -157,7 +157,11 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
       const bool in_travel_corridor =
           ((command.linear > 0. && longitudinal > 0.) ||
            (command.linear < 0. && longitudinal < 0.)) &&
-          lateral <= collision_radius + .10;
+          // Do not add a second arbitrary lateral margin here. The CAD
+          // footprint and its explicit edge margin already define the safe
+          // corridor; widening it by another 0.10 m turns a wide corridor's
+          // side wall into a false forward collision.
+          lateral <= collision_radius;
       const bool closing = projected_distance + 1e-5 < initial_distance;
       const double clearance = initial_distance - config_.robot_radius;
       const bool projected_footprint_collision =
@@ -208,7 +212,7 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
           const bool in_travel_corridor =
               ((command.linear > 0. && longitudinal > 0.) ||
                (command.linear < 0. && longitudinal < 0.)) &&
-              lateral <= collision_radius + .10;
+              lateral <= collision_radius;
           return in_travel_corridor && initial_distance > collision_radius + 1e-3 &&
                  projected_distance + 1e-5 < initial_distance;
         });
