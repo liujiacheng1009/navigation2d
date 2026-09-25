@@ -246,8 +246,16 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
     command = {};
   }
   else if (latched_action_ == CollisionMonitorAction::kSlowdown) {
+    const double requested_linear = command.linear;
     command.linear *= config_.collision_monitor_slowdown_ratio;
     command.angular *= config_.collision_monitor_slowdown_ratio;
+    // The motor controller has a finite static-friction/deadband region. A
+    // slowdown command below it is not useful motion: it produces zero
+    // odometry, trips the navigation watchdog, and causes premature frontier
+    // abandonment. Preserve a small executable translational command while
+    // retaining the monitor's curvature and stop authority.
+    if (std::abs(requested_linear) >= .045 && std::abs(command.linear) < .035)
+      command.linear = std::copysign(.035, requested_linear);
   }
   return {command, latched_action_, min_distance,
           std::isfinite(ttc) ? ttc : 0.};
