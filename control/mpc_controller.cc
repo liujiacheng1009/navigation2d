@@ -1,6 +1,7 @@
 #include "navigation2d/control/mpc_controller.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <chrono>
 #include <future>
@@ -147,6 +148,42 @@ Twist2d MpcController::Compute(const Path& path, const Pose2d& pose, Twist2d cur
   if (!IsStop(regulated) && !CollisionImminent(pose, regulated, costmap) &&
       !DynamicCollisionImminent(pose, regulated, dynamic_obstacles, config_))
     return finish(ControllerBackend::kRpp, ControllerSolveStatus::kSuccess, 2, regulated);
+
+  // Last-resort local topology search.  A safety filter may reject the
+  // nominal global-path arc at a doorway or furniture corner even though a
+  // short left/right bypass is free.  Test bounded arcs through the same
+  // footprint and dynamic-obstacle validators before declaring the route
+  // infeasible.  This is a local trajectory search, not a blind escape
+  // command: every candidate must make path-aligned progress.
+  const std::size_t nearest = [&]() {
+    std::size_t index = 0; double best = std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < path.size(); ++i) {
+      const double d = (path[i].translation() - pose.translation()).squaredNorm();
+      if (d < best) { best = d; index = i; }
+    }
+    return index;
+  }();
+  const auto target = path[std::min(nearest + 4, path.size() - 1)].translation();
+  const double heading_error = NormalizeAngle(
+      std::atan2(target.y() - Y(pose), target.x() - X(pose)) - Yaw(pose));
+  const double preferred_turn = heading_error >= 0. ? 1. : -1.;
+  const std::array<Twist2d, 6> recovery = {{
+      {.06, preferred_turn * .55}, {.10, preferred_turn * .40},
+      {.06, -preferred_turn * .55}, {.10, -preferred_turn * .40},
+      {0., preferred_turn * .65}, {0., -preferred_turn * .65}}};
+  for (const auto& candidate : recovery) {
+    if ((candidate.linear > 0. && std::abs(heading_error) > 1.2) ||
+        CollisionImminent(pose, candidate, costmap) ||
+        DynamicCollisionImminent(pose, candidate, dynamic_obstacles, config_))
+      continue;
+    if (candidate.linear > 0. && !MakesProgress(path, pose, candidate)) continue;
+    diagnostics_.backend = ControllerBackend::kDwa;
+    diagnostics_.status = ControllerSolveStatus::kSuccess;
+    diagnostics_.fallback_level = 3;
+    diagnostics_.maneuver = candidate.linear > 0.
+        ? ControllerManeuver::kTracking : ControllerManeuver::kRotateToPath;
+    return finish(ControllerBackend::kDwa, ControllerSolveStatus::kSuccess, 3, candidate);
+  }
   return finish(ControllerBackend::kRpp, ControllerSolveStatus::kUnsafe, 3, {});
 }
 
