@@ -173,6 +173,10 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
       // collision_radius + .12, which made table legs and door jambs behave
       // like an immediate collision.
       const bool immediate_stop = in_travel_corridor && closing &&
+          // Returns already inside the physical footprint are self returns
+          // from the chassis/upper plates. They must not stop every command
+          // after switching from the circular model to the CAD polygon.
+          clearance > 0. &&
           clearance <= config_.collision_monitor_stop_distance;
       // Footprint clearing: a static obstacle cannot physically occupy the
       // robot's current solid body. Returns already inside the footprint are
