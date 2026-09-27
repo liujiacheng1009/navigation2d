@@ -37,12 +37,12 @@ int main() {
   result = monitor.Filter(pose, {.2, 0.}, 2.);
   assert(result.action == navigation2d::CollisionMonitorAction::kSourceTimeout);
 
-  // A noisy return already inside a circular footprint must not make motion
-  // impossible: it is removed by footprint clearing.
+  // A noisy return already inside the circular body (radius 0.18 m) must not
+  // make motion impossible: it is removed by footprint clearing.
   navigation2d::NavigationConfig rotation_config = config;
   rotation_config.collision_monitor_trigger_cycles = 1;
   navigation2d::CollisionMonitor rotation_monitor(rotation_config);
-  scan.ranges = {.20};
+  scan.ranges = {.12};
   rotation_monitor.UpdateLaserScan(pose, scan);
   result = rotation_monitor.Filter(pose, {0., .4}, 3.);
   assert(result.action == navigation2d::CollisionMonitorAction::kNone);
@@ -115,6 +115,41 @@ int main() {
   ahead_scan.ranges = {.27};
   near_monitor.UpdateLaserScan(origin, ahead_scan);
   result = near_monitor.Filter(origin, {.24, 0.}, 5.3);
+  assert(result.action == navigation2d::CollisionMonitorAction::kStop);
+  assert(result.command.linear == 0.);
+
+  // Recorded exploration stop, bag 045634-49f99c62 at t=80.6 s. The closest
+  // return sits beside the front corner (body half-width 0.147 m, point at
+  // y=0.194 m) while the lane ahead of the bumper is clear. Radial clearance
+  // against the 0.22 m planning circle was 0.08 m, inside the 0.10 m stop
+  // distance, so the old monitor latched a zero command for the rest of the
+  // goal. This return may slow the robot; it must not stop it.
+  navigation2d::NavigationConfig corner_stop_config = side_config;
+  corner_stop_config.robot_radius = .22;
+  corner_stop_config.map_resolution = .05;
+  corner_stop_config.footprint = {{-.145, -.147}, {.115, -.147}, {.145, -.132},
+                                  {.145, .132}, {.115, .147}, {-.145, .147}};
+  corner_stop_config.regulated_min_speed = .08;
+  navigation2d::CollisionMonitor corner_monitor(corner_stop_config);
+  navigation2d::LaserScan corner_scan;
+  corner_scan.angle_min = std::atan2(.194, .224);
+  corner_scan.angle_increment = .1;
+  corner_scan.range_min = .02;
+  corner_scan.range_max = 8.;
+  corner_scan.ranges = {std::hypot(.224, .194)};
+  corner_monitor.UpdateLaserScan(origin, corner_scan);
+  result = corner_monitor.Filter(origin, {.24, 0.}, 6.);
+  assert(result.action != navigation2d::CollisionMonitorAction::kStop);
+  assert(result.action != navigation2d::CollisionMonitorAction::kBlindZoneStop);
+  assert(result.command.linear >= .08 - 1e-9);
+
+  // The same chassis still stops for a return 0.09 m in front of the bumper.
+  navigation2d::CollisionMonitor bumper_monitor(corner_stop_config);
+  navigation2d::LaserScan bumper_scan = corner_scan;
+  bumper_scan.angle_min = 0.;
+  bumper_scan.ranges = {.145 + .09};
+  bumper_monitor.UpdateLaserScan(origin, bumper_scan);
+  result = bumper_monitor.Filter(origin, {.24, 0.}, 6.1);
   assert(result.action == navigation2d::CollisionMonitorAction::kStop);
   assert(result.command.linear == 0.);
 

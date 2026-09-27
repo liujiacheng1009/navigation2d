@@ -8,17 +8,45 @@
 namespace navigation2d {
 namespace {
 
-// Lateral half-width of the commanded travel corridor. collision_radius adds
-// another 0.10 m that is an along-track stop margin, not extra vehicle width.
-// Using it as the corridor width treats a parallel wall as a forward obstacle:
-// the slowdown latch then never releases, and every command is multiplied by
-// slowdown_ratio before being floored at a crawl.
-double TravelCorridorHalfWidth(const NavigationConfig& config) {
+double BodyHalfWidth(const NavigationConfig& config) {
   double half_width = 0.;
   for (const auto& corner : config.footprint)
     half_width = std::max(half_width, std::abs(corner.y()));
   if (half_width < 1e-6) half_width = config.robot_radius;
-  return half_width + std::sqrt(.5) * config.map_resolution + .05;
+  return half_width;
+}
+
+// Lateral half-width of the commanded travel corridor. collision_radius adds
+// another 0.10 m that is an along-track stop margin, not extra vehicle width.
+// Using it as the corridor width treats a parallel wall as a forward obstacle:
+// the slowdown latch then never releases, and every command is multiplied by
+// slowdown_ratio before being floored at a crawl. The extra 0.05 m is only a
+// slowdown margin so a corner beside the bumper eases the speed; it must not
+// widen the stop zone.
+double TravelCorridorHalfWidth(const NavigationConfig& config) {
+  return BodyHalfWidth(config) + std::sqrt(.5) * config.map_resolution + .05;
+}
+
+// Stop only for returns that overlap the body, plus one raster cell. A jamb
+// a few centimetres outside the chassis is still inside the slowdown corridor
+// and used to satisfy the radial stop test, which then latched a zero command
+// for the rest of the traverse.
+double StopCorridorHalfWidth(const NavigationConfig& config) {
+  return BodyHalfWidth(config) + std::sqrt(.5) * config.map_resolution;
+}
+
+// Distance from the robot origin to the bumper in the commanded direction.
+// Without a footprint the circular planning radius is that bumper.
+double CommandedExtent(const NavigationConfig& config, double linear) {
+  if (config.footprint.size() >= 3) {
+    double extent = 0.;
+    for (const auto& corner : config.footprint) {
+      const double axial = linear >= 0. ? corner.x() : -corner.x();
+      extent = std::max(extent, axial);
+    }
+    if (extent > 1e-6) return extent;
+  }
+  return config.robot_radius;
 }
 
 // 1 at the outer edge of the slowdown zone, slowdown_ratio at the stop
@@ -172,6 +200,9 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
       std::sqrt(.5) * config_.map_resolution + .10;
   const double footprint_margin = std::sqrt(.5) * config_.map_resolution + .05;
   const double travel_half_width = TravelCorridorHalfWidth(config_);
+  const double stop_half_width = StopCorridorHalfWidth(config_);
+  const double commanded_extent = CommandedExtent(config_, command.linear);
+  bool emergency_stop = false;
   double ttc = std::numeric_limits<double>::infinity();
   double slowdown_clearance = std::numeric_limits<double>::infinity();
   bool blind_zone_closing = false;
@@ -188,7 +219,8 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
     projected = Integrate(projected, command, config_.control_period);
     const double command_heading = Yaw(robot_pose);
     const Eigen::Vector2d heading(std::cos(command_heading), std::sin(command_heading));
-    const bool collision = std::any_of(points_.begin(), points_.end(), [&](const auto& point) {
+    bool predicted_contact = false;
+    for (const auto& point : points_) {
       const double initial_distance = (point - robot_pose.translation()).norm();
       const double projected_distance = (point - projected.translation()).norm();
       const Eigen::Vector2d relative = point - robot_pose.translation();
@@ -216,26 +248,31 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
           config_.footprint.size() >= 3
               ? PointInsideOrNearFootprint(point, projected, config_, footprint_margin)
               : projected_distance <= collision_radius;
-      // Nav2-style separation of slowdown and stop zones: a return in the
-      // travel corridor is an emergency only inside the configured stop
-      // distance.  The older implementation stopped at
-      // collision_radius + .12, which made table legs and door jambs behave
-      // like an immediate collision.
-      const bool immediate_stop = in_travel_corridor && closing &&
-          // Returns already inside the physical footprint are self returns
-          // from the chassis/upper plates. They must not stop every command
-          // after switching from the circular model to the CAD polygon.
-          clearance > 0. &&
-          clearance <= config_.collision_monitor_stop_distance;
+      // Stop on the gap in front of the bumper, not on radial distance from
+      // the robot centre. A return beside the front corner is only ~0.08 m
+      // from the 0.22 m planning circle, which is inside stop_distance, while
+      // the bumper itself still has a clear lane. Radial clearance stopped
+      // that lane and the zero command then held for the rest of the goal.
+      // The stop corridor is the body width; the wider travel corridor only
+      // slows down. Scan every return before leaving this step so a side
+      // graze cannot hide a bumper obstacle.
+      const bool in_stop_corridor =
+          ((command.linear > 0. && longitudinal > 0.) ||
+           (command.linear < 0. && longitudinal < 0.)) &&
+          lateral <= stop_half_width;
+      const double along_track_gap = std::abs(longitudinal) - commanded_extent;
+      if (in_stop_corridor && closing && along_track_gap > -0.02 &&
+          along_track_gap <= config_.collision_monitor_stop_distance)
+        emergency_stop = true;
       // Footprint clearing: a static obstacle cannot physically occupy the
       // robot's current solid body. Returns already inside the footprint are
       // self/noise/contact discretization and must not permanently latch the
       // base. The monitor guards newly swept space only.
-      return immediate_stop || (in_travel_corridor &&
-             initial_distance > collision_radius &&
-             projected_footprint_collision);
-    });
-    if (collision) { ttc = time; break; }
+      if (in_travel_corridor && initial_distance > collision_radius &&
+          projected_footprint_collision)
+        predicted_contact = true;
+    }
+    if (emergency_stop || predicted_contact) { ttc = time; break; }
   }
 
   // A below-minimum return may already be close enough that the normal
@@ -275,7 +312,7 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
   // command trajectory on the next control step.
   if (blind_zone_closing)
     requested = CollisionMonitorAction::kBlindZoneStop;
-  else if (ttc <= config_.control_period)
+  else if (emergency_stop)
     requested = CollisionMonitorAction::kStop;
   // Side walls in a narrow but traversable doorway must not throttle the
   // robot indefinitely. Slow down only when the commanded swept footprint
