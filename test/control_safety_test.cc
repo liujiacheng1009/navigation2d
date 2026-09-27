@@ -25,8 +25,10 @@ int main() {
   assert(result.action == navigation2d::CollisionMonitorAction::kNone);
   monitor.UpdateLaserScan(pose, scan);
   result = monitor.Filter(pose, {.2, 0.}, 1.05);
-  assert(result.action == navigation2d::CollisionMonitorAction::kStop);
-  assert(result.command.linear == 0.);
+  // Clearance is 0.29 - 0.18 = 0.11 m, just outside the 0.10 m stop distance.
+  // The monitor must slow this command, not zero it.
+  assert(result.action == navigation2d::CollisionMonitorAction::kSlowdown);
+  assert(result.command.linear >= .05);
 
   scan.ranges = {std::numeric_limits<double>::infinity()};
   monitor.UpdateLaserScan(pose, scan); monitor.Filter(pose, {.2, 0.}, 1.10);
@@ -36,8 +38,7 @@ int main() {
   assert(result.action == navigation2d::CollisionMonitorAction::kSourceTimeout);
 
   // A noisy return already inside a circular footprint must not make motion
-  // impossible: it is removed by footprint clearing. The test above still
-  // proves that a point initially outside and newly swept by motion stops.
+  // impossible: it is removed by footprint clearing.
   navigation2d::NavigationConfig rotation_config = config;
   rotation_config.collision_monitor_trigger_cycles = 1;
   navigation2d::CollisionMonitor rotation_monitor(rotation_config);
@@ -69,6 +70,53 @@ int main() {
   result = blind_monitor.Filter(base_pose, {-.05, 0.}, 4.05);
   assert(result.action == navigation2d::CollisionMonitorAction::kNone);
   assert(result.command.linear < 0.);
+
+  // A parallel wall beside the chassis used to sit inside collision_radius
+  // (~0.30 m) and latch the flat 0.35 slowdown for the whole traverse.
+  navigation2d::NavigationConfig side_config = config;
+  side_config.collision_monitor_trigger_cycles = 1;
+  side_config.collision_monitor_release_cycles = 1;
+  navigation2d::CollisionMonitor side_monitor(side_config);
+  navigation2d::LaserScan side_scan;
+  side_scan.angle_min = std::atan2(.30, .40);
+  side_scan.angle_increment = .1;
+  side_scan.range_min = .02;
+  side_scan.range_max = 5.;
+  side_scan.ranges = {std::hypot(.40, .30)};
+  const auto origin = navigation2d::MakePose2d(0., 0., 0.);
+  side_monitor.UpdateLaserScan(origin, side_scan);
+  result = side_monitor.Filter(origin, {.24, 0.}, 5.);
+  assert(result.action == navigation2d::CollisionMonitorAction::kNone);
+  assert(std::abs(result.command.linear - .24) < 1e-9);
+
+  // A return directly ahead scales with clearance and stays far above the
+  // old 0.035 m/s crawl. Clearance here is 0.55 - 0.18 = 0.37 m.
+  navigation2d::CollisionMonitor ahead_monitor(side_config);
+  navigation2d::LaserScan ahead_scan = side_scan;
+  ahead_scan.angle_min = 0.;
+  ahead_scan.ranges = {.55};
+  ahead_monitor.UpdateLaserScan(origin, ahead_scan);
+  result = ahead_monitor.Filter(origin, {.24, 0.}, 5.);
+  assert(result.action == navigation2d::CollisionMonitorAction::kSlowdown);
+  assert(result.command.linear > .12);
+  assert(result.command.linear < .24);
+
+  // Clearance 0.36 - 0.18 = 0.18 m on an already regulated 0.08 m/s command.
+  // The old 0.35 scale plus 0.035 m/s floor turned this into the recorded crawl.
+  navigation2d::CollisionMonitor floor_monitor(side_config);
+  ahead_scan.ranges = {.36};
+  floor_monitor.UpdateLaserScan(origin, ahead_scan);
+  result = floor_monitor.Filter(origin, {.08, 0.}, 5.2);
+  assert(result.action == navigation2d::CollisionMonitorAction::kSlowdown);
+  assert(result.command.linear >= .08 - 1e-9);
+
+  // A return inside the stop distance still zeroes the command.
+  navigation2d::CollisionMonitor near_monitor(side_config);
+  ahead_scan.ranges = {.27};
+  near_monitor.UpdateLaserScan(origin, ahead_scan);
+  result = near_monitor.Filter(origin, {.24, 0.}, 5.3);
+  assert(result.action == navigation2d::CollisionMonitorAction::kStop);
+  assert(result.command.linear == 0.);
 
   const char* map_path = "/tmp/navigation2d_safe_corridor_test.json";
   std::ofstream output(map_path);

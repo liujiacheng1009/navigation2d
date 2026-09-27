@@ -8,6 +8,48 @@
 namespace navigation2d {
 namespace {
 
+// Lateral half-width of the commanded travel corridor. collision_radius adds
+// another 0.10 m that is an along-track stop margin, not extra vehicle width.
+// Using it as the corridor width treats a parallel wall as a forward obstacle:
+// the slowdown latch then never releases, and every command is multiplied by
+// slowdown_ratio before being floored at a crawl.
+double TravelCorridorHalfWidth(const NavigationConfig& config) {
+  double half_width = 0.;
+  for (const auto& corner : config.footprint)
+    half_width = std::max(half_width, std::abs(corner.y()));
+  if (half_width < 1e-6) half_width = config.robot_radius;
+  return half_width + std::sqrt(.5) * config.map_resolution + .05;
+}
+
+// 1 at the outer edge of the slowdown zone, slowdown_ratio at the stop
+// distance or at a one-cycle time-to-collision. A flat ratio makes a return
+// 0.40 m away as slow as one 0.10 m away.
+double SlowdownScale(double clearance, double time_to_collision,
+                     const NavigationConfig& config) {
+  const double minimum = std::clamp(config.collision_monitor_slowdown_ratio, 0., 1.);
+  double scale = 1.;
+  bool applied = false;
+  if (std::isfinite(clearance)) {
+    const double span = std::max(
+        1e-3, config.collision_monitor_slowdown_distance -
+                  config.collision_monitor_stop_distance);
+    const double closeness = std::clamp(
+        (config.collision_monitor_slowdown_distance - clearance) / span, 0., 1.);
+    scale = std::min(scale, 1. - closeness * (1. - minimum));
+    applied = true;
+  }
+  if (std::isfinite(time_to_collision) &&
+      config.collision_monitor_approach_horizon > 1e-3) {
+    const double closeness = std::clamp(
+        (config.collision_monitor_approach_horizon - time_to_collision) /
+            config.collision_monitor_approach_horizon,
+        0., 1.);
+    scale = std::min(scale, 1. - closeness * (1. - minimum));
+    applied = true;
+  }
+  return applied ? scale : minimum;
+}
+
 bool PointInsideOrNearFootprint(const Eigen::Vector2d& world_point,
                                 const Pose2d& pose,
                                 const NavigationConfig& config,
@@ -129,7 +171,9 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
   const double collision_radius = config_.robot_radius +
       std::sqrt(.5) * config_.map_resolution + .10;
   const double footprint_margin = std::sqrt(.5) * config_.map_resolution + .05;
+  const double travel_half_width = TravelCorridorHalfWidth(config_);
   double ttc = std::numeric_limits<double>::infinity();
+  double slowdown_clearance = std::numeric_limits<double>::infinity();
   bool blind_zone_closing = false;
   bool slowdown_closing = false;
   // Doorway alignment often contains a tiny residual linear command while
@@ -154,23 +198,24 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
       // Only returns in the commanded travel corridor participate in the
       // swept translation test.  Door jambs beside the chassis must not be
       // treated as a collision merely because the command also rotates.
+      // travel_half_width is the body plus the footprint edge margin.
+      // collision_radius is wider by 0.10 m and is only an along-track stop
+      // distance; using it here latches slowdown on every parallel wall.
       const bool in_travel_corridor =
           ((command.linear > 0. && longitudinal > 0.) ||
            (command.linear < 0. && longitudinal < 0.)) &&
-          // Do not add a second arbitrary lateral margin here. The CAD
-          // footprint and its explicit edge margin already define the safe
-          // corridor; widening it by another 0.10 m turns a wide corridor's
-          // side wall into a false forward collision.
-          lateral <= collision_radius;
+          lateral <= travel_half_width;
       const bool closing = projected_distance + 1e-5 < initial_distance;
       const double clearance = initial_distance - config_.robot_radius;
+      if (in_travel_corridor && closing && clearance > 0. &&
+          clearance <= config_.collision_monitor_slowdown_distance) {
+        slowdown_clearance = std::min(slowdown_clearance, clearance);
+        slowdown_closing = true;
+      }
       const bool projected_footprint_collision =
           config_.footprint.size() >= 3
               ? PointInsideOrNearFootprint(point, projected, config_, footprint_margin)
               : projected_distance <= collision_radius;
-      if (in_travel_corridor && closing &&
-          clearance <= config_.collision_monitor_slowdown_distance)
-        slowdown_closing = true;
       // Nav2-style separation of slowdown and stop zones: a return in the
       // travel corridor is an emergency only inside the configured stop
       // distance.  The older implementation stopped at
@@ -255,15 +300,18 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
   }
   else if (latched_action_ == CollisionMonitorAction::kSlowdown) {
     const double requested_linear = command.linear;
-    command.linear *= config_.collision_monitor_slowdown_ratio;
-    command.angular *= config_.collision_monitor_slowdown_ratio;
-    // The motor controller has a finite static-friction/deadband region. A
-    // slowdown command below it is not useful motion: it produces zero
-    // odometry, trips the navigation watchdog, and causes premature frontier
-    // abandonment. Preserve a small executable translational command while
-    // retaining the monitor's curvature and stop authority.
-    if (std::abs(requested_linear) >= .045 && std::abs(command.linear) < .035)
-      command.linear = std::copysign(.035, requested_linear);
+    const double scale = SlowdownScale(slowdown_clearance, ttc, config_);
+    command.linear *= scale;
+    command.angular *= scale;
+    // A flat 0.35 scale of an already regulated command fell through to a
+    // 0.035 m/s floor. Recorded exploration sat on that floor and then
+    // stopped commanding for the rest of the traverse. Do not publish
+    // slower than the controller's regulated minimum when the unscaled
+    // command was a real drive. The stop zone still zeroes the command.
+    const double executable = std::max(.05, config_.regulated_min_speed);
+    if (std::abs(requested_linear) >= executable &&
+        std::abs(command.linear) < executable)
+      command.linear = std::copysign(executable, requested_linear);
   }
   return {command, latched_action_, min_distance,
           std::isfinite(ttc) ? ttc : 0.};
