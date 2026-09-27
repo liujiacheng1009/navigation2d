@@ -16,7 +16,11 @@ namespace {
 constexpr double kNarrowMinWidth = .42;
 constexpr double kNarrowMaxWidth = 1.40;
 constexpr double kNarrowClearance = .20;
-constexpr double kCloseStandoff = .22;
+// The frontier cell is already the last free cell beside unknown. A 0.22 m
+// floor left the goal in the corridor, and the 0.18 m arrival tolerance
+// stopped the robot before a 0.50 m kitchen door. SafeViewpoint still keeps
+// the pose off the walls.
+constexpr double kCloseStandoff = .08;
 constexpr double kVisitedViewpointRadius = .60;
 
 // Inside one frontier component the observation pose has to sit beside the

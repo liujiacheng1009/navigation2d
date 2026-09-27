@@ -89,7 +89,7 @@ int main() {
   navigation2d::FrontierExplorerConfig pinch_config;
   pinch_config.minimum_frontier_cells = 6;
   pinch_config.footprint_clearance = .22;
-  pinch_config.minimum_standoff = .30;
+  pinch_config.minimum_standoff = .10;
   pinch_config.maximum_standoff = 1.10;
   pinch_config.blacklist_radius = 1.20;
   pinch_config.required_frontier_observations = 1;
@@ -116,6 +116,10 @@ int main() {
   const double pinch_end = (36 + .5) * pinch.resolution;
   for (const auto& goal : pinch_goals) assert(goal.x > pinch_end);
   const auto first_look = pinch_goals.front();
+  // The pose is the last safe cell beside the unknown boundary, not a
+  // standoff back in the hall in front of the pinch.
+  assert(std::hypot(first_look.x - first_look.frontier_x,
+                    first_look.y - first_look.frontier_y) < .25);
   pinch_explorer.RecordAttempt(first_look, true);
   const auto second_look = pinch_explorer.SelectGoals(robot_x, robot_y);
   for (const auto& goal : second_look) {
