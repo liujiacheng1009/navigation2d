@@ -7,6 +7,28 @@
 #include <limits>
 #include <optional>
 
+namespace {
+
+// Chassis half-width is 0.147 m. A 0.42 m opening leaves about 0.20 m from
+// the centerline to each wall, which the 0.22 m planning radius can cross.
+// The old 0.56 m / 0.28 m test kept those openings off the safe graph, so the
+// viewpoint stayed on the near side and the same mouth was scheduled again.
+constexpr double kNarrowMinWidth = .42;
+constexpr double kNarrowMaxWidth = 1.40;
+constexpr double kNarrowClearance = .20;
+constexpr double kCloseStandoff = .22;
+constexpr double kVisitedViewpointRadius = .60;
+
+// Inside one frontier component the observation pose has to sit beside the
+// unknown boundary. Weighting travel higher parks the goal at the near mouth;
+// the next component of that opening then sends the robot back to the same cell.
+double ViewpointScore(double information_gain, double travel, double standoff,
+                      double gain_weight) {
+  return gain_weight * std::log1p(information_gain) - 1.6 * standoff - .15 * travel;
+}
+
+}  // namespace
+
 namespace navigation2d {
 
 FrontierExplorer::FrontierExplorer(FrontierExplorerConfig config)
@@ -39,11 +61,11 @@ bool FrontierExplorer::SafeViewpoint(int col, int row) const {
   for (int x = col + 1; x < map_.width && x <= col + probe && Free(x, row); ++x) ++horizontal;
   for (int y = row; y >= 0 && y > row - probe && Free(col, y); --y) ++vertical;
   for (int y = row + 1; y < map_.height && y <= row + probe && Free(col, y); ++y) ++vertical;
-  const int narrow_min = static_cast<int>(std::ceil(.56 / map_.resolution));
-  const int narrow_max = static_cast<int>(std::floor(1.4 / map_.resolution));
+  const int narrow_min = static_cast<int>(std::ceil(kNarrowMinWidth / map_.resolution));
+  const int narrow_max = static_cast<int>(std::floor(kNarrowMaxWidth / map_.resolution));
   const bool corridor = (horizontal >= narrow_min && horizontal <= narrow_max) !=
                         (vertical >= narrow_min && vertical <= narrow_max);
-  return corridor && ClearAt(col, row, .28);
+  return corridor && ClearAt(col, row, kNarrowClearance);
 }
 
 std::pair<double, double> FrontierExplorer::CellCenter(int col, int row) const {
@@ -161,10 +183,11 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
     ++raw_frontier_clusters_;
     // Keep short doorway boundaries: stability filtering removes one-frame
     // sensor speckles, while a hard component-size cut discards real maze
-    // branches.  A 1--5 cell component is retained only when it has a safe
-    // physical viewpoint nearby; this is a dedicated doorway rule rather
-    // than lowering the global frontier threshold for open-space noise.  The
-    // stability observer below still rejects one-frame lidar speckles.
+    // branches.  A 1--5 cell component is retained only when a full-clearance
+    // viewpoint is already beside it. The narrow-passage exception is not
+    // used here: an open-room speck shortens one free run and would otherwise
+    // look like a doorway. The stability observer still rejects one-frame
+    // lidar speckles.
     if (cluster.size() < static_cast<std::size_t>(config_.minimum_frontier_cells)) {
       bool doorway_component = false;
       if (!cluster.empty()) {
@@ -172,7 +195,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
           const int cell_row = cell / map_.width, cell_col = cell % map_.width;
           for (int dy = -2; dy <= 2 && !doorway_component; ++dy) {
             for (int dx = -2; dx <= 2; ++dx) {
-              if (SafeViewpoint(cell_col + dx, cell_row + dy)) {
+              if (ClearAt(cell_col + dx, cell_row + dy, config_.footprint_clearance)) {
                 doorway_component = true;
                 goto doorway_viewpoint_found;
               }
@@ -209,8 +232,8 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
       for (int x = col + 1; x < map_.width && x <= col + probe && Free(x, row); ++x) ++horizontal;
       for (int y = row; y >= 0 && y > row - probe && Free(col, y); --y) ++vertical;
       for (int y = row + 1; y < map_.height && y <= row + probe && Free(col, y); ++y) ++vertical;
-      const int narrow_min = static_cast<int>(std::ceil(.56 / map_.resolution));
-      const int narrow_max = static_cast<int>(std::floor(1.4 / map_.resolution));
+      const int narrow_min = static_cast<int>(std::ceil(kNarrowMinWidth / map_.resolution));
+      const int narrow_max = static_cast<int>(std::floor(kNarrowMaxWidth / map_.resolution));
       return (horizontal >= narrow_min && horizontal <= narrow_max) !=
              (vertical >= narrow_min && vertical <= narrow_max);
     };
@@ -222,10 +245,11 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
         const int viewpoint_index = row * map_.width + col;
         if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0) continue;
         const auto [x, y] = CellCenter(col, row);
+        if (Blacklisted(x, y)) continue;
         const double standoff = std::hypot(x - frontier_x, y - frontier_y);
         if (standoff > config_.maximum_standoff ||
             (standoff < config_.minimum_standoff &&
-             !(narrow_viewpoint(col, row) && standoff >= .28))) continue;
+             !(narrow_viewpoint(col, row) && standoff >= kCloseStandoff))) continue;
         if (!HasFreeLineOfSight(col, row, representative % map_.width,
                                 representative / map_.width)) continue;
         const double travel = travel_cells[viewpoint_index] * map_.resolution;
@@ -233,8 +257,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
         ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
                                   frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                   information_gain,
-                                  2. * std::log1p(information_gain) -
-                                      .9 * travel - .25 * standoff};
+                                  ViewpointScore(information_gain, travel, standoff, 2.)};
         if (!best || candidate.score > best->score) best = candidate;
       }
     }
@@ -250,20 +273,21 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
           const int viewpoint_index = row * map_.width + col;
           if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0) continue;
           const auto [x, y] = CellCenter(col, row);
+          if (Blacklisted(x, y)) continue;
           const double standoff = std::hypot(x - frontier_x, y - frontier_y);
           if (standoff > config_.maximum_standoff ||
               (standoff < config_.minimum_standoff &&
-               !(narrow_viewpoint(col, row) && standoff >= .28))) continue;
+               !(narrow_viewpoint(col, row) && standoff >= kCloseStandoff))) continue;
           const bool sees_component = std::any_of(cluster.begin(), cluster.end(), [&](int cell) {
             return HasFreeLineOfSight(col, row, cell % map_.width, cell / map_.width);
           });
           if (!sees_component) continue;
           const double travel = travel_cells[viewpoint_index] * map_.resolution;
+          const double information_gain = static_cast<double>(cluster.size()) * map_.resolution;
           ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
                                     frontier_x, frontier_y, static_cast<int>(cluster.size()),
-                                    static_cast<double>(cluster.size()) * map_.resolution,
-                                    1.5 * std::log1p(static_cast<double>(cluster.size()) * map_.resolution) -
-                                        .9 * travel - .25 * standoff};
+                                    information_gain,
+                                    ViewpointScore(information_gain, travel, standoff, 1.5)};
           if (!best || candidate.score > best->score) best = candidate;
         }
       }
@@ -282,14 +306,15 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
           if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0 ||
               !narrow_viewpoint(col, row)) continue;
           const auto [x, y] = CellCenter(col, row);
+          if (Blacklisted(x, y)) continue;
           const double standoff = std::hypot(x - frontier_x, y - frontier_y);
-          if (standoff < .28 || standoff > 1.5) continue;
+          if (standoff < kCloseStandoff || standoff > 1.5) continue;
           const double travel = travel_cells[viewpoint_index] * map_.resolution;
+          const double information_gain = static_cast<double>(cluster.size()) * map_.resolution;
           ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
                                     frontier_x, frontier_y, static_cast<int>(cluster.size()),
-                                    static_cast<double>(cluster.size()) * map_.resolution,
-                                    1.0 * std::log1p(static_cast<double>(cluster.size()) * map_.resolution) -
-                                        .9 * travel - .15 * standoff};
+                                    information_gain,
+                                    ViewpointScore(information_gain, travel, standoff, 1.)};
           if (!best || candidate.score > best->score) best = candidate;
         }
       }
@@ -310,15 +335,16 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
             const int viewpoint_index = row * map_.width + col;
             if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0) continue;
             const auto [x, y] = CellCenter(col, row);
+            if (Blacklisted(x, y)) continue;
             const auto [target_x, target_y] = CellCenter(target_col, target_row);
             const double standoff = std::hypot(x - target_x, y - target_y);
-            if (standoff < .28 || standoff > kApproachRadius) continue;
+            if (standoff < kCloseStandoff || standoff > kApproachRadius) continue;
             const double travel = travel_cells[viewpoint_index] * map_.resolution;
+            const double information_gain = static_cast<double>(cluster.size()) * map_.resolution;
             ExplorationGoal candidate{x, y, std::atan2(target_y - y, target_x - x),
                                       frontier_x, frontier_y, static_cast<int>(cluster.size()),
-                                      static_cast<double>(cluster.size()) * map_.resolution,
-                                      .8 * std::log1p(static_cast<double>(cluster.size()) * map_.resolution) -
-                                          .9 * travel - .10 * standoff};
+                                      information_gain,
+                                      ViewpointScore(information_gain, travel, standoff, .8)};
             if (!best || candidate.score > best->score) best = candidate;
           }
         }
@@ -412,12 +438,13 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectLeftoverApproach(
         const int viewpoint_index = row * map_.width + col;
         if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0) continue;
         const auto [x, y] = CellCenter(col, row);
+        if (Blacklisted(x, y)) continue;
         const double standoff = std::hypot(x - frontier_x, y - frontier_y);
-        if (standoff < .28 || standoff > kLeftoverRadius) continue;
+        if (standoff < kCloseStandoff || standoff > kLeftoverRadius) continue;
         const double travel = travel_cells[viewpoint_index] * map_.resolution;
         ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
                                   frontier_x, frontier_y, 1, map_.resolution,
-                                  -.9 * travel - .05 * standoff, true};
+                                  ViewpointScore(map_.resolution, travel, standoff, .8), true};
         if (!leftover || candidate.score > leftover->score) leftover = candidate;
       }
     }
@@ -626,17 +653,25 @@ bool FrontierExplorer::GoalRegionStillFrontier(const ExplorationGoal& goal) cons
 
 void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded) {
   // Cool down both resolved and failed boundaries for the current map state.
-  // The entry automatically expires after sufficient new observations, so a
-  // doorway can expose a genuinely new nearby frontier without target churn.
   // Suppress the entire failed frontier component, rather than only its
   // representative cell. Otherwise the next map update emits another point
-  // on the same wall and causes an identical recovery loop.
+  // on the same wall and causes an identical recovery loop. The radius also
+  // covers the gap back to the approach pose, so a second component of the
+  // same opening cannot reuse that mouth.
+  const double span = std::hypot(goal.x - goal.frontier_x, goal.y - goal.frontier_y);
   const double component_radius = std::max(
       config_.blacklist_radius,
-      std::sqrt(static_cast<double>(std::max(1, goal.frontier_cells))) * map_.resolution);
-  blacklist_.push_back({goal.frontier_x, goal.frontier_y, component_radius, KnownCells(),
-                        succeeded ? 5000u : 600u});
+      std::max(span + .25,
+               std::sqrt(static_cast<double>(std::max(1, goal.frontier_cells))) * map_.resolution));
+  // A successful look stays cooled for the rest of a normal floor. 5000 new
+  // cells is about 12 m² and expired during the 093508 run, which sent the
+  // robot back into an opening it had already driven. Failures still expire
+  // after a modest map growth so a newly opened doorway can be retried.
+  const std::size_t growth = succeeded ? 20000u : 600u;
+  const std::size_t known = KnownCells();
+  blacklist_.push_back({goal.frontier_x, goal.frontier_y, component_radius, known, growth});
   if (succeeded) {
+    blacklist_.push_back({goal.x, goal.y, kVisitedViewpointRadius, known, growth});
     ++completed_goals_;
   } else {
     ++failed_goals_;
