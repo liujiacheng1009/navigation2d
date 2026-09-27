@@ -353,6 +353,7 @@ class NavigationSystem::Impl {
       best_alignment_score = std::numeric_limits<double>::infinity();
       controller_blocked_cycles = 0;
       rotation_without_progress_rad = 0.;
+      safety_stop_since = -1.;
       ResetCommandStallWatch();
       planning_failures = 0;
       state.status = NavigationStatus::kNavigating;
@@ -404,6 +405,11 @@ class NavigationSystem::Impl {
   double command_stall_watch_measured_rotation_rad = 0.;
   int planning_failures = 0;
   double rotation_without_progress_rad = 0.;
+  // Timestamp of an uninterrupted collision-monitor stop. A zero command used
+  // to refresh the progress watchdog, so a latched stop never became kBlocked
+  // and exploration sat still until the operator canceled. -1 means no stop
+  // is latched.
+  double safety_stop_since = -1.;
   double best_alignment_score = std::numeric_limits<double>::infinity();
   double best_docking_distance = std::numeric_limits<double>::infinity();
   double best_docking_yaw_error = std::numeric_limits<double>::infinity();
@@ -714,17 +720,42 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
       return impl_->state;
     }
   }
+  // A collision-monitor stop publishes zeros while the controller still wants
+  // to drive. Refreshing the progress clock on that zero made the stop
+  // permanent: CommandStalled ignores a command that never reached the base,
+  // and the explorer node only abandons a stop in the first 5 cm of a route.
+  // Two seconds is long enough to reject a one-cycle latch and short enough
+  // that exploration selects another frontier instead of waiting out the
+  // goal timeout.
+  if (impl_->state.safety_stopped_motion) {
+    if (impl_->safety_stop_since < 0.) impl_->safety_stop_since = timestamp;
+    if (timestamp - impl_->safety_stop_since >= 2.) {
+      ++impl_->state.recoveries;
+      ++impl_->recovery_attempts;
+      impl_->safety_stop_since = -1.;
+      impl_->path.clear();
+      impl_->state.command = {};
+      impl_->state.planning_failure_reason = "collision monitor held a stop";
+      impl_->state.status = NavigationStatus::kBlocked;
+      return impl_->state;
+    }
+  } else {
+    impl_->safety_stop_since = -1.;
+  }
   // The path-progress watchdog is meaningful only while translating.  RPP
   // legitimately emits v=0 while aligning to a sharp segment; arc length is
   // then constant by definition.  Use the previous published command as the
   // mode latch so the watchdog is already suspended on the next cycle.
+  // A safety stop is not that alignment: leaving the clock frozen is what
+  // lets the two-second hold above expire.
   const bool rotation_command_active =
       std::abs(impl_->state.command.linear) <= 1e-3 &&
       std::abs(impl_->state.command.angular) > 1e-3;
   const bool stop_command_active =
       std::abs(impl_->state.command.linear) <= 1e-3 &&
       std::abs(impl_->state.command.angular) <= 1e-3;
-  if (rotation_command_active || stop_command_active) {
+  if (rotation_command_active ||
+      (stop_command_active && !impl_->state.safety_stopped_motion)) {
     impl_->last_progress_time = timestamp;
   } else if (path_progress >= impl_->best_path_progress_m + impl_->config.progress_radius) {
     impl_->best_path_progress_m = path_progress;
