@@ -22,6 +22,7 @@ class LayeredCostmap {
   void ClearObstacle(double x, double y);
   std::uint8_t cost(int x, int y) const;
   bool lethal(double x, double y, double radius) const;
+  double nearestLethalDistance(double x, double y) const;
   std::vector<std::uint8_t> RollingWindow(const Pose2d& centre, int* width, int* height,
                                           int* origin_x, int* origin_y) const;
   const Grid2d& grid() const { return static_map_; }

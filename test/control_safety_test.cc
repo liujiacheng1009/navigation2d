@@ -153,6 +153,18 @@ int main() {
   assert(result.action == navigation2d::CollisionMonitorAction::kStop);
   assert(result.command.linear == 0.);
 
+  // A return on the shell (0.15 m, bumper at 0.145 m) is the chassis, not a
+  // wall. It must not stop a drive across an open floor.
+  navigation2d::CollisionMonitor shell_monitor(corner_stop_config);
+  navigation2d::LaserScan shell_scan = corner_scan;
+  shell_scan.angle_min = 0.;
+  shell_scan.ranges = {.15};
+  shell_monitor.UpdateLaserScan(origin, shell_scan);
+  result = shell_monitor.Filter(origin, {.24, 0.}, 6.2);
+  assert(result.action != navigation2d::CollisionMonitorAction::kStop);
+  assert(result.action != navigation2d::CollisionMonitorAction::kBlindZoneStop);
+  assert(std::abs(result.command.linear - .24) < 1e-9);
+
   const char* map_path = "/tmp/navigation2d_safe_corridor_test.json";
   std::ofstream output(map_path);
   output << R"({"width":60,"height":40,"resolution":0.1,"cells":[)";

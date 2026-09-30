@@ -13,6 +13,7 @@ class Grid2d {
   int height() const { return height_; }
   double resolution() const { return resolution_; }
   bool occupied(int x, int y) const;
+  bool unknown(int x, int y) const;
   bool collides(double x, double y, double radius) const;
   std::pair<int, int> ToCell(double x, double y) const;
   std::pair<double, double> CellCenter(int x, int y) const;

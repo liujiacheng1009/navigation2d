@@ -88,8 +88,10 @@ DistanceField::DistanceField(const LayeredCostmap& costmap) : grid_(&costmap.gri
   std::vector<double> row_input(width), row_output;
   std::vector<double> intermediate(width * height, kLarge);
   for (int y = 0; y < height; ++y) {
-    for (int x = 0; x < width; ++x)
-      row_input[x] = costmap.cost(x, y) == kLethal ? 0. : kLarge;
+    for (int x = 0; x < width; ++x) {
+      const auto value = costmap.cost(x, y);
+      row_input[x] = (value == kLethal || value == kUnknown) ? 0. : kLarge;
+    }
     DistanceTransform1d(row_input, &row_output);
     for (int x = 0; x < width; ++x) intermediate[y * width + x] = row_output[x];
   }
@@ -162,8 +164,10 @@ int FootprintLookup::Bin(double yaw) const {
 
 bool FootprintLookup::CollisionFree(const LayeredCostmap& costmap, const Pose2d& pose) const {
   const auto [cx, cy] = costmap.grid().ToCell(X(pose), Y(pose));
-  for (const auto& [dx, dy] : offsets_[Bin(Yaw(pose))])
-    if (costmap.cost(cx + dx, cy + dy) == kLethal) return false;
+  for (const auto& [dx, dy] : offsets_[Bin(Yaw(pose))]) {
+    const auto value = costmap.cost(cx + dx, cy + dy);
+    if (value == kLethal || value == kUnknown) return false;
+  }
   return true;
 }
 

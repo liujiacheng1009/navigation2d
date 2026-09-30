@@ -106,6 +106,17 @@ bool PointInsideOrNearFootprint(const Eigen::Vector2d& world_point,
   return inside || min_edge_distance <= margin;
 }
 
+// A return on the chassis is the shell or a one-shot reflection. The measured
+// footprint plus 2 cm covers the flats, about 0.16 m from the centre. Without
+// a footprint the circular body is the shell. A real return farther out still
+// stops.
+bool ShellReturn(const Eigen::Vector2d& point, const Pose2d& pose,
+                 const NavigationConfig& config) {
+  if (config.footprint.size() >= 3)
+    return PointInsideOrNearFootprint(point, pose, config, .02);
+  return (point - pose.translation()).norm() <= std::max(.16, config.robot_radius);
+}
+
 Pose2d Integrate(const Pose2d& pose, const Twist2d& command, double dt) {
   const double yaw = Yaw(pose);
   const double next_yaw = yaw + command.angular * dt;
@@ -221,6 +232,7 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
     const Eigen::Vector2d heading(std::cos(command_heading), std::sin(command_heading));
     bool predicted_contact = false;
     for (const auto& point : points_) {
+      if (ShellReturn(point, robot_pose, config_)) continue;
       const double initial_distance = (point - robot_pose.translation()).norm();
       const double projected_distance = (point - projected.translation()).norm();
       const Eigen::Vector2d relative = point - robot_pose.translation();
@@ -283,6 +295,7 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
     const Pose2d one_step = Integrate(robot_pose, command, config_.control_period);
     blind_zone_closing = std::any_of(
         blind_zone_points_.begin(), blind_zone_points_.end(), [&](const auto& point) {
+          if (ShellReturn(point, robot_pose, config_)) return false;
           const double initial_distance = (point - robot_pose.translation()).norm();
           const double projected_distance = (point - one_step.translation()).norm();
           const Eigen::Vector2d relative = point - robot_pose.translation();

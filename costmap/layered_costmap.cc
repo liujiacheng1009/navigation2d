@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace navigation2d {
 
@@ -92,8 +93,14 @@ void LayeredCostmap::Reinflate() {
   std::fill(master_.begin(), master_.end(), kFree);
   std::vector<std::pair<int, int>> lethal;
   for (int y = 0; y < static_map_.height(); ++y) for (int x = 0; x < static_map_.width(); ++x) {
-    if (static_map_.occupied(x, y) || obstacles_[y * static_map_.width() + x] == kLethal) {
-      master_[y * static_map_.width() + x] = kLethal; lethal.push_back({x, y});
+    const int index = y * static_map_.width() + x;
+    // A live return on an unseen cell is a real obstacle. Unknown only stays
+    // unknown when nothing has marked it.
+    if (obstacles_[index] == kLethal || static_map_.occupied(x, y)) {
+      master_[index] = kLethal;
+      lethal.push_back({x, y});
+    } else if (static_map_.unknown(x, y)) {
+      master_[index] = kUnknown;
     }
   }
   const int radius = static_cast<int>(std::ceil(config_.inflation_radius / static_map_.resolution()));
@@ -156,6 +163,22 @@ bool LayeredCostmap::lethal(double x, double y, double radius) const {
     if (std::hypot(nearest_x, nearest_y) <= std::max(0., radius)) return true;
   }
   return false;
+}
+
+double LayeredCostmap::nearestLethalDistance(double x, double y) const {
+  double best = std::numeric_limits<double>::infinity();
+  const double resolution = static_map_.resolution();
+  const double half = .5 * resolution;
+  for (int cy = 0; cy < static_map_.height(); ++cy) {
+    for (int cx = 0; cx < static_map_.width(); ++cx) {
+      if (master_[cy * static_map_.width() + cx] != kLethal) continue;
+      const auto [wx, wy] = static_map_.CellCenter(cx, cy);
+      const double nearest_x = std::max(std::abs(x - wx) - half, 0.);
+      const double nearest_y = std::max(std::abs(y - wy) - half, 0.);
+      best = std::min(best, std::hypot(nearest_x, nearest_y));
+    }
+  }
+  return best;
 }
 
 std::vector<std::uint8_t> LayeredCostmap::RollingWindow(const Pose2d& pose, int* width, int* height,

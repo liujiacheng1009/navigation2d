@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 #include "navigation2d/planning/search_core.h"
@@ -32,7 +34,9 @@ std::optional<double> SegmentTraversalCost(const LayeredCostmap& costmap, int fr
     const int x = static_cast<int>(std::lround(x0 + ratio * (x1 - x0)));
     const int y = static_cast<int>(std::lround(y0 + ratio * (y1 - y0)));
     const auto [wx, wy] = grid.CellCenter(x, y);
-    if (costmap.lethal(wx, wy, clearance)) return std::nullopt;
+    // Unknown is not a wall, but a line of sight must not cross it.
+    if (costmap.cost(x, y) == kUnknown || costmap.lethal(wx, wy, clearance))
+      return std::nullopt;
     const double normalized_cost = static_cast<double>(costmap.cost(x, y)) / 252.;
     accumulated += (length_cells / samples) * (1. + normalized_cost);
   }
@@ -45,9 +49,21 @@ Path GridSearch(const LayeredCostmap& costmap, const Pose2d& start,
   const Grid2d& grid = costmap.grid();
   const auto [sx, sy] = grid.ToCell(X(start), Y(start));
   const auto [gx, gy] = grid.ToCell(X(goal), Y(goal));
-  if (costmap.lethal(X(start), Y(start), clearance) ||
-      costmap.lethal(X(goal), Y(goal), clearance))
-    throw std::runtime_error("start or goal is occupied");
+  const auto reject_occupied = [&](const Pose2d& pose, const char* which) {
+    if (!costmap.lethal(X(pose), Y(pose), clearance)) return;
+    const double nearest = costmap.nearestLethalDistance(X(pose), Y(pose));
+    std::ostringstream message;
+    message << which << " occupied";
+    if (std::isfinite(nearest)) {
+      message << ", nearest obstacle " << std::fixed << std::setprecision(2) << nearest << " m";
+    }
+    throw std::runtime_error(message.str());
+  };
+  reject_occupied(start, "start");
+  reject_occupied(goal, "goal");
+  if (gx >= 0 && gy >= 0 && gx < grid.width() && gy < grid.height() &&
+      costmap.cost(gx, gy) == kUnknown)
+    throw std::runtime_error("goal occupied, cell is unknown");
   const int source = sy * grid.width() + sx, target = gy * grid.width() + gx;
   const auto result = BestFirstSearch(
       grid.width() * grid.height(), source,
@@ -60,9 +76,13 @@ Path GridSearch(const LayeredCostmap& costmap, const Pose2d& start,
     for (const auto& d : kDirections) {
       const int nx = x + d[0], ny = y + d[1];
       if (nx < 0 || ny < 0 || nx >= grid.width() || ny >= grid.height()) continue;
+      // Step onto a free cell beside unknown. Do not enter the unknown cell.
+      if (costmap.cost(nx, ny) == kUnknown) continue;
       const auto [wx, wy] = grid.CellCenter(nx, ny);
       if (costmap.lethal(wx, wy, clearance)) continue;
       if (d[0] && d[1]) {
+        if (costmap.cost(x + d[0], y) == kUnknown || costmap.cost(x, y + d[1]) == kUnknown)
+          continue;
         const auto [ax, ay] = grid.CellCenter(x + d[0], y);
         const auto [bx, by] = grid.CellCenter(x, y + d[1]);
         if (costmap.lethal(ax, ay, clearance) || costmap.lethal(bx, by, clearance)) continue;

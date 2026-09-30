@@ -38,8 +38,16 @@ Grid2d Grid2d::Load(const std::string& path) {
 }
 
 bool Grid2d::occupied(int x, int y) const {
-  return x < 0 || y < 0 || x >= width_ || y >= height_ ||
-         cells_[y * width_ + x] >= 250;
+  if (x < 0 || y < 0 || x >= width_ || y >= height_) return true;
+  const unsigned char value = cells_[static_cast<std::size_t>(y * width_ + x)];
+  // 255 is unknown. It blocks entry, but it is not a wall.
+  if (value == 255) return false;
+  return value >= 250;
+}
+
+bool Grid2d::unknown(int x, int y) const {
+  if (x < 0 || y < 0 || x >= width_ || y >= height_) return false;
+  return cells_[static_cast<std::size_t>(y * width_ + x)] == 255;
 }
 
 std::pair<int, int> Grid2d::ToCell(double x, double y) const {

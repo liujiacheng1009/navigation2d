@@ -282,8 +282,9 @@ class AutonomousExplorer final : public rclcpp::Node {
     }
     for (std::size_t index = 0; index < map_->data.size(); ++index) {
       if (index) output << ',';
-      // Navigation2D must never plan through unknown space. Frontier targets
-      // are selected in observed free space with a full footprint margin.
+      // Free is 0. A real obstacle is 254 and inflates. Unknown is 255:
+      // search may not enter it, and it is not a wall, so a frontier
+      // viewpoint beside it stays a valid goal.
       const int row = static_cast<int>(index / map_->info.width);
       const int col = static_cast<int>(index % map_->info.width);
       const bool under_robot = (col - robot_col) * (col - robot_col) +
@@ -292,7 +293,8 @@ class AutonomousExplorer final : public rclcpp::Node {
       // confidence threshold can otherwise leave isolated unknown cells below
       // the base and make every first plan fail its start-collision check.
       const bool lidar_evidence = map_->data[index] < 0 && near_field_free.count(index) > 0;
-      output << ((map_->data[index] == 0 || under_robot || lidar_evidence) ? 0 : 255);
+      const bool forced_free = map_->data[index] == 0 || under_robot || lidar_evidence;
+      output << (forced_free ? 0 : (map_->data[index] < 0 ? 255 : 254));
     }
     output << "]}";
     output.close();
