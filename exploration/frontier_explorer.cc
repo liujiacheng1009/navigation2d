@@ -49,12 +49,21 @@ bool FrontierExplorer::Free(int col, int row) const {
 
 bool FrontierExplorer::ClearAt(int col, int row, double clearance) const {
   const int radius = static_cast<int>(std::ceil(clearance / map_.resolution));
-  for (int dy = -radius; dy <= radius; ++dy) for (int dx = -radius; dx <= radius; ++dx)
-    if (dx * dx + dy * dy <= radius * radius && !Free(col + dx, row + dy)) return false;
+  for (int dy = -radius; dy <= radius; ++dy) for (int dx = -radius; dx <= radius; ++dx) {
+    if (dx * dx + dy * dy > radius * radius) continue;
+    const int x = col + dx, y = row + dy;
+    if (x < 0 || y < 0 || x >= map_.width || y >= map_.height) return false;
+    // Unknown is the room beyond the door, not a jamb. A 0.70 m opening
+    // stays a valid viewpoint when the free cell sits against that boundary.
+    if (map_.cells[static_cast<std::size_t>(y) * map_.width + x] > 0) return false;
+  }
   return true;
 }
 
 bool FrontierExplorer::SafeViewpoint(int col, int row) const {
+  // The search graph stays on known free cells. Unknown may lie inside the
+  // clearance disk, but the viewpoint itself is not placed in unknown space.
+  if (!Free(col, row)) return false;
   if (ClearAt(col, row, config_.footprint_clearance)) return true;
   // Narrow-passage candidate: permit only the physical footprint radius when
   // the free run is corridor-shaped and its measured width is in the range

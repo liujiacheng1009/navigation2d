@@ -126,4 +126,40 @@ int main() {
     assert(goal.x > pinch_end);
     assert(std::hypot(goal.x - first_look.x, goal.y - first_look.y) >= .60);
   }
+
+  // A 0.70 m kitchen door. The free cell on the threshold is about 0.20 m
+  // from the near jamb; the far side of the opening is still unknown. The
+  // viewpoint has to sit on that threshold, not back in the hall.
+  navigation2d::FrontierExplorerConfig door_config;
+  door_config.minimum_frontier_cells = 6;
+  door_config.footprint_clearance = .16;
+  door_config.minimum_standoff = .10;
+  door_config.maximum_standoff = 1.10;
+  door_config.required_frontier_observations = 1;
+  navigation2d::ExplorationGrid door;
+  door.width = 80;
+  door.height = 40;
+  door.resolution = .05;
+  door.cells.assign(static_cast<std::size_t>(door.width * door.height), 100);
+  const auto paint = [&](int col0, int col1, int row0, int row1, std::int8_t value) {
+    for (int row = row0; row < row1; ++row)
+      for (int col = col0; col < col1; ++col)
+        door.cells[static_cast<std::size_t>(row * door.width + col)] = value;
+  };
+  // Hall, then a 0.70 m opening (14 cells) whose far end is unknown.
+  paint(2, 40, 13, 27, 0);
+  paint(40, 54, 13, 27, -1);
+  navigation2d::FrontierExplorer door_explorer(door_config);
+  door_explorer.UpdateMap(door);
+  const auto door_goals = door_explorer.SelectGoals(
+      (8 + .5) * door.resolution, (20 + .5) * door.resolution);
+  assert(!door_goals.empty());
+  const double door_mouth = (40 + .5) * door.resolution;
+  bool on_threshold = false;
+  for (const auto& goal : door_goals) {
+    if (goal.x + .20 < door_mouth) continue;
+    on_threshold = true;
+    assert(std::hypot(goal.x - goal.frontier_x, goal.y - goal.frontier_y) < .20);
+  }
+  assert(on_threshold);
 }
