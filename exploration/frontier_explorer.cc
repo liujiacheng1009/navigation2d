@@ -789,10 +789,16 @@ void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded
   // covers the gap back to the approach pose, so a second component of the
   // same opening cannot reuse that mouth.
   const double span = std::hypot(goal.x - goal.frontier_x, goal.y - goal.frontier_y);
-  const double component_radius = std::max(
-      config_.blacklist_radius,
-      std::max(span + .25,
-               std::sqrt(static_cast<double>(std::max(1, goal.frontier_cells))) * map_.resolution));
+  const double mouth = std::max(
+      span + .25,
+      std::sqrt(static_cast<double>(std::max(1, goal.frontier_cells))) * map_.resolution);
+  // A failed opening is skipped out to the configured radius so the same
+  // mouth is not retried every scan. A successful look only cools the mouth
+  // that was actually observed. Raising that disk to the failure radius
+  // also cools the next doorway about a metre away, and the long success
+  // cooldown never gives that doorway back.
+  const double component_radius = succeeded ? mouth
+                                            : std::max(config_.blacklist_radius, mouth);
   // A successful look stays cooled for the rest of a normal floor. 5000 new
   // cells is about 12 m² and expired during the 093508 run, which sent the
   // robot back into an opening it had already driven. Failures still expire

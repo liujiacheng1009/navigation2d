@@ -183,4 +183,54 @@ int main() {
     assert(nearest_occupied >= .22);
   }
   assert(on_centerline);
+
+  // Two doorways whose mouths are 0.90 m apart. Observing one cools that
+  // mouth only. The failure radius would also cool the next doorway, and the
+  // long success cooldown would not give it back.
+  navigation2d::FrontierExplorerConfig pair_config;
+  pair_config.minimum_frontier_cells = 6;
+  pair_config.footprint_clearance = .22;
+  pair_config.minimum_standoff = .10;
+  pair_config.maximum_standoff = 1.10;
+  pair_config.blacklist_radius = 1.20;
+  pair_config.required_frontier_observations = 1;
+  navigation2d::ExplorationGrid pair;
+  pair.width = 60;
+  pair.height = 56;
+  pair.resolution = .05;
+  pair.cells.assign(static_cast<std::size_t>(pair.width * pair.height), 100);
+  const auto pair_paint = [&](int col0, int col1, int row0, int row1, std::int8_t value) {
+    for (int row = row0; row < row1; ++row)
+      for (int col = col0; col < col1; ++col)
+        pair.cells[static_cast<std::size_t>(row * pair.width + col)] = value;
+  };
+  pair_paint(2, 22, 2, 54, 0);
+  pair_paint(22, 50, 10, 20, -1);
+  pair_paint(22, 50, 28, 38, -1);
+  navigation2d::FrontierExplorer pair_explorer(pair_config);
+  pair_explorer.UpdateMap(pair);
+  const auto pair_goals = pair_explorer.SelectGoals(
+      (8 + .5) * pair.resolution, (15 + .5) * pair.resolution);
+  const navigation2d::ExplorationGoal* lower = nullptr;
+  const navigation2d::ExplorationGoal* upper = nullptr;
+  for (const auto& goal : pair_goals) {
+    if (goal.frontier_y < (24 + .5) * pair.resolution) {
+      if (lower == nullptr || goal.frontier_cells > lower->frontier_cells) lower = &goal;
+    } else if (upper == nullptr || goal.frontier_cells > upper->frontier_cells) {
+      upper = &goal;
+    }
+  }
+  assert(lower != nullptr && upper != nullptr);
+  assert(std::abs(lower->frontier_y - upper->frontier_y) > .80);
+  assert(std::abs(lower->frontier_y - upper->frontier_y) < 1.10);
+  pair_explorer.RecordAttempt(*lower, true);
+  const auto upper_goals = pair_explorer.SelectGoals(
+      (8 + .5) * pair.resolution, (33 + .5) * pair.resolution);
+  bool upper_remains = false;
+  for (const auto& goal : upper_goals) {
+    if (std::hypot(goal.frontier_x - upper->frontier_x,
+                   goal.frontier_y - upper->frontier_y) < .40)
+      upper_remains = true;
+  }
+  assert(upper_remains);
 }
