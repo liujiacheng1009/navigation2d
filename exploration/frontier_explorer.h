@@ -16,6 +16,14 @@ struct ExplorationGrid {
   std::vector<std::int8_t> cells;
 };
 
+// The chassis already has a corridor it can enter: occupied wall to occupied
+// wall, wide enough to pass and not an open room. Unknown cells in a gap that
+// is already partly free are the rest of that opening. Mark only those cells
+// free, and continue only while the gap stays in that same range, so the
+// viewpoint and the plan use the centerline. A fully observed corridor, a
+// wider unknown room, and a gap the chassis cannot enter stay as mapped.
+void OpenPassableOpenings(ExplorationGrid* grid);
+
 struct ExplorationGoal {
   double x = 0.;
   double y = 0.;

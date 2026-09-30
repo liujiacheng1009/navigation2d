@@ -35,10 +35,127 @@ double ViewpointScore(double information_gain, double travel, double standoff,
 
 namespace navigation2d {
 
+namespace {
+
+int OpeningCells(const ExplorationGrid& grid, int col, int row, int step_col, int step_row) {
+  if (grid.resolution <= 0.) return -1;
+  const int limit = static_cast<int>(std::floor(kNarrowMaxWidth / grid.resolution)) + 1;
+  const int min_cells = static_cast<int>(std::ceil(kNarrowMinWidth / grid.resolution));
+  auto value_at = [&](int c, int r) -> std::int8_t {
+    return grid.cells[static_cast<std::size_t>(r) * grid.width + c];
+  };
+  auto inside = [&](int c, int r) {
+    return c >= 0 && r >= 0 && c < grid.width && r < grid.height;
+  };
+  if (!inside(col, row) || value_at(col, row) > 0) return -1;
+  int count = 1;
+  for (const int sign : {-1, 1}) {
+    int c = col + sign * step_col;
+    int r = row + sign * step_row;
+    while (inside(c, r) && value_at(c, r) <= 0) {
+      ++count;
+      if (count > limit) return -1;
+      c += sign * step_col;
+      r += sign * step_row;
+    }
+    if (!inside(c, r) || value_at(c, r) <= 0) return -1;
+  }
+  return count >= min_cells ? count : -1;
+}
+
+}  // namespace
+
+void OpenPassableOpenings(ExplorationGrid* grid) {
+  if (grid == nullptr || grid->resolution <= 0. || grid->width <= 2 || grid->height <= 2 ||
+      grid->cells.size() != static_cast<std::size_t>(grid->width) * grid->height) return;
+  const int width = grid->width;
+  const int height = grid->height;
+  auto value_at = [&](int col, int row) -> std::int8_t {
+    return grid->cells[static_cast<std::size_t>(row) * width + col];
+  };
+  std::vector<int> budget(grid->cells.size(), -1);
+  auto seed_span = [&](bool horizontal, int fixed, int begin, int end) {
+    const int span = end - begin;
+    bool known_free = false;
+    bool unknown = false;
+    for (int cursor = begin; cursor < end; ++cursor) {
+      const int col = horizontal ? cursor : fixed;
+      const int row = horizontal ? fixed : cursor;
+      const std::int8_t value = value_at(col, row);
+      if (value == 0) known_free = true;
+      else if (value < 0) unknown = true;
+    }
+    // A gap that is already entirely free is an observed corridor. Unknown
+    // beyond it is the next room, not a missing piece of this opening.
+    if (!known_free || !unknown) return;
+    for (int cursor = begin; cursor < end; ++cursor) {
+      const int col = horizontal ? cursor : fixed;
+      const int row = horizontal ? fixed : cursor;
+      if (value_at(col, row) >= 0) continue;
+      const std::size_t index = static_cast<std::size_t>(row) * width + col;
+      budget[index] = std::max(budget[index], span);
+    }
+  };
+  for (int row = 0; row < height; ++row) {
+    int col = 0;
+    while (col < width) {
+      if (value_at(col, row) <= 0) { ++col; continue; }
+      const int begin = col + 1;
+      int end = begin;
+      while (end < width && value_at(end, row) <= 0) ++end;
+      if (end < width && value_at(end, row) > 0 &&
+          OpeningCells(*grid, begin, row, 1, 0) > 0)
+        seed_span(true, row, begin, end);
+      col = std::max(end, col + 1);
+    }
+  }
+  for (int col = 0; col < width; ++col) {
+    int row = 0;
+    while (row < height) {
+      if (value_at(col, row) <= 0) { ++row; continue; }
+      const int begin = row + 1;
+      int end = begin;
+      while (end < height && value_at(col, end) <= 0) ++end;
+      if (end < height && value_at(col, end) > 0 &&
+          OpeningCells(*grid, col, begin, 0, 1) > 0)
+        seed_span(false, col, begin, end);
+      row = std::max(end, row + 1);
+    }
+  }
+  std::deque<int> queue;
+  for (std::size_t index = 0; index < budget.size(); ++index)
+    if (budget[index] >= 0) queue.push_back(static_cast<int>(index));
+  constexpr int cardinal_col[] = {-1, 1, 0, 0};
+  constexpr int cardinal_row[] = {0, 0, -1, 1};
+  while (!queue.empty()) {
+    const int current = queue.front();
+    queue.pop_front();
+    if (budget[static_cast<std::size_t>(current)] == 0) continue;
+    const int row = current / width;
+    const int col = current % width;
+    for (int direction = 0; direction < 4; ++direction) {
+      const int next_col = col + cardinal_col[direction];
+      const int next_row = row + cardinal_row[direction];
+      if (next_col < 0 || next_row < 0 || next_col >= width || next_row >= height) continue;
+      const int next = next_row * width + next_col;
+      if (value_at(next_col, next_row) >= 0) continue;
+      if (OpeningCells(*grid, next_col, next_row, 1, 0) < 0 &&
+          OpeningCells(*grid, next_col, next_row, 0, 1) < 0) continue;
+      const int next_budget = budget[static_cast<std::size_t>(current)] - 1;
+      if (next_budget <= budget[static_cast<std::size_t>(next)]) continue;
+      budget[static_cast<std::size_t>(next)] = next_budget;
+      queue.push_back(next);
+    }
+  }
+  for (std::size_t index = 0; index < budget.size(); ++index)
+    if (budget[index] >= 0) grid->cells[index] = 0;
+}
+
 FrontierExplorer::FrontierExplorer(FrontierExplorerConfig config)
     : config_(std::move(config)) {}
 
 void FrontierExplorer::UpdateMap(ExplorationGrid map) {
+  OpenPassableOpenings(&map);
   map_ = std::move(map);
 }
 
@@ -53,8 +170,8 @@ bool FrontierExplorer::ClearAt(int col, int row, double clearance) const {
     if (dx * dx + dy * dy > radius * radius) continue;
     const int x = col + dx, y = row + dy;
     if (x < 0 || y < 0 || x >= map_.width || y >= map_.height) return false;
-    // Unknown is the room beyond the door, not a jamb. A 0.70 m opening
-    // stays a valid viewpoint when the free cell sits against that boundary.
+    // Unknown is unobserved space, not a jamb. It does not push a viewpoint
+    // back from the opening; the viewpoint itself still has to be free.
     if (map_.cells[static_cast<std::size_t>(y) * map_.width + x] > 0) return false;
   }
   return true;
