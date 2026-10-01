@@ -75,6 +75,9 @@ class NavigationSystem {
   // mapper already owns static occupancy integration.  CollisionMonitor
   // still guards every commanded motion.
   void UpdateCollisionMonitorLaserScan(const Pose2d& sensor_pose, const LaserScan& scan);
+  void UpdateCollisionMonitorDepthPoints(const Pose2d& robot_pose,
+                                         const std::vector<Eigen::Vector2d>& base_points,
+                                         double timestamp);
   void UpdatePointCloud(const Pose2d& sensor_pose, const PointCloud2d& cloud);
   // Supplies tracker output in the map frame. Predictions are consumed by the
   // constrained MPC controller; legacy controllers safely ignore them.

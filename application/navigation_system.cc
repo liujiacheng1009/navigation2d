@@ -470,6 +470,12 @@ void NavigationSystem::UpdateCollisionMonitorLaserScan(
   impl_->collision_monitor.UpdateLaserScan(sensor_pose, scan);
 }
 
+void NavigationSystem::UpdateCollisionMonitorDepthPoints(
+    const Pose2d& robot_pose, const std::vector<Eigen::Vector2d>& base_points,
+    double timestamp) {
+  impl_->collision_monitor.UpdateDepthPoints(robot_pose, base_points, timestamp);
+}
+
 void NavigationSystem::UpdatePointCloud(const Pose2d& sensor_pose, const PointCloud2d& cloud) {
   impl_->collision_monitor.UpdatePointCloud(sensor_pose, cloud);
   const auto before = impl_->costmap.digest();

@@ -184,6 +184,51 @@ void CollisionMonitor::UpdatePointCloud(const Pose2d& sensor_pose, const PointCl
   UpdatePoints(sensor_pose, std::move(points));
 }
 
+void CollisionMonitor::CullPassedDepthHolds(const Pose2d& robot_pose) {
+  const double yaw = Yaw(robot_pose);
+  const double cosine = std::cos(yaw), sine = std::sin(yaw);
+  const double bumper = CommandedExtent(config_, 1.);
+  std::erase_if(held_depth_points_, [&](const Eigen::Vector2d& world) {
+    const Eigen::Vector2d relative = world - robot_pose.translation();
+    const double longitudinal = cosine * relative.x() + sine * relative.y();
+    return longitudinal < bumper;
+  });
+}
+
+void CollisionMonitor::UpdateDepthPoints(
+    const Pose2d& robot_pose, const std::vector<Eigen::Vector2d>& base_points,
+    double timestamp) {
+  const double yaw = Yaw(robot_pose);
+  const double cosine = std::cos(yaw), sine = std::sin(yaw);
+  const double half_width = TravelCorridorHalfWidth(config_);
+  const double reach = config_.robot_radius + config_.collision_monitor_slowdown_distance;
+  std::vector<Eigen::Vector2d> fresh;
+  fresh.reserve(base_points.size());
+  for (const auto& point : base_points) {
+    if (!point.allFinite()) continue;
+    if (point.norm() > reach) continue;
+    fresh.emplace_back(X(robot_pose) + cosine * point.x() - sine * point.y(),
+                       Y(robot_pose) + sine * point.x() + cosine * point.y());
+  }
+  auto forward = [&](const Eigen::Vector2d& world) {
+    const Eigen::Vector2d relative = world - robot_pose.translation();
+    const double longitudinal = cosine * relative.x() + sine * relative.y();
+    const double lateral = std::abs(-sine * relative.x() + cosine * relative.y());
+    return longitudinal > 0. && lateral <= half_width && relative.norm() <= reach + 1e-6;
+  };
+  for (const auto& previous : depth_points_) {
+    if (!forward(previous)) continue;
+    const bool still_seen = std::any_of(
+        fresh.begin(), fresh.end(), [&](const Eigen::Vector2d& point) {
+          return (point - previous).norm() < .08;
+        });
+    if (!still_seen) held_depth_points_.push_back(previous);
+  }
+  depth_points_ = std::move(fresh);
+  depth_stamp_ = timestamp;
+  has_depth_stamp_ = true;
+}
+
 CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2d command,
                                                  double timestamp) {
   if (!config_.collision_monitor_enabled) return {command};
@@ -196,8 +241,19 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
       timestamp - last_observation_time_ > config_.collision_monitor_source_timeout)
     return {{}, CollisionMonitorAction::kSourceTimeout, 0., 0.};
 
+  if (has_depth_stamp_ && timestamp - depth_stamp_ > .40) {
+    depth_points_.clear();
+    held_depth_points_.clear();
+    has_depth_stamp_ = false;
+  } else {
+    CullPassedDepthHolds(robot_pose);
+  }
+  std::vector<Eigen::Vector2d> returns = points_;
+  returns.insert(returns.end(), depth_points_.begin(), depth_points_.end());
+  returns.insert(returns.end(), held_depth_points_.begin(), held_depth_points_.end());
+
   double min_distance = std::numeric_limits<double>::infinity();
-  for (const auto& point : points_)
+  for (const auto& point : returns)
     min_distance = std::min(min_distance,
         std::max(0., (point - robot_pose.translation()).norm() - config_.robot_radius));
   // Laser points are continuous measurements, but the route/controller
@@ -231,7 +287,7 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
     const double command_heading = Yaw(robot_pose);
     const Eigen::Vector2d heading(std::cos(command_heading), std::sin(command_heading));
     bool predicted_contact = false;
-    for (const auto& point : points_) {
+    for (const auto& point : returns) {
       if (ShellReturn(point, robot_pose, config_)) continue;
       const double initial_distance = (point - robot_pose.translation()).norm();
       const double projected_distance = (point - projected.translation()).norm();
@@ -323,6 +379,8 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
   // still rejects any swept-footprint collision; the live monitor's stop
   // authority is deliberately limited to a collision predicted along the
   // command trajectory on the next control step.
+  if (!held_depth_points_.empty())
+    emergency_stop = true;
   if (blind_zone_closing)
     requested = CollisionMonitorAction::kBlindZoneStop;
   else if (emergency_stop)
