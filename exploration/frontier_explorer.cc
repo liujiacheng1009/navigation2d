@@ -21,7 +21,11 @@ constexpr double kNarrowClearance = .20;
 // stopped the robot before a 0.50 m kitchen door. SafeViewpoint still keeps
 // the pose off the walls.
 constexpr double kCloseStandoff = .08;
-constexpr double kVisitedViewpointRadius = .60;
+// A successful doorway observation represents the room mouth, not a single
+// grid cell.  Map updates can split that same mouth into several frontier
+// fragments; keep a wider persistent visit disk so those fragments cannot
+// send the robot back through the same bathroom/room entrance.
+constexpr double kVisitedViewpointRadius = .85;
 
 // Inside one frontier component the observation pose has to sit beside the
 // unknown boundary. Weighting travel higher parks the goal at the near mouth;
@@ -798,7 +802,7 @@ void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded
   // that was actually observed. Raising that disk to the failure radius
   // also cools the next doorway about a metre away, and the long success
   // cooldown never gives that doorway back.
-  const double component_radius = succeeded ? mouth
+  const double component_radius = succeeded ? std::max(kVisitedViewpointRadius, mouth)
                                             : std::max(config_.blacklist_radius, mouth);
   // A successful look is a completed observation for this mission and stays
   // cooled permanently. The old growth-only cooldown expired after enough
