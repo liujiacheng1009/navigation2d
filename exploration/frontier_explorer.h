@@ -85,6 +85,10 @@ class FrontierExplorer {
   int completed_goals() const { return completed_goals_; }
   int failed_goals() const { return failed_goals_; }
   std::size_t raw_frontier_cells() const { return raw_frontier_cells_; }
+  // Frontiers measured from the unmodified mapper output.  The planner may
+  // open a narrow, partly observed passage in its private planning copy, but
+  // that must never erase evidence that an adjacent room is still unknown.
+  std::size_t unresolved_frontier_cells() const { return unresolved_frontier_cells_; }
   std::size_t raw_frontier_clusters() const { return raw_frontier_clusters_; }
   std::size_t executable_frontier_goals() const { return executable_frontier_goals_; }
   std::size_t candidate_frontier_goals() const { return candidate_frontier_goals_; }
@@ -94,11 +98,19 @@ class FrontierExplorer {
   bool ClearAt(int col, int row, double clearance) const;
   bool SafeViewpoint(int col, int row) const;
   bool HasFreeLineOfSight(int from_col, int from_row, int to_col, int to_row) const;
+  bool RawFree(int col, int row) const;
+  bool RawFrontier(int col, int row) const;
+  std::size_t CountRawFrontierCells() const;
   bool Blacklisted(double x, double y) const;
   std::vector<ExplorationGoal> StableGoals(std::vector<ExplorationGoal> goals);
   std::pair<double, double> CellCenter(int col, int row) const;
 
   FrontierExplorerConfig config_;
+  // observation_map_ is the exact occupancy grid received from the mapper.
+  // map_ is a planning copy in which only physically passable partial
+  // openings may be opened.  Completion and frontier identity always use the
+  // observation map; path safety continues to use the planning copy.
+  ExplorationGrid observation_map_;
   ExplorationGrid map_;
   struct BlacklistEntry {
     double x = 0., y = 0.;
@@ -107,6 +119,9 @@ class FrontierExplorer {
     // Successful observation viewpoints are cooled for a larger map-growth
     // budget so the planner cannot immediately revisit the same room edge.
     std::size_t required_growth = 600;
+    // A successful doorway is an observation already performed in this
+    // mission. It must not become eligible again merely because the map grew.
+    bool persistent = false;
   };
   std::vector<BlacklistEntry> blacklist_;
   struct FrontierTrack {
@@ -119,6 +134,7 @@ class FrontierExplorer {
   int completed_goals_ = 0;
   int failed_goals_ = 0;
   std::size_t raw_frontier_cells_ = 0;
+  std::size_t unresolved_frontier_cells_ = 0;
   std::size_t raw_frontier_clusters_ = 0;
   std::size_t executable_frontier_goals_ = 0;
   std::size_t candidate_frontier_goals_ = 0;

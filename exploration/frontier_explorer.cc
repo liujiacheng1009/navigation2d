@@ -155,6 +155,8 @@ FrontierExplorer::FrontierExplorer(FrontierExplorerConfig config)
     : config_(std::move(config)) {}
 
 void FrontierExplorer::UpdateMap(ExplorationGrid map) {
+  observation_map_ = map;
+  unresolved_frontier_cells_ = CountRawFrontierCells();
   OpenPassableOpenings(&map);
   map_ = std::move(map);
 }
@@ -162,6 +164,36 @@ void FrontierExplorer::UpdateMap(ExplorationGrid map) {
 bool FrontierExplorer::Free(int col, int row) const {
   return col >= 0 && row >= 0 && col < map_.width && row < map_.height &&
       map_.cells[static_cast<std::size_t>(row) * map_.width + col] == 0;
+}
+
+bool FrontierExplorer::RawFree(int col, int row) const {
+  return col >= 0 && row >= 0 && col < observation_map_.width &&
+      row < observation_map_.height &&
+      observation_map_.cells[static_cast<std::size_t>(row) * observation_map_.width + col] == 0;
+}
+
+bool FrontierExplorer::RawFrontier(int col, int row) const {
+  if (!RawFree(col, row)) return false;
+  constexpr int dx[] = {-1, 1, 0, 0};
+  constexpr int dy[] = {0, 0, -1, 1};
+  for (int direction = 0; direction < 4; ++direction) {
+    const int x = col + dx[direction], y = row + dy[direction];
+    if (x >= 0 && y >= 0 && x < observation_map_.width && y < observation_map_.height &&
+        observation_map_.cells[static_cast<std::size_t>(y) * observation_map_.width + x] < 0)
+      return true;
+  }
+  return false;
+}
+
+std::size_t FrontierExplorer::CountRawFrontierCells() const {
+  if (observation_map_.width <= 0 || observation_map_.height <= 0 ||
+      observation_map_.cells.size() != static_cast<std::size_t>(
+          observation_map_.width * observation_map_.height)) return 0;
+  std::size_t count = 0;
+  for (int row = 0; row < observation_map_.height; ++row)
+    for (int col = 0; col < observation_map_.width; ++col)
+      if (RawFrontier(col, row)) ++count;
+  return count;
 }
 
 bool FrontierExplorer::ClearAt(int col, int row, double clearance) const {
@@ -208,7 +240,7 @@ bool FrontierExplorer::Blacklisted(double x, double y) const {
   return std::any_of(blacklist_.begin(), blacklist_.end(), [&](const auto& entry) {
     // A failed frontier becomes eligible again after the map has materially
     // expanded, since a new approach through a doorway may now be visible.
-    return known < entry.known_cells + entry.required_growth &&
+    return (entry.persistent || known < entry.known_cells + entry.required_growth) &&
         std::hypot(x - entry.x, y - entry.y) < entry.radius;
   });
 }
@@ -279,21 +311,13 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
   }
   for (int row = 0; row < map_.height; ++row) for (int col = 0; col < map_.width; ++col) {
     const int index = row * map_.width + col;
-    if (map_.cells[index] != 0) continue;
-    bool adjacent_unknown = false;
-    for (const auto& direction : std::array<std::pair<int, int>, 4>{{
-             {-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
-      const int nx = col + direction.first, ny = row + direction.second;
-      if (nx >= 0 && ny >= 0 && nx < map_.width && ny < map_.height &&
-          map_.cells[static_cast<std::size_t>(ny) * map_.width + nx] < 0) {
-        adjacent_unknown = true;
-        break;
-      }
-    }
-    if (adjacent_unknown)
-      frontier[index] = 1;
+    // Use the raw mapper grid for the boundary.  `map_` may contain unknown
+    // cells opened in a narrow passage solely to make the navigation graph
+    // traversable; using it here erases the doorway's room frontier.
+    if (RawFrontier(col, row)) frontier[index] = 1;
   }
-  raw_frontier_cells_ = static_cast<std::size_t>(std::count(frontier.begin(), frontier.end(), 1));
+  unresolved_frontier_cells_ = CountRawFrontierCells();
+  raw_frontier_cells_ = unresolved_frontier_cells_;
   std::vector<ExplorationGoal> goals;
   for (int seed = 0; seed < map_.width * map_.height; ++seed) {
     if (!frontier[seed] || visited[seed]) continue;
@@ -533,20 +557,10 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectLeftoverApproach(
   }
   for (int row = 0; row < map_.height; ++row) for (int col = 0; col < map_.width; ++col) {
     const int index = row * map_.width + col;
-    if (map_.cells[index] != 0) continue;
-    bool adjacent_unknown = false;
-    for (const auto& direction : std::array<std::pair<int, int>, 4>{{
-             {-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
-      const int nx = col + direction.first, ny = row + direction.second;
-      if (nx >= 0 && ny >= 0 && nx < map_.width && ny < map_.height &&
-          map_.cells[static_cast<std::size_t>(ny) * map_.width + nx] < 0) {
-        adjacent_unknown = true;
-        break;
-      }
-    }
-    if (adjacent_unknown) frontier[index] = 1;
+    if (RawFrontier(col, row)) frontier[index] = 1;
   }
-  raw_frontier_cells_ = static_cast<std::size_t>(std::count(frontier.begin(), frontier.end(), 1));
+  unresolved_frontier_cells_ = CountRawFrontierCells();
+  raw_frontier_cells_ = unresolved_frontier_cells_;
   if (raw_frontier_cells_ == 0) return std::nullopt;
   // Leftover free/unknown specks are often smaller than
   // minimum_frontier_cells, so the exploring tour drops them.  The pocket
@@ -737,45 +751,32 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
 }
 
 bool FrontierExplorer::GoalStillFrontier(const ExplorationGoal& goal) const {
-  if (map_.resolution <= 0. || map_.width <= 0 || map_.height <= 0) return false;
+  if (observation_map_.resolution <= 0. || observation_map_.width <= 0 ||
+      observation_map_.height <= 0) return false;
   const int col = static_cast<int>(std::floor(
-      (goal.frontier_x - map_.origin_x) / map_.resolution));
+      (goal.frontier_x - observation_map_.origin_x) / observation_map_.resolution));
   const int row = static_cast<int>(std::floor(
-      (goal.frontier_y - map_.origin_y) / map_.resolution));
-  if (!Free(col, row)) return false;
-  constexpr int dx[] = {-1, 1, 0, 0};
-  constexpr int dy[] = {0, 0, -1, 1};
-  for (int index = 0; index < 4; ++index) {
-    const int x = col + dx[index], y = row + dy[index];
-    if (x >= 0 && y >= 0 && x < map_.width && y < map_.height &&
-        map_.cells[static_cast<std::size_t>(y) * map_.width + x] < 0) return true;
-  }
-  return false;
+      (goal.frontier_y - observation_map_.origin_y) / observation_map_.resolution));
+  return RawFrontier(col, row);
 }
 
 bool FrontierExplorer::GoalRegionStillFrontier(const ExplorationGoal& goal) const {
-  if (GoalStillFrontier(goal) || map_.resolution <= 0.) return GoalStillFrontier(goal);
+  if (GoalStillFrontier(goal) || observation_map_.resolution <= 0.)
+    return GoalStillFrontier(goal);
   const int center_col = static_cast<int>(std::floor(
-      (goal.frontier_x - map_.origin_x) / map_.resolution));
+      (goal.frontier_x - observation_map_.origin_x) / observation_map_.resolution));
   const int center_row = static_cast<int>(std::floor(
-      (goal.frontier_y - map_.origin_y) / map_.resolution));
+      (goal.frontier_y - observation_map_.origin_y) / observation_map_.resolution));
   // The association radius is deliberately smaller than the viewpoint
   // standoff. It follows a shifted sensor boundary but cannot jump across a
   // shelf to an unrelated frontier on its far side.
-  const int radius = static_cast<int>(std::ceil(.35 / map_.resolution));
-  constexpr int dx[] = {-1, 1, 0, 0};
-  constexpr int dy[] = {0, 0, -1, 1};
+  const int radius = static_cast<int>(std::ceil(.35 / observation_map_.resolution));
   for (int row = std::max(0, center_row - radius);
-       row <= std::min(map_.height - 1, center_row + radius); ++row) {
+       row <= std::min(observation_map_.height - 1, center_row + radius); ++row) {
     for (int col = std::max(0, center_col - radius);
-         col <= std::min(map_.width - 1, center_col + radius); ++col) {
-      if (std::hypot(col - center_col, row - center_row) > radius || !Free(col, row)) continue;
-      for (int direction = 0; direction < 4; ++direction) {
-        const int x = col + dx[direction], y = row + dy[direction];
-        if (x >= 0 && y >= 0 && x < map_.width && y < map_.height &&
-            map_.cells[static_cast<std::size_t>(y) * map_.width + x] < 0)
-          return true;
-      }
+         col <= std::min(observation_map_.width - 1, center_col + radius); ++col) {
+      if (std::hypot(col - center_col, row - center_row) > radius) continue;
+      if (RawFrontier(col, row)) return true;
     }
   }
   return false;
@@ -799,15 +800,16 @@ void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded
   // cooldown never gives that doorway back.
   const double component_radius = succeeded ? mouth
                                             : std::max(config_.blacklist_radius, mouth);
-  // A successful look stays cooled for the rest of a normal floor. 5000 new
-  // cells is about 12 m² and expired during the 093508 run, which sent the
-  // robot back into an opening it had already driven. Failures still expire
-  // after a modest map growth so a newly opened doorway can be retried.
+  // A successful look is a completed observation for this mission and stays
+  // cooled permanently. The old growth-only cooldown expired after enough
+  // mapping and sent the robot back into a bathroom it had already entered.
+  // Failures still expire after a modest map growth so a newly opened doorway
+  // can be retried.
   const std::size_t growth = succeeded ? 20000u : 600u;
   const std::size_t known = KnownCells();
-  blacklist_.push_back({goal.frontier_x, goal.frontier_y, component_radius, known, growth});
+  blacklist_.push_back({goal.frontier_x, goal.frontier_y, component_radius, known, growth, succeeded});
   if (succeeded) {
-    blacklist_.push_back({goal.x, goal.y, kVisitedViewpointRadius, known, growth});
+    blacklist_.push_back({goal.x, goal.y, kVisitedViewpointRadius, known, growth, true});
     ++completed_goals_;
   } else {
     ++failed_goals_;
@@ -816,13 +818,15 @@ void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded
 
 std::size_t FrontierExplorer::KnownCells() const {
   return static_cast<std::size_t>(std::count_if(
-      map_.cells.begin(), map_.cells.end(), [](std::int8_t value) { return value >= 0; }));
+      observation_map_.cells.begin(), observation_map_.cells.end(),
+      [](std::int8_t value) { return value >= 0; }));
 }
 
 bool FrontierExplorer::CompletionEligible(std::size_t initial_known_cells) const {
   const auto growth = std::max(config_.minimum_known_cell_growth,
       static_cast<std::size_t>(std::ceil(initial_known_cells * config_.minimum_known_growth_ratio)));
   return completed_goals_ >= config_.minimum_completed_goals &&
+      unresolved_frontier_cells_ == 0 &&
       KnownCells() >= initial_known_cells + growth;
 }
 
