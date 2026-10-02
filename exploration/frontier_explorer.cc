@@ -575,6 +575,10 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
                                   frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                   information_gain,
                                   ViewpointScore(information_gain, travel, standoff, 2.)};
+        // A relaxed doorway viewpoint is discovery-only. Prefer a full
+        // footprint-safe viewpoint whenever one exists; the planner must not
+        // repeatedly reject a relaxed candidate before trying the safe one.
+        if (!safe[viewpoint_index]) candidate.score -= 1000.;
         if (!best || candidate.score > best->score) best = candidate;
       }
     }
@@ -608,6 +612,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
                                     frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                     information_gain,
                                     ViewpointScore(information_gain, travel, standoff, 1.5)};
+          if (!safe[viewpoint_index]) candidate.score -= 1000.;
           if (!best || candidate.score > best->score) best = candidate;
         }
       }
@@ -638,6 +643,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
                                     frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                     information_gain,
                                     ViewpointScore(information_gain, travel, standoff, 1.)};
+          if (!safe[viewpoint_index]) candidate.score -= 1000.;
           if (!best || candidate.score > best->score) best = candidate;
         }
       }
