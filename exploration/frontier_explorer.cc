@@ -27,12 +27,16 @@ constexpr double kCloseStandoff = .08;
 constexpr double kVisitedViewpointRadius = .45;
 constexpr double kVisitedFrontierRadius = .60;
 
-// Inside one frontier component the observation pose has to sit beside the
-// unknown boundary. Weighting travel higher parks the goal at the near mouth;
-// the next component of that opening then sends the robot back to the same cell.
+// NBV utility: maximize newly observable unknown area per metre of travel.
+// Region ordering is only a tie-breaker; it must never override information
+// gain, otherwise the robot enters a nearby low-value room while a much larger
+// unknown area is visible from another candidate.
 double ViewpointScore(double information_gain, double travel, double standoff,
                       double gain_weight) {
-  return gain_weight * std::log1p(information_gain) - 1.6 * standoff - .15 * travel;
+  const double standoff_penalty = standoff > .30 ? 60.0 + 4.0 * standoff
+                                                    : 4.0 * standoff;
+  return gain_weight * 8.0 * information_gain / (0.45 + travel) -
+         standoff_penalty;
 }
 
 }  // namespace
@@ -373,6 +377,27 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
       reachable.push_back(next);
     }
   }
+  // Approximate the lidar field of view from a candidate and count unique
+  // unknown cells before the first occupied cell on each ray. This is the
+  // actual NBV gain, rather than the size of the frontier component alone.
+  const auto visible_unknown_gain = [&](int col, int row) {
+    std::vector<unsigned char> seen(observation_map_.cells.size(), 0);
+    const int max_range = static_cast<int>(std::ceil(3.0 / map_.resolution));
+    for (int ray = 0; ray < 144; ++ray) {
+      const double angle = 2.0 * std::acos(-1.0) * static_cast<double>(ray) / 144.0;
+      for (int step = 1; step <= max_range; ++step) {
+        const int x = col + static_cast<int>(std::lround(step * std::cos(angle)));
+        const int y = row + static_cast<int>(std::lround(step * std::sin(angle)));
+        if (x < 0 || y < 0 || x >= observation_map_.width ||
+            y >= observation_map_.height) break;
+        const int index = y * observation_map_.width + x;
+        if (observation_map_.cells[index] > 50) break;
+        if (observation_map_.cells[index] < 0) seen[index] = 1;
+      }
+    }
+    return static_cast<double>(std::count(seen.begin(), seen.end(), 1)) *
+           observation_map_.resolution * observation_map_.resolution;
+  };
   for (int row = 0; row < map_.height; ++row) for (int col = 0; col < map_.width; ++col) {
     const int index = row * map_.width + col;
     // Use the raw mapper grid for the boundary.  `map_` may contain unknown
@@ -471,7 +496,9 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
         if (!HasFreeLineOfSight(col, row, representative % map_.width,
                                 representative / map_.width)) continue;
         const double travel = travel_cells[viewpoint_index] * map_.resolution;
-        const double information_gain = static_cast<double>(cluster.size()) * map_.resolution;
+        const double information_gain = std::max(
+            visible_unknown_gain(col, row),
+            static_cast<double>(cluster.size()) * map_.resolution * map_.resolution);
         ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
                                   frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                   information_gain,
@@ -501,7 +528,9 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
           });
           if (!sees_component) continue;
           const double travel = travel_cells[viewpoint_index] * map_.resolution;
-          const double information_gain = static_cast<double>(cluster.size()) * map_.resolution;
+          const double information_gain = std::max(
+              visible_unknown_gain(col, row),
+              static_cast<double>(cluster.size()) * map_.resolution * map_.resolution);
           ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
                                     frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                     information_gain,
@@ -528,7 +557,9 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
           const double standoff = std::hypot(x - frontier_x, y - frontier_y);
           if (standoff < kCloseStandoff || standoff > 1.5) continue;
           const double travel = travel_cells[viewpoint_index] * map_.resolution;
-          const double information_gain = static_cast<double>(cluster.size()) * map_.resolution;
+          const double information_gain = std::max(
+              visible_unknown_gain(col, row),
+              static_cast<double>(cluster.size()) * map_.resolution * map_.resolution);
           ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
                                     frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                     information_gain,
@@ -558,7 +589,9 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
             const double standoff = std::hypot(x - target_x, y - target_y);
             if (standoff < kCloseStandoff || standoff > kApproachRadius) continue;
             const double travel = travel_cells[viewpoint_index] * map_.resolution;
-            const double information_gain = static_cast<double>(cluster.size()) * map_.resolution;
+            const double information_gain = std::max(
+                visible_unknown_gain(col, row),
+                static_cast<double>(cluster.size()) * map_.resolution * map_.resolution);
             ExplorationGoal candidate{x, y, std::atan2(target_y - y, target_x - x),
                                       frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                       information_gain,

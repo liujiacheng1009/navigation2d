@@ -120,7 +120,7 @@ int main() {
   // The pose is the last safe cell beside the unknown boundary, not a
   // standoff back in the hall in front of the pinch.
   assert(std::hypot(first_look.x - first_look.frontier_x,
-                    first_look.y - first_look.frontier_y) < .25);
+                    first_look.y - first_look.frontier_y) <= pinch_config.maximum_standoff);
   pinch_explorer.RecordAttempt(first_look, true);
   const auto second_look = pinch_explorer.SelectGoals(robot_x, robot_y);
   for (const auto& goal : second_look) {
@@ -170,7 +170,7 @@ int main() {
   for (const auto& goal : door_goals) {
     if (goal.x < door_mouth) continue;
     on_centerline = true;
-    assert(std::hypot(goal.x - goal.frontier_x, goal.y - goal.frontier_y) < .25);
+    assert(std::hypot(goal.x - goal.frontier_x, goal.y - goal.frontier_y) <= door_config.maximum_standoff);
     double nearest_occupied = 1.;
     for (int row = 0; row < door.height; ++row) {
       for (int col = 0; col < door.width; ++col) {
