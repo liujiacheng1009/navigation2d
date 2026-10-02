@@ -14,6 +14,20 @@ namespace {
 constexpr std::array<std::array<int, 2>, 8> kDirections{{
     {{1, 0}}, {{-1, 0}}, {{0, 1}}, {{0, -1}},
     {{1, 1}}, {{1, -1}}, {{-1, 1}}, {{-1, -1}}}};
+
+// Inflation already encodes distance to the nearest obstacle in the master
+// costmap. Treat that cost as a continuous clearance penalty instead of only
+// using it as a binary collision guard. A longer path through the middle of a
+// wide room is preferable to a shortest path that rides the inflated edge;
+// narrow passages remain usable because their only available cells retain the
+// same penalty and are still selected when no higher-clearance route exists.
+constexpr double kClearancePenaltyWeight = 6.0;
+
+double TraversalCellCost(std::uint8_t cost) {
+  if (cost == kFree) return 1.;
+  const double normalized = static_cast<double>(cost) / 252.;
+  return 1. + kClearancePenaltyWeight * normalized * normalized;
+}
 }  // namespace
 
 bool HasLineOfSight(const LayeredCostmap& costmap, int from, int to,
@@ -37,8 +51,7 @@ std::optional<double> SegmentTraversalCost(const LayeredCostmap& costmap, int fr
     // Unknown is not a wall, but a line of sight must not cross it.
     if (costmap.cost(x, y) == kUnknown || costmap.lethal(wx, wy, clearance))
       return std::nullopt;
-    const double normalized_cost = static_cast<double>(costmap.cost(x, y)) / 252.;
-    accumulated += (length_cells / samples) * (1. + normalized_cost);
+    accumulated += (length_cells / samples) * TraversalCellCost(costmap.cost(x, y));
   }
   return accumulated;
 }
@@ -88,7 +101,7 @@ Path GridSearch(const LayeredCostmap& costmap, const Pose2d& start,
         if (costmap.lethal(ax, ay, clearance) || costmap.lethal(bx, by, clearance)) continue;
       }
       const int next = ny * grid.width() + nx;
-      const double traversal = 1. + static_cast<double>(costmap.cost(nx, ny)) / 252.;
+      const double traversal = TraversalCellCost(costmap.cost(nx, ny));
       const double transition = (d[0] && d[1] ? std::sqrt(2.) : 1.) * traversal;
       visit({next, transition, current});
       if (relax_parent && current_parent >= 0) {
