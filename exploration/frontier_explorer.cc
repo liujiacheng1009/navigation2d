@@ -343,8 +343,18 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
       map_.cells.size() != static_cast<std::size_t>(map_.width * map_.height)) return {};
   std::vector<unsigned char> frontier(map_.cells.size(), 0), visited(map_.cells.size(), 0);
   std::vector<unsigned char> safe(map_.cells.size(), 0);
+  std::vector<unsigned char> discovery_safe(map_.cells.size(), 0);
   for (int row = 0; row < map_.height; ++row) for (int col = 0; col < map_.width; ++col)
     safe[static_cast<std::size_t>(row) * map_.width + col] = SafeViewpoint(col, row);
+  // Frontier discovery is deliberately less conservative than execution.
+  // It may nominate a viewpoint near a doorway; StartNavigation still checks
+  // the full inflated planning graph before any velocity is sent.
+  const double discovery_clearance = std::clamp(
+      config_.footprint_clearance - .12, .14, .22);
+  for (int row = 0; row < map_.height; ++row) for (int col = 0; col < map_.width; ++col) {
+    const std::size_t index = static_cast<std::size_t>(row) * map_.width + col;
+    discovery_safe[index] = Free(col, row) && ClearAt(col, row, discovery_clearance);
+  }
   const int robot_col = static_cast<int>(std::floor((robot_x - map_.origin_x) / map_.resolution));
   const int robot_row = static_cast<int>(std::floor((robot_y - map_.origin_y) / map_.resolution));
   int start = -1;
@@ -499,7 +509,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
           const int cell_row = cell / map_.width, cell_col = cell % map_.width;
           for (int dy = -2; dy <= 2 && !doorway_component; ++dy) {
             for (int dx = -2; dx <= 2; ++dx) {
-              if (ClearAt(cell_col + dx, cell_row + dy, config_.footprint_clearance)) {
+              if (ClearAt(cell_col + dx, cell_row + dy, discovery_clearance)) {
                 doorway_component = true;
                 goto doorway_viewpoint_found;
               }
@@ -547,7 +557,8 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
       for (int col = std::max(0, static_cast<int>(mean_col) - search);
            col <= std::min(map_.width - 1, static_cast<int>(mean_col) + search); ++col) {
         const int viewpoint_index = row * map_.width + col;
-        if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0) continue;
+        if ((!safe[viewpoint_index] && !discovery_safe[viewpoint_index]) ||
+            travel_cells[viewpoint_index] < 0) continue;
         const auto [x, y] = CellCenter(col, row);
         if (Blacklisted(x, y)) continue;
         const double standoff = std::hypot(x - frontier_x, y - frontier_y);
@@ -577,7 +588,8 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
         for (int col = std::max(0, static_cast<int>(mean_col) - search);
              col <= std::min(map_.width - 1, static_cast<int>(mean_col) + search); ++col) {
           const int viewpoint_index = row * map_.width + col;
-          if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0) continue;
+          if ((!safe[viewpoint_index] && !discovery_safe[viewpoint_index]) ||
+              travel_cells[viewpoint_index] < 0) continue;
           const auto [x, y] = CellCenter(col, row);
           if (Blacklisted(x, y)) continue;
           const double standoff = std::hypot(x - frontier_x, y - frontier_y);
@@ -611,7 +623,8 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
         for (int col = std::max(0, static_cast<int>(mean_col) - search * 2);
              col <= std::min(map_.width - 1, static_cast<int>(mean_col) + search * 2); ++col) {
           const int viewpoint_index = row * map_.width + col;
-          if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0 ||
+          if ((!safe[viewpoint_index] && !discovery_safe[viewpoint_index]) ||
+              travel_cells[viewpoint_index] < 0 ||
               !narrow_viewpoint(col, row)) continue;
           const auto [x, y] = CellCenter(col, row);
           if (Blacklisted(x, y)) continue;
