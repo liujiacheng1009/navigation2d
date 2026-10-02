@@ -760,8 +760,27 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
   const bool stop_command_active =
       std::abs(impl_->state.command.linear) <= 1e-3 &&
       std::abs(impl_->state.command.angular) <= 1e-3;
-  if (rotation_command_active ||
-      (stop_command_active && !impl_->state.safety_stopped_motion)) {
+  if (rotation_command_active) {
+    // RPP may request a pure rotation from its tracking branch when the
+    // carrot heading remains outside rotate_to_heading_min_angle. Treat this
+    // as a bounded maneuver, just like explicit AlignToPath rotation. The
+    // old code refreshed last_progress_time here and never charged the turn,
+    // so a bad doorway carrot could spin forever until the explorer timeout.
+    impl_->rotation_without_progress_rad +=
+        std::abs(impl_->state.command.angular) * impl_->config.control_period;
+    if (impl_->rotation_without_progress_rad >= 2. * std::acos(-1.)) {
+      ++impl_->state.recoveries;
+      ++impl_->recovery_attempts;
+      impl_->rotation_without_progress_rad = 0.;
+      impl_->path.clear();
+      impl_->state.command = {};
+      impl_->state.planning_failure_reason =
+          "regulated pursuit rotated a full turn without path progress";
+      impl_->state.status = NavigationStatus::kBlocked;
+      return impl_->state;
+    }
+    impl_->last_progress_time = timestamp;
+  } else if (stop_command_active && !impl_->state.safety_stopped_motion) {
     impl_->last_progress_time = timestamp;
   } else if (path_progress >= impl_->best_path_progress_m + impl_->config.progress_radius) {
     impl_->best_path_progress_m = path_progress;
