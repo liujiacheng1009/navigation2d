@@ -377,6 +377,56 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
       reachable.push_back(next);
     }
   }
+  // During the first scan, costmap inflation can temporarily mark every
+  // viewpoint around the robot unsafe even though the raw map already has a
+  // connected free corridor and visible unknown boundary.  Without a first
+  // goal the robot cannot move far enough for the mapper to resolve that
+  // boundary.  Use the raw free-cell graph only for this small bootstrap
+  // window; mature maps continue to require the full footprint-safe graph.
+  const std::size_t raw_frontier_count = CountRawFrontierCells();
+  const bool bootstrap_map = KnownCells() < 10000 && raw_frontier_count > 0;
+  if (bootstrap_map) {
+    bool reachable_raw_frontier = false;
+    for (int index = 0; index < static_cast<int>(travel_cells.size()); ++index) {
+      if (travel_cells[index] < 0) continue;
+      const int row = index / map_.width, col = index % map_.width;
+      if (RawFrontier(col, row)) { reachable_raw_frontier = true; break; }
+    }
+    if (!reachable_raw_frontier) {
+      std::fill(travel_cells.begin(), travel_cells.end(), -1);
+      int raw_start = -1;
+      double raw_start_distance = std::numeric_limits<double>::infinity();
+      for (int row = std::max(0, robot_row - start_search);
+           row <= std::min(map_.height - 1, robot_row + start_search); ++row) {
+        for (int col = std::max(0, robot_col - start_search);
+             col <= std::min(map_.width - 1, robot_col + start_search); ++col) {
+          const int index = row * map_.width + col;
+          if (!Free(col, row)) continue;
+          const double distance = std::hypot(col - robot_col, row - robot_row);
+          if (distance < raw_start_distance) {
+            raw_start_distance = distance;
+            raw_start = index;
+          }
+        }
+      }
+      if (raw_start >= 0) {
+        std::deque<int> raw_reachable{raw_start};
+        travel_cells[raw_start] = 0;
+        while (!raw_reachable.empty()) {
+          const int current = raw_reachable.front(); raw_reachable.pop_front();
+          const int row = current / map_.width, col = current % map_.width;
+          for (int direction = 0; direction < 4; ++direction) {
+            const int x = col + cardinal_x[direction], y = row + cardinal_y[direction];
+            if (x < 0 || y < 0 || x >= map_.width || y >= map_.height) continue;
+            const int next = y * map_.width + x;
+            if (travel_cells[next] >= 0 || !Free(x, y)) continue;
+            travel_cells[next] = travel_cells[current] + 1;
+            raw_reachable.push_back(next);
+          }
+        }
+      }
+    }
+  }
   // Approximate the lidar field of view from a candidate and count unique
   // unknown cells before the first occupied cell on each ray. This is the
   // actual NBV gain, rather than the size of the frontier component alone.
