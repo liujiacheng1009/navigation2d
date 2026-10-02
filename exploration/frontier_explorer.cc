@@ -21,11 +21,11 @@ constexpr double kNarrowClearance = .20;
 // stopped the robot before a 0.50 m kitchen door. SafeViewpoint still keeps
 // the pose off the walls.
 constexpr double kCloseStandoff = .08;
-// A successful doorway observation represents the room mouth, not a single
-// grid cell.  Map updates can split that same mouth into several frontier
-// fragments; keep a wider persistent visit disk so those fragments cannot
-// send the robot back through the same bathroom/room entrance.
-constexpr double kVisitedViewpointRadius = .85;
+// A successful doorway observation needs only a small local guard.  A wide
+// permanent disk can hide a legitimate neighbouring doorway; room coverage
+// is enforced by the active-region tour, not by suppressing that doorway.
+constexpr double kVisitedViewpointRadius = .45;
+constexpr double kVisitedFrontierRadius = .60;
 
 // Inside one frontier component the observation pose has to sit beside the
 // unknown boundary. Weighting travel higher parks the goal at the near mouth;
@@ -798,11 +798,10 @@ void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded
       span + .25,
       std::sqrt(static_cast<double>(std::max(1, goal.frontier_cells))) * map_.resolution);
   // A failed opening is skipped out to the configured radius so the same
-  // mouth is not retried every scan. A successful look only cools the mouth
-  // that was actually observed. Raising that disk to the failure radius
-  // also cools the next doorway about a metre away, and the long success
-  // cooldown never gives that doorway back.
-  const double component_radius = succeeded ? std::max(kVisitedViewpointRadius, mouth)
+  // mouth is not retried every scan. A successful look only cools the
+  // observed frontier fragment with a bounded local radius; adjacent doors
+  // remain candidates and are handled by the active-region sweep.
+  const double component_radius = succeeded ? kVisitedFrontierRadius
                                             : std::max(config_.blacklist_radius, mouth);
   // A successful look is a completed observation for this mission and stays
   // cooled permanently. The old growth-only cooldown expired after enough
