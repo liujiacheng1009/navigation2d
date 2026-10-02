@@ -204,6 +204,9 @@ int main() {
       entry.cells[static_cast<std::size_t>(row * entry.width + col)] = -1;
   navigation2d::FrontierExplorer entry_explorer(door_config);
   entry_explorer.UpdateMap(entry);
+  // The opening is reachable in the private planning graph, while it is
+  // still unknown in the observation map; completion must account for it.
+  assert(entry_explorer.ReachableUnknownCells(.4, .7) > 0);
   const auto entry_goals = entry_explorer.SelectGoals(.4, .7);
   assert(!entry_goals.empty());
   const auto entry_probe = entry_explorer.SelectEntryProbe(

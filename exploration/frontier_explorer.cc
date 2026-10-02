@@ -980,6 +980,62 @@ std::size_t FrontierExplorer::KnownCells() const {
       [](std::int8_t value) { return value >= 0; }));
 }
 
+std::size_t FrontierExplorer::ReachableUnknownCells(double robot_x, double robot_y) const {
+  if (map_.width <= 2 || map_.height <= 2 || map_.resolution <= 0. ||
+      map_.cells.size() != static_cast<std::size_t>(map_.width * map_.height) ||
+      observation_map_.cells.size() != map_.cells.size())
+    return 0;
+  const int robot_col = static_cast<int>(std::floor(
+      (robot_x - map_.origin_x) / map_.resolution));
+  const int robot_row = static_cast<int>(std::floor(
+      (robot_y - map_.origin_y) / map_.resolution));
+  const int search = static_cast<int>(std::ceil(1.0 / map_.resolution));
+  int start = -1;
+  double nearest = std::numeric_limits<double>::infinity();
+  for (int row = std::max(0, robot_row - search);
+       row <= std::min(map_.height - 1, robot_row + search); ++row) {
+    for (int col = std::max(0, robot_col - search);
+         col <= std::min(map_.width - 1, robot_col + search); ++col) {
+      if (!SafeViewpoint(col, row)) continue;
+      const double distance = std::hypot(col - robot_col, row - robot_row);
+      if (distance < nearest) {
+        nearest = distance;
+        start = row * map_.width + col;
+      }
+    }
+  }
+  if (start < 0) return 0;
+  std::vector<unsigned char> visited(map_.cells.size(), 0);
+  std::deque<int> queue{start};
+  visited[start] = 1;
+  std::size_t reachable_unknown = 0;
+  constexpr int dx[] = {-1, 1, 0, 0};
+  constexpr int dy[] = {0, 0, -1, 1};
+  while (!queue.empty()) {
+    const int current = queue.front();
+    queue.pop_front();
+    if (observation_map_.cells[static_cast<std::size_t>(current)] < 0 &&
+        map_.cells[static_cast<std::size_t>(current)] == 0)
+      ++reachable_unknown;
+    const int row = current / map_.width;
+    const int col = current % map_.width;
+    for (int direction = 0; direction < 4; ++direction) {
+      const int next_col = col + dx[direction];
+      const int next_row = row + dy[direction];
+      if (next_col < 0 || next_row < 0 || next_col >= map_.width ||
+          next_row >= map_.height)
+        continue;
+      const int next = next_row * map_.width + next_col;
+      if (visited[static_cast<std::size_t>(next)] ||
+          !SafeViewpoint(next_col, next_row))
+        continue;
+      visited[static_cast<std::size_t>(next)] = 1;
+      queue.push_back(next);
+    }
+  }
+  return reachable_unknown;
+}
+
 bool FrontierExplorer::CompletionEligible(std::size_t initial_known_cells) const {
   const auto growth = std::max(config_.minimum_known_cell_growth,
       static_cast<std::size_t>(std::ceil(initial_known_cells * config_.minimum_known_growth_ratio)));

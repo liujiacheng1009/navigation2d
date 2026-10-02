@@ -94,6 +94,11 @@ class FrontierExplorer {
   void RecordAttempt(const ExplorationGoal& goal, bool succeeded);
   void ClearBlacklist() { blacklist_.clear(); }
   bool CompletionEligible(std::size_t initial_known_cells) const;
+  // Unknown cells that are reachable through the planner's safe graph,
+  // including only narrow openings explicitly opened by OpenPassableOpenings.
+  // This distinguishes an unvisited room entrance from unknown space behind
+  // a wall or outside the observed map boundary.
+  std::size_t ReachableUnknownCells(double robot_x, double robot_y) const;
   std::size_t KnownCells() const;
   int completed_goals() const { return completed_goals_; }
   int failed_goals() const { return failed_goals_; }
