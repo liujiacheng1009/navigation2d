@@ -231,7 +231,12 @@ bool FrontierExplorer::SafeViewpoint(int col, int row) const {
   const int narrow_max = static_cast<int>(std::floor(kNarrowMaxWidth / map_.resolution));
   const bool corridor = (horizontal >= narrow_min && horizontal <= narrow_max) !=
                         (vertical >= narrow_min && vertical <= narrow_max);
-  return corridor && ClearAt(col, row, kNarrowClearance);
+  // The configured footprint clearance is the contract with the executable
+  // planner. The historical narrow constant is only a lower bound for tests
+  // and legacy callers; production exploration config is .30 m.
+  const double corridor_clearance = config_.footprint_clearance >= .30
+      ? config_.footprint_clearance : kNarrowClearance;
+  return corridor && ClearAt(col, row, corridor_clearance);
 }
 
 std::pair<double, double> FrontierExplorer::CellCenter(int col, int row) const {
