@@ -946,7 +946,8 @@ bool FrontierExplorer::GoalRegionStillFrontier(const ExplorationGoal& goal) cons
   return false;
 }
 
-void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded) {
+void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded,
+                                     bool region_complete) {
   // Cool down both resolved and failed boundaries for the current map state.
   // Suppress the entire failed frontier component, rather than only its
   // representative cell. Otherwise the next map update emits another point
@@ -973,10 +974,14 @@ void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded
   blacklist_.push_back({goal.frontier_x, goal.frontier_y, component_radius, known, growth, succeeded});
   if (succeeded) {
     blacklist_.push_back({goal.x, goal.y, kVisitedViewpointRadius, known, growth, true});
-    ++completed_goals_;
+    if (region_complete) ++completed_goals_;
   } else {
     ++failed_goals_;
   }
+}
+
+void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded) {
+  RecordAttempt(goal, succeeded, true);
 }
 
 std::size_t FrontierExplorer::KnownCells() const {

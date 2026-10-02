@@ -91,6 +91,10 @@ class FrontierExplorer {
   // from unknown to free.  This associates a queued task with its local
   // frontier region instead of treating that benign movement as completion.
   bool GoalRegionStillFrontier(const ExplorationGoal& goal) const;
+  // `region_complete` is false for a successful doorway probe: crossing an
+  // entrance observes the room but does not prove the room has been swept.
+  void RecordAttempt(const ExplorationGoal& goal, bool succeeded,
+                     bool region_complete = true);
   void RecordAttempt(const ExplorationGoal& goal, bool succeeded);
   void ClearBlacklist() { blacklist_.clear(); }
   bool CompletionEligible(std::size_t initial_known_cells) const;
