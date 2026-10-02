@@ -94,7 +94,7 @@ class FrontierExplorer {
   // `region_complete` is false for a successful doorway probe: crossing an
   // entrance observes the room but does not prove the room has been swept.
   void RecordAttempt(const ExplorationGoal& goal, bool succeeded,
-                     bool region_complete = true);
+                     bool region_complete);
   void RecordAttempt(const ExplorationGoal& goal, bool succeeded);
   void ClearBlacklist() { blacklist_.clear(); }
   bool CompletionEligible(std::size_t initial_known_cells) const;
