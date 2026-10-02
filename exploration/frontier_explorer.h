@@ -40,6 +40,9 @@ struct ExplorationGoal {
   // the ordinary cluster/standoff tests.  Used only as one completing probe
   // after the exploring tour is empty.
   bool leftover_approach = false;
+  // Assigned by RegionScheduler after frontier extraction. Kept at the end
+  // so existing aggregate construction of goals remains source compatible.
+  std::uint64_t region_id = 0;
 };
 
 struct FrontierExplorerConfig {
