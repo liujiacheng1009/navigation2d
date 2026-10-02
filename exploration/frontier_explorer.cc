@@ -403,10 +403,21 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
     // Use the raw mapper grid for the boundary.  `map_` may contain unknown
     // cells opened in a narrow passage solely to make the navigation graph
     // traversable; using it here erases the doorway's room frontier.
-    if (RawFrontier(col, row)) frontier[index] = 1;
+    if (travel_cells[index] >= 0 && RawFrontier(col, row)) frontier[index] = 1;
   }
-  unresolved_frontier_cells_ = CountRawFrontierCells();
-  raw_frontier_cells_ = unresolved_frontier_cells_;
+  // Only boundaries reachable through the safe planning graph are actionable
+  // frontiers. Unknown cells behind occupied walls, outside the observed
+  // component, or stranded by a completed room must not block completion.
+  std::size_t reachable_frontier_cells = 0;
+  for (int row = 0; row < map_.height; ++row) {
+    for (int col = 0; col < map_.width; ++col) {
+      const int index = row * map_.width + col;
+      if (travel_cells[index] >= 0 && RawFrontier(col, row))
+        ++reachable_frontier_cells;
+    }
+  }
+  unresolved_frontier_cells_ = reachable_frontier_cells;
+  raw_frontier_cells_ = reachable_frontier_cells;
   std::vector<ExplorationGoal> goals;
   for (int seed = 0; seed < map_.width * map_.height; ++seed) {
     if (!frontier[seed] || visited[seed]) continue;
