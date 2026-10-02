@@ -184,6 +184,40 @@ int main() {
   }
   assert(on_centerline);
 
+  // A doorway arrival is only the observation-side pose. When a partially
+  // observed narrow opening is safely opened in the private planning grid,
+  // the explorer must be able to produce a reachable pose on the far side of
+  // the frontier for the bounded entry probe.
+  navigation2d::ExplorationGrid entry;
+  entry.width = 50;
+  entry.height = 30;
+  entry.resolution = .05;
+  entry.cells.assign(static_cast<std::size_t>(entry.width * entry.height), 100);
+  for (int row = 4; row < 26; ++row)
+    for (int col = 2; col < 16; ++col)
+      entry.cells[static_cast<std::size_t>(row * entry.width + col)] = 0;
+  for (int row = 4; row < 26; ++row)
+    for (int col = 21; col < 29; ++col)
+      entry.cells[static_cast<std::size_t>(row * entry.width + col)] = 0;
+  for (int row = 8; row < 22; ++row)
+    for (int col = 16; col < 21; ++col)
+      entry.cells[static_cast<std::size_t>(row * entry.width + col)] = -1;
+  navigation2d::FrontierExplorer entry_explorer(door_config);
+  entry_explorer.UpdateMap(entry);
+  const auto entry_goals = entry_explorer.SelectGoals(.4, .7);
+  assert(!entry_goals.empty());
+  const auto entry_probe = entry_explorer.SelectEntryProbe(
+      entry_goals.front(), .4, .7, .20, .70);
+  assert(entry_probe.has_value());
+  const double entry_dx = entry_probe->x - entry_goals.front().frontier_x;
+  const double entry_dy = entry_probe->y - entry_goals.front().frontier_y;
+  const double entry_direction_x = entry_goals.front().frontier_x - entry_goals.front().x;
+  const double entry_direction_y = entry_goals.front().frontier_y - entry_goals.front().y;
+  const double entry_direction_length =
+      std::hypot(entry_direction_x, entry_direction_y);
+  assert((entry_dx * entry_direction_x + entry_dy * entry_direction_y) /
+             entry_direction_length >= .20);
+
   // Opening a partially observed passage is a planning-only transformation.
   // The mapper's unknown boundary must remain visible to completion logic and
   // the reported known area must not grow just because a narrow gap was

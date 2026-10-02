@@ -808,6 +808,107 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
   return tour;
 }
 
+std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
+    const ExplorationGoal& frontier_goal, double robot_x, double robot_y,
+    double minimum_depth_m, double maximum_depth_m) const {
+  if (map_.width <= 2 || map_.height <= 2 || map_.resolution <= 0. ||
+      map_.cells.size() != static_cast<std::size_t>(map_.width * map_.height) ||
+      minimum_depth_m <= 0. || maximum_depth_m < minimum_depth_m)
+    return std::nullopt;
+
+  const double approach_x = frontier_goal.frontier_x - frontier_goal.x;
+  const double approach_y = frontier_goal.frontier_y - frontier_goal.y;
+  const double approach_length = std::hypot(approach_x, approach_y);
+  if (approach_length < .05) return std::nullopt;
+  const double direction_x = approach_x / approach_length;
+  const double direction_y = approach_y / approach_length;
+  const int robot_col = static_cast<int>(std::floor(
+      (robot_x - map_.origin_x) / map_.resolution));
+  const int robot_row = static_cast<int>(std::floor(
+      (robot_y - map_.origin_y) / map_.resolution));
+  const int start_search = static_cast<int>(std::ceil(1.0 / map_.resolution));
+  int start = -1;
+  double start_distance = std::numeric_limits<double>::infinity();
+  for (int row = std::max(0, robot_row - start_search);
+       row <= std::min(map_.height - 1, robot_row + start_search); ++row) {
+    for (int col = std::max(0, robot_col - start_search);
+         col <= std::min(map_.width - 1, robot_col + start_search); ++col) {
+      if (!SafeViewpoint(col, row)) continue;
+      const double distance = std::hypot(col - robot_col, row - robot_row);
+      if (distance < start_distance) {
+        start_distance = distance;
+        start = row * map_.width + col;
+      }
+    }
+  }
+  if (start < 0) return std::nullopt;
+
+  // The entry probe is allowed to use only the planning copy. OpenPassable-
+  // Openings() may have converted a narrow, partly observed doorway to free,
+  // while the unknown room beyond it remains blocked.
+  std::vector<int> distance(map_.cells.size(), -1);
+  std::deque<int> queue{start};
+  distance[start] = 0;
+  constexpr int dx[] = {-1, 1, 0, 0};
+  constexpr int dy[] = {0, 0, -1, 1};
+  while (!queue.empty()) {
+    const int current = queue.front();
+    queue.pop_front();
+    const int row = current / map_.width;
+    const int col = current % map_.width;
+    for (int direction = 0; direction < 4; ++direction) {
+      const int next_col = col + dx[direction];
+      const int next_row = row + dy[direction];
+      if (next_col < 0 || next_row < 0 || next_col >= map_.width ||
+          next_row >= map_.height)
+        continue;
+      const int next = next_row * map_.width + next_col;
+      if (distance[next] >= 0 || !SafeViewpoint(next_col, next_row)) continue;
+      distance[next] = distance[current] + 1;
+      queue.push_back(next);
+    }
+  }
+
+  std::optional<ExplorationGoal> best;
+  double best_depth = -std::numeric_limits<double>::infinity();
+  int best_travel = std::numeric_limits<int>::max();
+  const int search = static_cast<int>(std::ceil(maximum_depth_m / map_.resolution)) + 2;
+  const int frontier_col = static_cast<int>(std::floor(
+      (frontier_goal.frontier_x - map_.origin_x) / map_.resolution));
+  const int frontier_row = static_cast<int>(std::floor(
+      (frontier_goal.frontier_y - map_.origin_y) / map_.resolution));
+  for (int row = std::max(0, frontier_row - search);
+       row <= std::min(map_.height - 1, frontier_row + search); ++row) {
+    for (int col = std::max(0, frontier_col - search);
+         col <= std::min(map_.width - 1, frontier_col + search); ++col) {
+      const int index = row * map_.width + col;
+      if (distance[index] < 0 || !SafeViewpoint(col, row)) continue;
+      const auto [x, y] = CellCenter(col, row);
+      const double relative_x = x - frontier_goal.frontier_x;
+      const double relative_y = y - frontier_goal.frontier_y;
+      const double depth = relative_x * direction_x + relative_y * direction_y;
+      const double lateral = std::abs(relative_x * direction_y - relative_y * direction_x);
+      if (depth < minimum_depth_m || depth > maximum_depth_m || lateral > .38)
+        continue;
+      // Do not select a pose that is merely on the approach side of the
+      // frontier or an unrelated free cell behind a nearby wall.
+      if (std::hypot(relative_x, relative_y) > maximum_depth_m + .20) continue;
+      if (depth > best_depth + .01 ||
+          (std::abs(depth - best_depth) <= .01 && distance[index] < best_travel)) {
+        best_depth = depth;
+        best_travel = distance[index];
+        ExplorationGoal probe = frontier_goal;
+        probe.x = x;
+        probe.y = y;
+        probe.yaw = std::atan2(direction_y, direction_x);
+        probe.score = depth - .01 * static_cast<double>(distance[index]);
+        best = probe;
+      }
+    }
+  }
+  return best;
+}
+
 bool FrontierExplorer::GoalStillFrontier(const ExplorationGoal& goal) const {
   if (observation_map_.resolution <= 0. || observation_map_.width <= 0 ||
       observation_map_.height <= 0) return false;

@@ -73,6 +73,13 @@ class FrontierExplorer {
   // The next viewpoint minimizes travel potential minus frontier information
   // gain, following the established explore_lite frontier policy.
   std::vector<ExplorationGoal> BuildTour(double robot_x, double robot_y);
+  // Returns a reachable pose beyond a doorway frontier.  The pose is chosen
+  // from the private planning grid, where only physically passable narrow
+  // openings have been opened; it never treats an arbitrary unknown room as
+  // traversable.
+  std::optional<ExplorationGoal> SelectEntryProbe(
+      const ExplorationGoal& frontier_goal, double robot_x, double robot_y,
+      double minimum_depth_m = .22, double maximum_depth_m = .70) const;
   // Tests whether two frontier viewpoints belong to the same nearby
   // reachable free-space region.  This deliberately follows the planning
   // graph instead of using a Euclidean circle that can cross a wall.
