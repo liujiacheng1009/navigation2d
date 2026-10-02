@@ -298,7 +298,14 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
   RegionId preferred = stack_.empty() ? 0 : stack_.back();
   // Wait for the second fresh map observation before declaring an empty
   // active region complete. Do not reinterpret a stale map as confirmation.
-  if (preferred && regions_.at(preferred).state == RegionState::kWaiting) return {};
+  const bool has_unassigned_goal = std::any_of(goals.begin(), goals.end(),
+      [](const ExplorationGoal& goal) { return goal.region_id == 0; });
+  // A frontier can sit on a newly opened doorway before the region graph has
+  // assigned that boundary to a region. Never discard such a goal merely
+  // because the previous region is waiting for another map update; it is a
+  // valid global fallback and the navigation planner remains authoritative.
+  if (preferred && regions_.at(preferred).state == RegionState::kWaiting &&
+      !has_unassigned_goal) return {};
   RegionId origin = last_region_;
   if (!origin || !regions_.at(origin).visible) origin = RegionAt(x, y);
   std::map<RegionId, int> hops;
