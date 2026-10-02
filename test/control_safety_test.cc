@@ -255,10 +255,10 @@ int main() {
   assert(margin_rpp.CollisionImminent(
       navigation2d::MakePose2d(1.350, 1.0, M_PI), {.048, 0.}, corner_costmap));
 
-  // Near-field depth. Reach is robot_radius + slowdown distance = 0.67 m.
-  // A return past that is ignored. One inside it slows. A return that then
-  // disappears is held as a stop until the bumper passes it. 0.4 s of silence
-  // clears the hold without a lidar source timeout.
+  // Near-field depth stops inside the bumper gap and does not use the
+  // lidar slowdown zone. A one-frame return is not held. A return seen for
+  // three frames is held, and that hold stops only a closing forward command.
+  // 0.4 s of silence clears it without a lidar source timeout.
   navigation2d::NavigationConfig depth_config = corner_stop_config;
   depth_config.collision_monitor_trigger_cycles = 1;
   depth_config.collision_monitor_release_cycles = 1;
@@ -272,28 +272,50 @@ int main() {
   assert(result.action == navigation2d::CollisionMonitorAction::kNone);
   assert(std::abs(result.command.linear - .24) < 1e-9);
 
-  depth_monitor.UpdateDepthPoints(depth_origin, {{.65, 0.}}, 7.05);
-  result = depth_monitor.Filter(depth_origin, {.24, 0.}, 7.05);
-  assert(result.action == navigation2d::CollisionMonitorAction::kSlowdown);
-  assert(result.command.linear > 0.);
-  assert(result.command.linear < .24);
-
+  for (int sample = 0; sample < 3; ++sample)
+    depth_monitor.UpdateDepthPoints(depth_origin, {{.65, 0.}}, 7.05 + .01 * sample);
+  result = depth_monitor.Filter(depth_origin, {.24, 0.}, 7.08);
+  assert(result.action == navigation2d::CollisionMonitorAction::kNone);
+  assert(std::abs(result.command.linear - .24) < 1e-9);
   depth_monitor.UpdateDepthPoints(depth_origin, {}, 7.10);
   result = depth_monitor.Filter(depth_origin, {.24, 0.}, 7.10);
+  assert(result.action == navigation2d::CollisionMonitorAction::kNone);
+  assert(std::abs(result.command.linear - .24) < 1e-9);
+
+  navigation2d::CollisionMonitor depth_stop(depth_config);
+  depth_stop.UpdateLaserScan(depth_origin, clear_scan);
+  const double stop_point = .145 + .09;
+  depth_stop.UpdateDepthPoints(depth_origin, {{stop_point, 0.}}, 7.20);
+  depth_stop.UpdateDepthPoints(depth_origin, {}, 7.21);
+  result = depth_stop.Filter(depth_origin, {.24, 0.}, 7.21);
+  assert(result.action == navigation2d::CollisionMonitorAction::kNone);
+
+  for (int sample = 0; sample < 3; ++sample)
+    depth_stop.UpdateDepthPoints(depth_origin, {{stop_point, 0.}}, 7.30 + .01 * sample);
+  result = depth_stop.Filter(depth_origin, {.24, 0.}, 7.33);
   assert(result.action == navigation2d::CollisionMonitorAction::kStop);
   assert(result.command.linear == 0.);
+  depth_stop.UpdateDepthPoints(depth_origin, {}, 7.34);
+  result = depth_stop.Filter(depth_origin, {.24, 0.}, 7.34);
+  assert(result.action == navigation2d::CollisionMonitorAction::kStop);
+  assert(result.command.linear == 0.);
+  result = depth_stop.Filter(depth_origin, {0., .4}, 7.35);
+  assert(result.action == navigation2d::CollisionMonitorAction::kNone);
+  assert(std::abs(result.command.angular - .4) < 1e-9);
 
   const auto passed = navigation2d::MakePose2d(.60, 0., 0.);
-  depth_monitor.UpdateLaserScan(passed, clear_scan);
-  result = depth_monitor.Filter(passed, {.24, 0.}, 7.16);
+  depth_stop.UpdateLaserScan(passed, clear_scan);
+  result = depth_stop.Filter(passed, {.24, 0.}, 7.36);
   assert(result.action == navigation2d::CollisionMonitorAction::kNone);
   assert(std::abs(result.command.linear - .24) < 1e-9);
 
   navigation2d::CollisionMonitor depth_timeout(depth_config);
   depth_timeout.UpdateLaserScan(depth_origin, clear_scan);
-  depth_timeout.UpdateDepthPoints(depth_origin, {{.65, 0.}}, 8.);
-  result = depth_timeout.Filter(depth_origin, {.24, 0.}, 8.);
-  assert(result.action == navigation2d::CollisionMonitorAction::kSlowdown);
+  for (int sample = 0; sample < 3; ++sample)
+    depth_timeout.UpdateDepthPoints(depth_origin, {{stop_point, 0.}}, 8. + .01 * sample);
+  depth_timeout.UpdateDepthPoints(depth_origin, {}, 8.04);
+  result = depth_timeout.Filter(depth_origin, {.24, 0.}, 8.04);
+  assert(result.action == navigation2d::CollisionMonitorAction::kStop);
   depth_timeout.UpdateLaserScan(depth_origin, clear_scan);
   result = depth_timeout.Filter(depth_origin, {.24, 0.}, 8.50);
   assert(result.action == navigation2d::CollisionMonitorAction::kNone);

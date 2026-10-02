@@ -202,6 +202,8 @@ void CollisionMonitor::UpdateDepthPoints(
   const double cosine = std::cos(yaw), sine = std::sin(yaw);
   const double half_width = TravelCorridorHalfWidth(config_);
   const double reach = config_.robot_radius + config_.collision_monitor_slowdown_distance;
+  constexpr double kMatchRadius = .08;
+  constexpr int kStableHits = 3;
   std::vector<Eigen::Vector2d> fresh;
   fresh.reserve(base_points.size());
   for (const auto& point : base_points) {
@@ -216,14 +218,42 @@ void CollisionMonitor::UpdateDepthPoints(
     const double lateral = std::abs(-sine * relative.x() + cosine * relative.y());
     return longitudinal > 0. && lateral <= half_width && relative.norm() <= reach + 1e-6;
   };
-  for (const auto& previous : depth_points_) {
-    if (!forward(previous)) continue;
-    const bool still_seen = std::any_of(
-        fresh.begin(), fresh.end(), [&](const Eigen::Vector2d& point) {
-          return (point - previous).norm() < .08;
-        });
-    if (!still_seen) held_depth_points_.push_back(previous);
+  std::erase_if(held_depth_points_, [&](const Eigen::Vector2d& held) {
+    return std::any_of(fresh.begin(), fresh.end(), [&](const Eigen::Vector2d& point) {
+      return (point - held).norm() < kMatchRadius;
+    });
+  });
+  std::vector<bool> matched(depth_tracks_.size(), false);
+  std::vector<DepthTrack> next_tracks;
+  next_tracks.reserve(fresh.size());
+  for (const auto& point : fresh) {
+    int best = -1;
+    double best_distance = kMatchRadius;
+    for (std::size_t index = 0; index < depth_tracks_.size(); ++index) {
+      if (matched[index]) continue;
+      const double distance = (depth_tracks_[index].point - point).norm();
+      if (distance < best_distance) {
+        best = static_cast<int>(index);
+        best_distance = distance;
+      }
+    }
+    DepthTrack track;
+    track.point = point;
+    if (best >= 0) {
+      matched[static_cast<std::size_t>(best)] = true;
+      track.hits = std::min(depth_tracks_[static_cast<std::size_t>(best)].hits + 1, kStableHits);
+    } else {
+      track.hits = 1;
+    }
+    next_tracks.push_back(track);
   }
+  for (std::size_t index = 0; index < depth_tracks_.size(); ++index) {
+    if (matched[index]) continue;
+    const DepthTrack& track = depth_tracks_[index];
+    if (track.hits >= kStableHits && forward(track.point))
+      held_depth_points_.push_back(track.point);
+  }
+  depth_tracks_ = std::move(next_tracks);
   depth_points_ = std::move(fresh);
   depth_stamp_ = timestamp;
   has_depth_stamp_ = true;
@@ -244,18 +274,25 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
   if (has_depth_stamp_ && timestamp - depth_stamp_ > .40) {
     depth_points_.clear();
     held_depth_points_.clear();
+    depth_tracks_.clear();
     has_depth_stamp_ = false;
   } else {
     CullPassedDepthHolds(robot_pose);
   }
-  std::vector<Eigen::Vector2d> returns = points_;
-  returns.insert(returns.end(), depth_points_.begin(), depth_points_.end());
-  returns.insert(returns.end(), held_depth_points_.begin(), held_depth_points_.end());
+  struct SafetyReturn {
+    Eigen::Vector2d point;
+    bool depth = false;
+  };
+  std::vector<SafetyReturn> returns;
+  returns.reserve(points_.size() + depth_points_.size() + held_depth_points_.size());
+  for (const auto& point : points_) returns.push_back({point, false});
+  for (const auto& point : depth_points_) returns.push_back({point, true});
+  for (const auto& point : held_depth_points_) returns.push_back({point, true});
 
   double min_distance = std::numeric_limits<double>::infinity();
-  for (const auto& point : returns)
+  for (const auto& sample : returns)
     min_distance = std::min(min_distance,
-        std::max(0., (point - robot_pose.translation()).norm() - config_.robot_radius));
+        std::max(0., (sample.point - robot_pose.translation()).norm() - config_.robot_radius));
   // Laser points are continuous measurements, but the route/controller
   // contract is evaluated on an occupancy raster.  Match the planner's
   // one-cell half-diagonal guard so a command cannot enter the physical wall
@@ -287,7 +324,8 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
     const double command_heading = Yaw(robot_pose);
     const Eigen::Vector2d heading(std::cos(command_heading), std::sin(command_heading));
     bool predicted_contact = false;
-    for (const auto& point : returns) {
+    for (const auto& sample : returns) {
+      const Eigen::Vector2d& point = sample.point;
       if (ShellReturn(point, robot_pose, config_)) continue;
       const double initial_distance = (point - robot_pose.translation()).norm();
       const double projected_distance = (point - projected.translation()).norm();
@@ -307,7 +345,9 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
           lateral <= travel_half_width;
       const bool closing = projected_distance + 1e-5 < initial_distance;
       const double clearance = initial_distance - config_.robot_radius;
-      if (in_travel_corridor && closing && clearance > 0. &&
+      // Depth is a noisy near field. It stops inside the bumper gap and does
+      // not scale speed the way a lidar return in the 0.45 m zone does.
+      if (!sample.depth && in_travel_corridor && closing && clearance > 0. &&
           clearance <= config_.collision_monitor_slowdown_distance) {
         slowdown_clearance = std::min(slowdown_clearance, clearance);
         slowdown_closing = true;
@@ -336,7 +376,7 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
       // robot's current solid body. Returns already inside the footprint are
       // self/noise/contact discretization and must not permanently latch the
       // base. The monitor guards newly swept space only.
-      if (in_travel_corridor && initial_distance > collision_radius &&
+      if (!sample.depth && in_travel_corridor && initial_distance > collision_radius &&
           projected_footprint_collision)
         predicted_contact = true;
     }
@@ -379,8 +419,6 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
   // still rejects any swept-footprint collision; the live monitor's stop
   // authority is deliberately limited to a collision predicted along the
   // command trajectory on the next control step.
-  if (!held_depth_points_.empty())
-    emergency_stop = true;
   if (blind_zone_closing)
     requested = CollisionMonitorAction::kBlindZoneStop;
   else if (emergency_stop)

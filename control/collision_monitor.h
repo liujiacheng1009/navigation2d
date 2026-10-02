@@ -36,9 +36,11 @@ class CollisionMonitor {
   void UpdateLaserScan(const Pose2d& sensor_pose, const LaserScan& scan);
   void UpdatePointCloud(const Pose2d& sensor_pose, const PointCloud2d& cloud);
   // Depth returns are already in the robot frame. They do not replace the
-  // lidar scan. A forward return that is missing from the next sample is held
-  // until the bumper passes it. Silence for 0.4 s drops the depth points and
-  // the hold; the lidar source timeout is unchanged.
+  // lidar scan and they do not use the lidar slowdown zone. A return that
+  // stays inside 8 cm for several frames, then disappears from the forward
+  // corridor, is held until the bumper passes it. The hold uses the same
+  // stop-corridor test as a live return. Silence for 0.4 s drops the depth
+  // points and the hold; the lidar source timeout is unchanged.
   void UpdateDepthPoints(const Pose2d& robot_pose,
                          const std::vector<Eigen::Vector2d>& base_points,
                          double timestamp);
@@ -46,6 +48,10 @@ class CollisionMonitor {
                                 double timestamp);
 
  private:
+  struct DepthTrack {
+    Eigen::Vector2d point = Eigen::Vector2d::Zero();
+    int hits = 0;
+  };
   void UpdatePoints(const Pose2d& sensor_pose, std::vector<Eigen::Vector2d> points);
   void CullPassedDepthHolds(const Pose2d& robot_pose);
   NavigationConfig config_;
@@ -53,6 +59,7 @@ class CollisionMonitor {
   std::vector<Eigen::Vector2d> blind_zone_points_;
   std::vector<Eigen::Vector2d> depth_points_;
   std::vector<Eigen::Vector2d> held_depth_points_;
+  std::vector<DepthTrack> depth_tracks_;
   bool has_depth_stamp_ = false;
   double depth_stamp_ = 0.;
   bool observation_pending_ = false;
