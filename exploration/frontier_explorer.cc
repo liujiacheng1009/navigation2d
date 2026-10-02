@@ -239,6 +239,60 @@ std::pair<double, double> FrontierExplorer::CellCenter(int col, int row) const {
           map_.origin_y + (row + .5) * map_.resolution};
 }
 
+bool FrontierExplorer::InSameReachableRegion(double anchor_x, double anchor_y,
+                                             double target_x, double target_y,
+                                             double max_distance_m) const {
+  if (map_.width <= 0 || map_.height <= 0 || map_.resolution <= 0. ||
+      map_.cells.size() != static_cast<std::size_t>(map_.width * map_.height) ||
+      max_distance_m < 0.) return false;
+  const auto nearest_safe = [&](double x, double y) {
+    const int center_col = static_cast<int>(std::floor((x - map_.origin_x) / map_.resolution));
+    const int center_row = static_cast<int>(std::floor((y - map_.origin_y) / map_.resolution));
+    const int search = static_cast<int>(std::ceil(1.0 / map_.resolution));
+    int best = -1;
+    double best_distance = std::numeric_limits<double>::infinity();
+    for (int row = std::max(0, center_row - search);
+         row <= std::min(map_.height - 1, center_row + search); ++row) {
+      for (int col = std::max(0, center_col - search);
+           col <= std::min(map_.width - 1, center_col + search); ++col) {
+        if (!SafeViewpoint(col, row)) continue;
+        const double distance = std::hypot(col - center_col, row - center_row);
+        if (distance < best_distance) {
+          best_distance = distance;
+          best = row * map_.width + col;
+        }
+      }
+    }
+    return best;
+  };
+  const int start = nearest_safe(anchor_x, anchor_y);
+  const int target = nearest_safe(target_x, target_y);
+  if (start < 0 || target < 0) return false;
+  const int max_cells = static_cast<int>(std::ceil(max_distance_m / map_.resolution));
+  std::vector<int> distance(map_.cells.size(), -1);
+  std::deque<int> queue{start};
+  distance[start] = 0;
+  constexpr int dx[] = {-1, 1, 0, 0};
+  constexpr int dy[] = {0, 0, -1, 1};
+  while (!queue.empty()) {
+    const int current = queue.front();
+    queue.pop_front();
+    if (current == target) return distance[current] <= max_cells;
+    if (distance[current] >= max_cells) continue;
+    const int row = current / map_.width, col = current % map_.width;
+    for (int direction = 0; direction < 4; ++direction) {
+      const int next_col = col + dx[direction], next_row = row + dy[direction];
+      if (next_col < 0 || next_row < 0 || next_col >= map_.width || next_row >= map_.height)
+        continue;
+      const int next = next_row * map_.width + next_col;
+      if (distance[next] >= 0 || !SafeViewpoint(next_col, next_row)) continue;
+      distance[next] = distance[current] + 1;
+      queue.push_back(next);
+    }
+  }
+  return false;
+}
+
 bool FrontierExplorer::Blacklisted(double x, double y) const {
   const std::size_t known = KnownCells();
   return std::any_of(blacklist_.begin(), blacklist_.end(), [&](const auto& entry) {

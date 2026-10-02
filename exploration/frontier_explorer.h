@@ -73,6 +73,12 @@ class FrontierExplorer {
   // The next viewpoint minimizes travel potential minus frontier information
   // gain, following the established explore_lite frontier policy.
   std::vector<ExplorationGoal> BuildTour(double robot_x, double robot_y);
+  // Tests whether two frontier viewpoints belong to the same nearby
+  // reachable free-space region.  This deliberately follows the planning
+  // graph instead of using a Euclidean circle that can cross a wall.
+  bool InSameReachableRegion(double anchor_x, double anchor_y,
+                             double target_x, double target_y,
+                             double max_distance_m) const;
   bool GoalStillFrontier(const ExplorationGoal& goal) const;
   // Frontiers move by a few cells as each scan converts their old boundary
   // from unknown to free.  This associates a queued task with its local
