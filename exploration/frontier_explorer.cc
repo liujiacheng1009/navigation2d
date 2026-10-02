@@ -298,12 +298,13 @@ bool FrontierExplorer::InSameReachableRegion(double anchor_x, double anchor_y,
   return false;
 }
 
-bool FrontierExplorer::Blacklisted(double x, double y) const {
+bool FrontierExplorer::Blacklisted(double x, double y, bool boundary) const {
   const std::size_t known = KnownCells();
   return std::any_of(blacklist_.begin(), blacklist_.end(), [&](const auto& entry) {
     // A failed frontier becomes eligible again after the map has materially
     // expanded, since a new approach through a doorway may now be visible.
-    return (entry.persistent || known < entry.known_cells + entry.required_growth) &&
+    return (!boundary || entry.persistent) &&
+        (entry.persistent || known < entry.known_cells + entry.required_growth) &&
         std::hypot(x - entry.x, y - entry.y) < entry.radius;
   });
 }
@@ -440,7 +441,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
         });
     const auto [frontier_x, frontier_y] = CellCenter(
         representative % map_.width, representative / map_.width);
-    if (Blacklisted(frontier_x, frontier_y)) continue;
+    if (Blacklisted(frontier_x, frontier_y, true)) continue;
   const int search = static_cast<int>(std::ceil(config_.maximum_standoff / map_.resolution));
     const auto narrow_viewpoint = [&](int col, int row) {
       const int probe = static_cast<int>(std::ceil(1.4 / map_.resolution));
@@ -637,7 +638,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectLeftoverApproach(
     if (!frontier[index]) continue;
     const int target_row = index / map_.width, target_col = index % map_.width;
     const auto [frontier_x, frontier_y] = CellCenter(target_col, target_row);
-    if (Blacklisted(frontier_x, frontier_y)) continue;
+    if (Blacklisted(frontier_x, frontier_y, true)) continue;
     for (int row = std::max(0, target_row - leftover_search);
          row <= std::min(map_.height - 1, target_row + leftover_search); ++row) {
       for (int col = std::max(0, target_col - leftover_search);
@@ -948,34 +949,20 @@ bool FrontierExplorer::GoalRegionStillFrontier(const ExplorationGoal& goal) cons
 
 void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded,
                                      bool region_complete) {
-  // Cool down both resolved and failed boundaries for the current map state.
-  // Suppress the entire failed frontier component, rather than only its
-  // representative cell. Otherwise the next map update emits another point
-  // on the same wall and causes an identical recovery loop. The radius also
-  // covers the gap back to the approach pose, so a second component of the
-  // same opening cannot reuse that mouth.
-  const double span = std::hypot(goal.x - goal.frontier_x, goal.y - goal.frontier_y);
-  const double mouth = std::max(
-      span + .25,
-      std::sqrt(static_cast<double>(std::max(1, goal.frontier_cells))) * map_.resolution);
-  // A failed opening is skipped out to the configured radius so the same
-  // mouth is not retried every scan. A successful look only cools the
-  // observed frontier fragment with a bounded local radius; adjacent doors
-  // remain candidates and are handled by the active-region sweep.
-  const double component_radius = succeeded ? kVisitedFrontierRadius
-                                            : std::max(config_.blacklist_radius, mouth);
-  // A successful look is a completed observation for this mission and stays
-  // cooled permanently. The old growth-only cooldown expired after enough
-  // mapping and sent the robot back into a bathroom it had already entered.
-  // Failures still expire after a modest map growth so a newly opened doorway
-  // can be retried.
-  const std::size_t growth = succeeded ? 20000u : 600u;
+  // Failure describes an attempted observation pose, not an entire doorway.
+  // A distant standoff must never create a room-sized exclusion disk around
+  // its frontier; other safe viewpoints on the same boundary remain useful.
   const std::size_t known = KnownCells();
-  blacklist_.push_back({goal.frontier_x, goal.frontier_y, component_radius, known, growth, succeeded});
   if (succeeded) {
-    blacklist_.push_back({goal.x, goal.y, kVisitedViewpointRadius, known, growth, true});
+    blacklist_.push_back({goal.frontier_x, goal.frontier_y,
+                          kVisitedFrontierRadius, known, 20000u, true});
+    blacklist_.push_back({goal.x, goal.y, kVisitedViewpointRadius,
+                          known, 20000u, true});
     if (region_complete) ++completed_goals_;
   } else {
+    blacklist_.push_back({goal.x, goal.y,
+                          std::max(map_.resolution, config_.footprint_clearance),
+                          known, 600u, false});
     ++failed_goals_;
   }
 }

@@ -291,4 +291,21 @@ int main() {
       upper_remains = true;
   }
   assert(upper_remains);
+  // A failed standoff must not suppress the entire boundary or its adjacent
+  // doorway. The old span+0.25 radius could cover both rooms at once.
+  navigation2d::FrontierExplorer failed_pair(pair_config);
+  failed_pair.UpdateMap(pair);
+  auto failed = *lower;
+  failed.x -= 1.5;
+  failed_pair.RecordAttempt(failed, false);
+  const auto alternatives = failed_pair.SelectGoals(.425, 1.675);
+  bool lower_available = false, upper_available = false;
+  for (const auto& goal : alternatives) {
+    lower_available |= std::hypot(goal.frontier_x - lower->frontier_x,
+                                   goal.frontier_y - lower->frontier_y) < .4;
+    upper_available |= std::hypot(goal.frontier_x - upper->frontier_x,
+                                   goal.frontier_y - upper->frontier_y) < .4;
+  }
+  assert(lower_available && upper_available);
+
 }

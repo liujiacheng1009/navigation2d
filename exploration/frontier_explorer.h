@@ -128,7 +128,7 @@ class FrontierExplorer {
   bool RawFree(int col, int row) const;
   bool RawFrontier(int col, int row) const;
   std::size_t CountRawFrontierCells() const;
-  bool Blacklisted(double x, double y) const;
+  bool Blacklisted(double x, double y, bool boundary = false) const;
   std::vector<ExplorationGoal> StableGoals(std::vector<ExplorationGoal> goals);
   std::pair<double, double> CellCenter(int col, int row) const;
 

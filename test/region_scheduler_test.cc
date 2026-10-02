@@ -48,5 +48,31 @@ int main() {
   const auto again = scheduler.Order({far, near}, .8, 1.2);
   assert(again.size() == 2);
   assert(again.front().region_id == left);
+  // Merely inspecting another region's candidates must not steal the DFS
+  // context. Only successful dispatch is allowed to commit that transition.
+  scheduler.Enter(again.front());
+  const auto offered = scheduler.Order({far}, .8, 1.2);
+  assert(!offered.empty());
+  assert(scheduler.stack().empty());
+  scheduler.Enter(again.front());
+  assert(scheduler.Order({far, near}, .8, 1.2).front().region_id == left);
+
+  // Narrow disconnected free components must not disappear when other rooms
+  // have wide cores (previously RegionAt returned 0 for these cells).
+  grid.cells[1 * grid.width + 30] = 0;
+  scheduler.Update(grid, .20);
+  assert(scheduler.RegionAt(3.05, .15) != 0);
+
+  // Map padding changes indices, not the identity of an active room.
+  auto padded = grid;
+  padded.width += 2;
+  padded.origin_x = -.2;
+  padded.cells.assign(padded.width * padded.height, 100);
+  for (int row = 0; row < grid.height; ++row)
+    for (int col = 0; col < grid.width; ++col)
+      padded.cells[row * padded.width + col + 2] = grid.cells[row * grid.width + col];
+  scheduler.Update(padded, .20);
+  assert(scheduler.RegionAt(.8, 1.2) == left);
+  assert(scheduler.Order({far, near}, .8, 1.2).front().region_id == left);
   return 0;
 }

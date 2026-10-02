@@ -114,7 +114,6 @@ void RegionScheduler::Update(const ExplorationGrid& g, double clearance) {
           }
         }
       }
-      break;
     }
   } else {
     // Assign non-core free cells to the nearest core.  A tie is deterministic
@@ -127,6 +126,23 @@ void RegionScheduler::Update(const ExplorationGrid& g, double clearance) {
         const int j = neighbor(i, d);
         if (j >= 0 && g.cells[j] == 0 && !components[j]) {
           components[j] = components[i]; wave.push_back(j);
+        }
+      }
+    }
+  }
+
+  // Every disconnected observed component needs an identity, even if another
+  // component has an eroded core. Previously narrow islands were label zero.
+  for (int seed = 0; seed < n; ++seed) {
+    if (g.cells[seed] != 0 || components[seed]) continue;
+    components[seed] = ++count;
+    queue.push_back(seed);
+    while (!queue.empty()) {
+      const int i = queue.front(); queue.pop_front();
+      for (int d = 0; d < 4; ++d) {
+        const int j = neighbor(i, d);
+        if (j >= 0 && g.cells[j] == 0 && !components[j]) {
+          components[j] = count; queue.push_back(j);
         }
       }
     }
@@ -195,9 +211,19 @@ void RegionScheduler::Update(const ExplorationGrid& g, double clearance) {
   }
   // Merged/removed contexts must not permanently lock the stack. A newly
   // split child is a fresh pending region, never inherits COMPLETE.
+  for (auto& id : stack_) {
+    if (regions_.at(id).visible) continue;
+    // An active partition can merge into a larger neighbour during mapping.
+    // Transfer the context by overlap instead of silently discarding it.
+    for (const auto& [size, component, old] : matches) {
+      (void)size;
+      if (old == id) { id = ids[component]; break; }
+    }
+  }
   stack_.erase(std::remove_if(stack_.begin(), stack_.end(), [&](RegionId id) {
     return !regions_.at(id).visible;
   }), stack_.end());
+  stack_.erase(std::unique(stack_.begin(), stack_.end()), stack_.end());
   width_ = g.width; height_ = g.height; resolution_ = g.resolution;
   origin_x_ = g.origin_x; origin_y_ = g.origin_y; labels_ = std::move(labels);
 }
@@ -251,9 +277,22 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
     else if (r.frontier_cells) r.state = RegionState::kBlocked;
     else if (r.state != RegionState::kComplete) r.state = RegionState::kWaiting;
   }
+  auto descendant = [&](RegionId id, RegionId ancestor) {
+    std::set<RegionId> seen;
+    while (id && seen.insert(id).second) {
+      if (id == ancestor) return true;
+      const auto it = regions_.find(id);
+      if (it == regions_.end()) break;
+      id = it->second.parent;
+    }
+    return false;
+  };
   while (!stack_.empty()) {
     const auto& r = regions_.at(stack_.back());
-    if (r.candidates || r.state == RegionState::kWaiting) break;
+    const bool child_work = std::any_of(goals.begin(), goals.end(), [&](const auto& g) {
+      return descendant(g.region_id, r.id);
+    });
+    if (r.candidates || child_work || r.state == RegionState::kWaiting) break;
     last_region_ = stack_.back(); stack_.pop_back();
   }
   RegionId preferred = stack_.empty() ? 0 : stack_.back();
@@ -276,18 +315,14 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
     return it == hops.end() ? std::numeric_limits<int>::max() : it->second;
   };
   auto rank = [&](const ExplorationGoal& g) {
-    return std::tuple(preferred && g.region_id != preferred, depth(g.region_id),
+    return std::tuple(preferred && !descendant(g.region_id, preferred), depth(g.region_id),
                       -g.score, g.region_id, g.x, g.y);
   };
   std::stable_sort(goals.begin(), goals.end(), [&](const auto& a, const auto& b) {
     return rank(a) < rank(b);
   });
-  if (!goals.empty() && goals.front().region_id) {
-    const auto id = goals.front().region_id;
-    if (stack_.empty() || stack_.back() != id) stack_.push_back(id);
-    regions_.at(id).state = RegionState::kActive;
-    last_region_ = id;
-  }
+  // Ranking is not execution: a rejected first candidate must not push a
+  // speculative region onto the DFS stack. Enter() commits an accepted goal.
   return goals;
 }
 
