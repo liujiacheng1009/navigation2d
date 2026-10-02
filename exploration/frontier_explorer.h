@@ -103,6 +103,8 @@ class FrontierExplorer {
   // This distinguishes an unvisited room entrance from unknown space behind
   // a wall or outside the observed map boundary.
   std::size_t ReachableUnknownCells(double robot_x, double robot_y) const;
+  std::size_t RegionFrontierCells(double anchor_x, double anchor_y,
+                                  double radius_m) const;
   std::size_t KnownCells() const;
   int completed_goals() const { return completed_goals_; }
   int failed_goals() const { return failed_goals_; }

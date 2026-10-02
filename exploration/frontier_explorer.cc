@@ -1046,6 +1046,22 @@ std::size_t FrontierExplorer::ReachableUnknownCells(double robot_x, double robot
   return reachable_unknown;
 }
 
+std::size_t FrontierExplorer::RegionFrontierCells(double anchor_x, double anchor_y,
+                                                  double radius_m) const {
+  if (observation_map_.width <= 0 || observation_map_.height <= 0 ||
+      observation_map_.resolution <= 0. || radius_m <= 0.) return 0;
+  std::size_t count = 0;
+  for (int row = 0; row < observation_map_.height; ++row) {
+    for (int col = 0; col < observation_map_.width; ++col) {
+      if (!RawFrontier(col, row)) continue;
+      const auto x = observation_map_.origin_x + (col + .5) * observation_map_.resolution;
+      const auto y = observation_map_.origin_y + (row + .5) * observation_map_.resolution;
+      if (std::hypot(x - anchor_x, y - anchor_y) <= radius_m) ++count;
+    }
+  }
+  return count;
+}
+
 bool FrontierExplorer::CompletionEligible(std::size_t initial_known_cells) const {
   const auto growth = std::max(config_.minimum_known_cell_growth,
       static_cast<std::size_t>(std::ceil(initial_known_cells * config_.minimum_known_growth_ratio)));
