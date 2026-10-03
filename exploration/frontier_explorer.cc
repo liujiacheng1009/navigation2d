@@ -955,20 +955,17 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
            region_distance[viewpoint] > region_radius_cells))
         continue;
       const int distance = distances[viewpoint];
-      // This is the potential-minus-gain cost used by the established
-      // explore_lite frontier search: prefer reachable information gain but
-      // retain a linear travel penalty. Using a ratio here made the policy
-      // repeatedly switch to tiny nearby boundaries and produced zig-zags.
+      // The tour is a local coverage walk. Once the connected neighbourhood
+      // is selected, travel distance is the primary criterion; otherwise a
+      // large visible boundary can make the robot skip a nearby doorway and
+      // cross the room unnecessarily. Information gain remains a tie-breaker
+      // for candidates at essentially the same distance.
       const double travel_m = distance * map_.resolution;
-      // This is an informative-path objective, not a nearest-frontier rule.
-      // A stable, long visible boundary is worth one deliberate transit;
-      // repeatedly serving neighbouring one-cell fragments is not.  The
-      // cost term remains present so this is still a feasible online tour.
       const double utility = 1.5 * candidate->information_gain - .65 * travel_m;
-      if (utility > best_utility + 1e-9 ||
-          (std::abs(utility - best_utility) <= 1e-9 &&
-           (distance < best_distance ||
-            (distance == best_distance &&
+      if (distance < best_distance ||
+          (distance == best_distance &&
+           (utility > best_utility + 1e-9 ||
+            (std::abs(utility - best_utility) <= 1e-9 &&
              (next == remaining.end() || candidate->frontier_cells > next->frontier_cells))))) {
         next = candidate;
         best_distance = distance;
