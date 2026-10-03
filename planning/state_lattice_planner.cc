@@ -35,6 +35,11 @@ std::optional<double> StateLatticePlanner::PrimitiveCost(
   if (nx < 0 || ny < 0 || nx >= lattice_width_ || ny >= lattice_height_) return std::nullopt;
   const auto [wx, wy] = active_costmap_->grid().CellCenter(x, y);
   double cost_integral = 0.;
+  double clearance_penalty = 0.;
+  // Clearance is a preference, not a constraint.  A wide-room route should
+  // beat an equally short wall-hugging route, while a narrow passage remains
+  // usable when it is the only collision-free connection.
+  const double preferred_clearance = config_.robot_radius + .18;
   for (const auto& sample : primitive.samples) {
     const double px = wx + X(sample), py = wy + Y(sample);
     if (footprint_lookup_) {
@@ -45,6 +50,12 @@ std::optional<double> StateLatticePlanner::PrimitiveCost(
     }
     const auto [cx, cy] = active_costmap_->grid().ToCell(px, py);
     cost_integral += static_cast<double>(active_costmap_->cost(cx, cy)) / 252.;
+    const double clearance = distance_field_->distance(px, py);
+    if (clearance < preferred_clearance) {
+      const double deficit = std::clamp(
+          (preferred_clearance - clearance) / preferred_clearance, 0., 1.);
+      clearance_penalty += deficit * deficit;
+    }
   }
   double transition = primitive.type == planning_internal::MotionType::kRotate
       ? config_.lattice_rotation_cost * std::abs(primitive.yaw_change) : primitive.length_m;
@@ -52,6 +63,8 @@ std::optional<double> StateLatticePlanner::PrimitiveCost(
     transition *= config_.lattice_reverse_penalty;
   transition += config_.lattice_cost_penalty * primitive.length_m *
                 cost_integral / primitive.samples.size();
+  transition += 1.5 * primitive.length_m * clearance_penalty /
+                primitive.samples.size();
   return transition;
 }
 
