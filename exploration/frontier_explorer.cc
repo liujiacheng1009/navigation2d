@@ -33,10 +33,12 @@ constexpr double kVisitedFrontierRadius = .60;
 // unknown area is visible from another candidate.
 double ViewpointScore(double information_gain, double travel, double standoff,
                       double gain_weight) {
-  const double standoff_penalty = standoff > .30 ? 60.0 + 4.0 * standoff
-                                                    : 4.0 * standoff;
-  return gain_weight * 8.0 * information_gain / (0.45 + travel) -
-         standoff_penalty;
+  // Keep the utility in the same scale as the observable area.  The previous
+  // discontinuous 60-point penalty made every useful doorway viewpoint score
+  // around -60, hiding information gain and encouraging repeated retries of
+  // the same mouth.  Travel is handled by the region scheduler; this value
+  // only ranks viewpoints inside one frontier cluster.
+  return gain_weight * information_gain / (0.45 + travel) - 2.0 * standoff;
 }
 
 }  // namespace
@@ -1151,9 +1153,17 @@ void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded
                           known, 20000u, true});
     if (region_complete) ++completed_goals_;
   } else {
-    blacklist_.push_back({goal.x, goal.y,
-                          std::max(map_.resolution, config_.footprint_clearance),
-                          known, 600u, false});
+    // A failed route is evidence about the doorway/frontier, not just the
+    // exact viewpoint.  Only cooling the pose lets the next map revision
+    // regenerate the same three poses around one mouth, which produced the
+    // long pure-rotation loops seen on the robot.  Cool the frontier mouth as
+    // well; fresh map growth can still make it eligible again.
+    const double pose_radius = std::max(map_.resolution,
+                                        config_.footprint_clearance);
+    blacklist_.push_back({goal.x, goal.y, pose_radius, known, 600u, false});
+    blacklist_.push_back({goal.frontier_x, goal.frontier_y,
+                          std::max(.45, config_.footprint_clearance),
+                          known, 1500u, false});
     ++failed_goals_;
   }
 }

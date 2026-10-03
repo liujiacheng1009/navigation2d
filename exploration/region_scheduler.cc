@@ -377,8 +377,13 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
     // then gives adjacent regions priority over distant ones, and score is a
     // final tie-breaker among similarly placed views.
     const double distance = std::hypot(g.x - x, g.y - y);
+    // Stay in the current connected region and prefer nearby viewpoints, but
+    // let a materially larger information gain win instead of treating all
+    // candidates as equal-distance doorway retries.
+    const double gain_per_meter = g.information_gain / (0.45 + distance);
     return std::tuple(preferred && !descendant(g.region_id, preferred),
-                      depth(g.region_id), distance, -g.score, g.region_id, g.x, g.y);
+                      depth(g.region_id), distance - .20 * gain_per_meter,
+                      -gain_per_meter, g.region_id, g.x, g.y);
   };
   std::stable_sort(goals.begin(), goals.end(), [&](const auto& a, const auto& b) {
     return rank(a) < rank(b);
