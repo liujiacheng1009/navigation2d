@@ -371,12 +371,14 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
     return it == hops.end() ? std::numeric_limits<int>::max() : it->second;
   };
   auto rank = [&](const ExplorationGoal& g) {
-    // NBV utility is the primary decision. DFS/BFS topology only breaks
-    // near-equal choices, so a high-gain view in an adjacent room is not
-    // hidden merely because the current region has a cheap low-gain goal.
-    // Finish candidates in the active connected region before cross-region transit.
+    // Complete the active connected region before crossing a doorway. Within
+    // that region, choose the nearest viewpoint first: a large information
+    // gain does not justify repeatedly crossing the same corridor. BFS depth
+    // then gives adjacent regions priority over distant ones, and score is a
+    // final tie-breaker among similarly placed views.
+    const double distance = std::hypot(g.x - x, g.y - y);
     return std::tuple(preferred && !descendant(g.region_id, preferred),
-                      depth(g.region_id), -g.score, g.region_id, g.x, g.y);
+                      depth(g.region_id), distance, -g.score, g.region_id, g.x, g.y);
   };
   std::stable_sort(goals.begin(), goals.end(), [&](const auto& a, const auto& b) {
     return rank(a) < rank(b);
