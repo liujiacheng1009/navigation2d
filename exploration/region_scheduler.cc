@@ -374,9 +374,9 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
     // NBV utility is the primary decision. DFS/BFS topology only breaks
     // near-equal choices, so a high-gain view in an adjacent room is not
     // hidden merely because the current region has a cheap low-gain goal.
-    return std::tuple(-g.score,
-                      preferred && !descendant(g.region_id, preferred),
-                      depth(g.region_id), g.region_id, g.x, g.y);
+    // Finish candidates in the active connected region before cross-region transit.
+    return std::tuple(preferred && !descendant(g.region_id, preferred),
+                      depth(g.region_id), -g.score, g.region_id, g.x, g.y);
   };
   std::stable_sort(goals.begin(), goals.end(), [&](const auto& a, const auto& b) {
     return rank(a) < rank(b);

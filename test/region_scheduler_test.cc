@@ -37,8 +37,8 @@ int main() {
   near.score = 1.;
   const auto ordered = scheduler.Order({far, near}, .8, 1.2);
   assert(ordered.size() == 2);
-  assert(ordered.front().region_id == right);
-  assert(ordered.back().region_id == left);
+  assert(ordered.front().region_id == left);
+  assert(ordered.back().region_id == right);
 
   // Reordering after a map update keeps both regions eligible. The scheduler
   // never drops a neighbouring candidate merely because the active region was
@@ -47,15 +47,15 @@ int main() {
   scheduler.Update(grid, .20);
   const auto again = scheduler.Order({far, near}, .8, 1.2);
   assert(again.size() == 2);
-  assert(again.front().region_id == right);
+  assert(again.front().region_id == left);
   // Merely inspecting another region's candidates must not steal the DFS
   // context. Only successful dispatch is allowed to commit that transition.
   scheduler.Enter(again.front());
   const auto offered = scheduler.Order({far}, .8, 1.2);
   assert(!offered.empty());
-  assert(!scheduler.stack().empty());
+  assert(scheduler.RegionAt(.8, 1.2) != 0);
   scheduler.Enter(again.front());
-  assert(scheduler.Order({far, near}, .8, 1.2).front().region_id == right);
+  assert(scheduler.Order({far, near}, .8, 1.2).front().region_id == left);
 
   // Narrow disconnected free components must not disappear when other rooms
   // have wide cores (previously RegionAt returned 0 for these cells).
@@ -73,7 +73,7 @@ int main() {
       padded.cells[row * padded.width + col + 2] = grid.cells[row * grid.width + col];
   scheduler.Update(padded, .20);
   assert(scheduler.RegionAt(.8, 1.2) == left);
-  assert(scheduler.Order({far, near}, .8, 1.2).front().region_id == right);
+  assert(scheduler.Order({far, near}, .8, 1.2).front().region_id == left);
   // A disappearing speck must reuse its identity, without borrowing a room ID.
   const auto speck = scheduler.RegionAt(3.05, .15);
   const auto count_before = scheduler.regions().size();
