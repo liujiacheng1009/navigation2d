@@ -74,5 +74,44 @@ int main() {
   scheduler.Update(padded, .20);
   assert(scheduler.RegionAt(.8, 1.2) == left);
   assert(scheduler.Order({far, near}, .8, 1.2).front().region_id == right);
+  // A disappearing speck must reuse its identity, without borrowing a room ID.
+  const auto speck = scheduler.RegionAt(3.05, .15);
+  const auto count_before = scheduler.regions().size();
+  for (int cycle = 0; cycle < 100; ++cycle) {
+    auto missing = padded;
+    missing.cells[missing.width + 32] = 100;
+    scheduler.Update(missing, .20);
+    scheduler.Update(padded, .20);
+    assert(scheduler.RegionAt(3.05, .15) == speck);
+    assert(scheduler.regions().size() == count_before);
+  }
+  // Merge two disconnected corridors, then split them repeatedly.
+  navigation2d::ExplorationGrid corridors;
+  corridors.width = 30; corridors.height = 5; corridors.resolution = .1;
+  corridors.cells.assign(150, 100);
+  for (int col = 2; col < 28; ++col) corridors.cells[60 + col] = 0;
+  corridors.cells[75] = 100;
+  navigation2d::RegionScheduler split_scheduler;
+  split_scheduler.Update(corridors, .2);
+  const auto first = split_scheduler.RegionAt(.55, .25);
+  const auto second = split_scheduler.RegionAt(2.55, .25);
+  assert(first && second && first != second);
+  for (int cycle = 0; cycle < 100; ++cycle) {
+    auto merged = corridors;
+    merged.cells[75] = 0;
+    split_scheduler.Update(merged, .2);
+    split_scheduler.Update(corridors, .2);
+    assert(split_scheduler.RegionAt(.55, .25) == first);
+    assert(split_scheduler.RegionAt(2.55, .25) == second);
+    assert(split_scheduler.regions().size() == 2);
+  }
+  // An actually new island gets a distinct ID and remains available.
+  corridors.cells[31] = 0;
+  split_scheduler.Update(corridors, .2);
+  const auto fresh = split_scheduler.RegionAt(.15, .15);
+  assert(fresh && fresh != first && fresh != second);
+  corridors.cells[31] = 100;
+  for (int i = 0; i < 70; ++i) split_scheduler.Update(corridors, .2);
+  assert(split_scheduler.regions().count(fresh) == 0);
   return 0;
 }
