@@ -54,7 +54,11 @@ struct FrontierExplorerConfig {
   // A frontier caused by one bad ray must not immediately become a navigation
   // task.  Require it to survive consecutive online-map observations.
   double frontier_stability_radius = .35;
-  int required_frontier_observations = 2;
+  // Frontier hypotheses are filtered by the current-map geometry and then
+  // validated by the real planner before execution. Do not block navigation
+  // on repeated representative observations; online maps may move them every
+  // update. Association and cooldown still prevent duplicate exploration.
+  int required_frontier_observations = 1;
   int minimum_completed_goals = 3;
   std::size_t minimum_known_cell_growth = 500;
   double minimum_known_growth_ratio = .25;
