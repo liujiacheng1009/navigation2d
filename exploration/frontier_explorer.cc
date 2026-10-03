@@ -803,6 +803,19 @@ std::vector<ExplorationGoal> FrontierExplorer::StableGoals(
     track->last_observation = stability_observation_;
     if (track->observations >= config_.required_frontier_observations) stable.push_back(goal);
   }
+  // Online mapping can move a doorway representative on every update while
+  // the doorway itself remains valid. Do not leave the robot idle forever
+  // waiting for an exact representative match; after a bounded number of
+  // non-empty observations, let the authoritative navigation precheck decide.
+  if (goals.empty() || !stable.empty()) {
+    unstable_goal_cycles_ = 0;
+  } else {
+    ++unstable_goal_cycles_;
+    if (unstable_goal_cycles_ >= 3) {
+      stable = goals;
+      unstable_goal_cycles_ = 0;
+    }
+  }
   return stable;
 }
 

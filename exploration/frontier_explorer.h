@@ -158,6 +158,7 @@ class FrontierExplorer {
   };
   std::vector<FrontierTrack> frontier_tracks_;
   std::uint64_t stability_observation_ = 0;
+  int unstable_goal_cycles_ = 0;
   int completed_goals_ = 0;
   int failed_goals_ = 0;
   std::size_t raw_frontier_cells_ = 0;
