@@ -348,10 +348,18 @@ std::string RegionScheduler::Audit() const {
   out << "stack=[";
   for (auto id : stack_) out << id << ',';
   out << "] regions=[";
-  for (const auto& [id, r] : regions_) if (r.visible)
+  // Audit is emitted from the navigation executor. Dumping every historical
+  // region made this string grow to thousands of records and starved the
+  // heartbeat/pose callbacks, producing a false communication failure.
+  std::size_t emitted = 0, visible = 0;
+  for (const auto& [id, r] : regions_) if (r.visible) {
+    ++visible;
+    if (emitted++ >= 24) continue;
     out << "{id=" << id << ",parent=" << r.parent << ",state=" << StateName(r.state)
         << ",raw=" << r.frontier_cells << ",candidates=" << r.candidates
         << ",empty_updates=" << r.stable_empty_updates << "},";
+  }
+  if (visible > 24) out << "...+" << (visible - 24) << " more";
   out << ']';
   return out.str();
 }

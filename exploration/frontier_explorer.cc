@@ -518,7 +518,12 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
         }
       }
       doorway_viewpoint_found:
-      if (!doorway_component) continue;
+      // Once the map is mature, a 1--5 cell component is almost always a
+      // residual ray/raster fragment from an already observed boundary. Keep
+      // the doorway exception only during the initial map phase; real narrow
+      // entrances are represented by their larger connected boundary after
+      // the first scan through them.
+      if (!doorway_component || KnownCells() >= 10000) continue;
     }
     double mean_col = 0., mean_row = 0.;
     for (int index : cluster) { mean_col += index % map_.width; mean_row += index / map_.width; }
