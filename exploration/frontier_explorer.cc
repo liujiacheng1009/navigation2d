@@ -787,34 +787,32 @@ std::vector<ExplorationGoal> FrontierExplorer::StableGoals(
   for (const auto& goal : goals) {
     auto track = std::min_element(frontier_tracks_.begin(), frontier_tracks_.end(),
         [&](const FrontierTrack& first, const FrontierTrack& second) {
-          return std::hypot(first.x - goal.frontier_x, first.y - goal.frontier_y) <
-                 std::hypot(second.x - goal.frontier_x, second.y - goal.frontier_y);
+          const double first_distance = std::min(
+              std::hypot(first.x - goal.frontier_x, first.y - goal.frontier_y),
+              std::hypot(first.goal_x - goal.x, first.goal_y - goal.y));
+          const double second_distance = std::min(
+              std::hypot(second.x - goal.frontier_x, second.y - goal.frontier_y),
+              std::hypot(second.goal_x - goal.x, second.goal_y - goal.y));
+          return first_distance < second_distance;
         });
+    const double association_distance = track == frontier_tracks_.end()
+        ? std::numeric_limits<double>::infinity()
+        : std::min(std::hypot(track->x - goal.frontier_x, track->y - goal.frontier_y),
+                   std::hypot(track->goal_x - goal.x, track->goal_y - goal.y));
     if (track == frontier_tracks_.end() ||
-        std::hypot(track->x - goal.frontier_x, track->y - goal.frontier_y) >
-            config_.frontier_stability_radius) {
-      frontier_tracks_.push_back({goal.frontier_x, goal.frontier_y, 1, stability_observation_});
+        association_distance > config_.frontier_stability_radius) {
+      frontier_tracks_.push_back({goal.frontier_x, goal.frontier_y, goal.x, goal.y,
+                                  1, stability_observation_});
       if (config_.required_frontier_observations <= 1) stable.push_back(goal);
       continue;
     }
     if (track->last_observation != stability_observation_) ++track->observations;
     track->x = goal.frontier_x;
     track->y = goal.frontier_y;
+    track->goal_x = goal.x;
+    track->goal_y = goal.y;
     track->last_observation = stability_observation_;
     if (track->observations >= config_.required_frontier_observations) stable.push_back(goal);
-  }
-  // Online mapping can move a doorway representative on every update while
-  // the doorway itself remains valid. Do not leave the robot idle forever
-  // waiting for an exact representative match; after a bounded number of
-  // non-empty observations, let the authoritative navigation precheck decide.
-  if (goals.empty() || !stable.empty()) {
-    unstable_goal_cycles_ = 0;
-  } else {
-    ++unstable_goal_cycles_;
-    if (unstable_goal_cycles_ >= 3) {
-      stable = goals;
-      unstable_goal_cycles_ = 0;
-    }
   }
   return stable;
 }

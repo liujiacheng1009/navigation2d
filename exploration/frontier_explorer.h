@@ -54,10 +54,7 @@ struct FrontierExplorerConfig {
   // A frontier caused by one bad ray must not immediately become a navigation
   // task.  Require it to survive consecutive online-map observations.
   double frontier_stability_radius = .35;
-  // A candidate may be sent after the first observation.  The navigation
-  // precheck and collision monitor are authoritative for execution; delaying
-  // here can starve exploration when the online-map representative drifts.
-  int required_frontier_observations = 1;
+  int required_frontier_observations = 2;
   int minimum_completed_goals = 3;
   std::size_t minimum_known_cell_growth = 500;
   double minimum_known_growth_ratio = .25;
@@ -156,12 +153,12 @@ class FrontierExplorer {
   std::vector<BlacklistEntry> blacklist_;
   struct FrontierTrack {
     double x = 0., y = 0.;
+    double goal_x = 0., goal_y = 0.;
     int observations = 0;
     std::uint64_t last_observation = 0;
   };
   std::vector<FrontierTrack> frontier_tracks_;
   std::uint64_t stability_observation_ = 0;
-  int unstable_goal_cycles_ = 0;
   int completed_goals_ = 0;
   int failed_goals_ = 0;
   std::size_t raw_frontier_cells_ = 0;
