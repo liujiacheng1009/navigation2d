@@ -387,6 +387,56 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
       reachable.push_back(next);
     }
   }
+  // Frontier discovery and goal execution use different contracts. The
+  // execution graph requires complete footprint clearance, while a physical
+  // doorway may be narrower than that graph and still be passable. Build a
+  // relaxed discovery graph for finding room boundaries only; StartNavigation
+  // continues to validate every dispatched goal against the real inflated map.
+  std::vector<int> discovery_travel_cells(map_.cells.size(), -1);
+  int discovery_start = start;
+  if (!discovery_safe[static_cast<std::size_t>(discovery_start)]) {
+    double nearest_discovery = std::numeric_limits<double>::infinity();
+    for (int row = std::max(0, robot_row - start_search);
+         row <= std::min(map_.height - 1, robot_row + start_search); ++row) {
+      for (int col = std::max(0, robot_col - start_search);
+           col <= std::min(map_.width - 1, robot_col + start_search); ++col) {
+        const int index = row * map_.width + col;
+        if (!discovery_safe[static_cast<std::size_t>(index)]) continue;
+        const double distance = std::hypot(col - robot_col, row - robot_row);
+        if (distance < nearest_discovery) {
+          nearest_discovery = distance;
+          discovery_start = index;
+        }
+      }
+    }
+  }
+  if (discovery_start >= 0 &&
+      discovery_safe[static_cast<std::size_t>(discovery_start)]) {
+    std::deque<int> discovery_queue{discovery_start};
+    discovery_travel_cells[static_cast<std::size_t>(discovery_start)] = 0;
+    while (!discovery_queue.empty()) {
+      const int current = discovery_queue.front();
+      discovery_queue.pop_front();
+      const int row = current / map_.width;
+      const int col = current % map_.width;
+      for (int direction = 0; direction < 4; ++direction) {
+        const int x = col + cardinal_x[direction], y = row + cardinal_y[direction];
+        if (x < 0 || y < 0 || x >= map_.width || y >= map_.height) continue;
+        const int next = y * map_.width + x;
+        if (!discovery_safe[static_cast<std::size_t>(next)] ||
+            discovery_travel_cells[static_cast<std::size_t>(next)] >= 0) continue;
+        discovery_travel_cells[static_cast<std::size_t>(next)] =
+            discovery_travel_cells[static_cast<std::size_t>(current)] + 1;
+        discovery_queue.push_back(next);
+      }
+    }
+  }
+  // Retain exact safe-graph distances where available. Relaxed-only cells are
+  // discovery hints and will be rejected individually if the live planner
+  // cannot execute their path; they must not suppress the whole room.
+  for (std::size_t index = 0; index < travel_cells.size(); ++index) {
+    if (travel_cells[index] < 0) travel_cells[index] = discovery_travel_cells[index];
+  }
   // During the first scan, costmap inflation can temporarily mark every
   // viewpoint around the robot unsafe even though the raw map already has a
   // connected free corridor and visible unknown boundary.  Without a first
