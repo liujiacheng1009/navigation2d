@@ -944,6 +944,22 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
     auto next = remaining.end();
     int best_distance = std::numeric_limits<int>::max();
     double best_utility = -std::numeric_limits<double>::infinity();
+    // Keep the tour local, but retain NBV discrimination inside that local
+    // window. A fixed one-metre allowance avoids a far candidate winning over
+    // a nearby doorway while still allowing a clearly higher-gain viewpoint
+    // to win when it is only a short detour away.
+    int nearest_distance = std::numeric_limits<int>::max();
+    for (const auto& candidate : remaining) {
+      const int viewpoint = nearest_safe(candidate.x, candidate.y);
+      if (viewpoint < 0 || distances[viewpoint] < 0) continue;
+      if (!region_distance.empty() &&
+          (region_distance[viewpoint] < 0 ||
+           region_distance[viewpoint] > region_radius_cells)) continue;
+      nearest_distance = std::min(nearest_distance, distances[viewpoint]);
+    }
+    const int local_distance_limit = nearest_distance == std::numeric_limits<int>::max()
+        ? nearest_distance
+        : nearest_distance + std::max(1, static_cast<int>(std::ceil(1.0 / map_.resolution)));
     for (auto candidate = remaining.begin(); candidate != remaining.end(); ++candidate) {
       const int viewpoint = nearest_safe(candidate->x, candidate->y);
       if (viewpoint < 0 || distances[viewpoint] < 0) continue;
@@ -955,17 +971,16 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
            region_distance[viewpoint] > region_radius_cells))
         continue;
       const int distance = distances[viewpoint];
-      // The tour is a local coverage walk. Once the connected neighbourhood
-      // is selected, travel distance is the primary criterion; otherwise a
-      // large visible boundary can make the robot skip a nearby doorway and
-      // cross the room unnecessarily. Information gain remains a tie-breaker
-      // for candidates at essentially the same distance.
+      if (distance > local_distance_limit) continue;
+      // The tour is a local coverage walk. The distance window prevents a
+      // remote high-gain boundary from skipping a nearby doorway; within the
+      // window, NBV gain per metre is the decision criterion.
       const double travel_m = distance * map_.resolution;
       const double utility = 1.5 * candidate->information_gain - .65 * travel_m;
-      if (distance < best_distance ||
-          (distance == best_distance &&
-           (utility > best_utility + 1e-9 ||
-            (std::abs(utility - best_utility) <= 1e-9 &&
+      if (utility > best_utility + 1e-9 ||
+          (std::abs(utility - best_utility) <= 1e-9 &&
+           (distance < best_distance ||
+            (distance == best_distance &&
              (next == remaining.end() || candidate->frontier_cells > next->frontier_cells))))) {
         next = candidate;
         best_distance = distance;
