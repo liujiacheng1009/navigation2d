@@ -148,12 +148,32 @@ void RegionScheduler::Update(const ExplorationGrid& g, double clearance) {
     }
   }
 
-  // Match old/new partitions by overlapping WORLD cells, not local indices
-  // or frontier centroids. Map padding/origin changes preserve identity.
+  // Preserve ownership evidence across temporary missing cells and merges.
+  // Matching only the preceding raster loses every absorbed/disappearing ID.
+  // Resolution changes start a new identity domain; padding does not.
+  if (resolution_ > 0. && std::abs(resolution_ - g.resolution) > 1e-9) {
+    history_.clear(); labels_.clear(); regions_.clear(); stack_.clear();
+    last_region_ = 0; width_ = height_ = 0;
+  }
+  ++revision_;
+  constexpr std::uint64_t kHistoryUpdates = 64;
+  for (auto it = history_.begin(); it != history_.end();) {
+    if (revision_ - it->second.seen > kHistoryUpdates) it = history_.erase(it);
+    else ++it;
+  }
+  const auto world_cell = [&](int i) {
+    return std::make_pair(
+        static_cast<std::int64_t>(std::floor(
+            (g.origin_x + (i % g.width + .5) * g.resolution) / g.resolution)),
+        static_cast<std::int64_t>(std::floor(
+            (g.origin_y + (i / g.width + .5) * g.resolution) / g.resolution)));
+  };
   std::map<std::pair<int, RegionId>, std::size_t> overlaps;
   for (int i = 0; i < n; ++i) if (components[i]) {
-    const auto old = RegionAt(g.origin_x + (i % g.width + .5) * g.resolution,
-                              g.origin_y + (i / g.width + .5) * g.resolution);
+    const auto remembered = history_.find(world_cell(i));
+    const auto old = remembered != history_.end() ? remembered->second.owner :
+        RegionAt(g.origin_x + (i % g.width + .5) * g.resolution,
+                 g.origin_y + (i / g.width + .5) * g.resolution);
     if (old) ++overlaps[{components[i], old}];
   }
   std::vector<std::tuple<std::size_t, int, RegionId>> matches;
@@ -224,6 +244,37 @@ void RegionScheduler::Update(const ExplorationGrid& g, double clearance) {
     return !regions_.at(id).visible;
   }), stack_.end());
   stack_.erase(std::unique(stack_.begin(), stack_.end()), stack_.end());
+  for (int i = 0; i < n; ++i) if (labels[i]) {
+    const auto key = world_cell(i);
+    auto [it, inserted] = history_.try_emplace(key, CellHistory{labels[i], revision_});
+    // Do not overwrite an absorbed region's cells with the merge winner:
+    // they are what lets a later split recover its original identity.
+    // On a true split the old owner is already assigned to another child.
+    // Transfer these cells to this child once, so subsequent updates reuse it.
+    if (it->second.owner != labels[i] && used.count(it->second.owner))
+      it->second.owner = labels[i];
+    it->second.seen = revision_;
+    (void)inserted;
+  }
+  // Retain only identities supported by recent cells or live graph context.
+  // Preserve ancestors so DFS parent links cannot dangle.
+  std::set<RegionId> retained(stack_.begin(), stack_.end());
+  if (last_region_) retained.insert(last_region_);
+  for (const auto& [cell, h] : history_) { (void)cell; retained.insert(h.owner); }
+  for (const auto& [id, r] : regions_) if (r.visible) retained.insert(id);
+  const auto roots = retained;
+  for (auto id : roots) {
+    std::set<RegionId> visited;
+    while (id && visited.insert(id).second) {
+      const auto it = regions_.find(id);
+      if (it == regions_.end()) break;
+      retained.insert(id); id = it->second.parent;
+    }
+  }
+  for (auto it = regions_.begin(); it != regions_.end();) {
+    if (!retained.count(it->first)) it = regions_.erase(it);
+    else ++it;
+  }
   width_ = g.width; height_ = g.height; resolution_ = g.resolution;
   origin_x_ = g.origin_x; origin_y_ = g.origin_y; labels_ = std::move(labels);
 }
@@ -349,8 +400,8 @@ std::string RegionScheduler::Audit() const {
   for (auto id : stack_) out << id << ',';
   out << "] regions=[";
   // Audit is emitted from the navigation executor. Dumping every historical
-  // region made this string grow to thousands of records and starved the
-  // heartbeat/pose callbacks, producing a false communication failure.
+  // region increases diagnostic overhead. Bound output independently of
+  // identity history; a causal link to heartbeat loss has not been measured.
   std::size_t emitted = 0, visible = 0;
   for (const auto& [id, r] : regions_) if (r.visible) {
     ++visible;

@@ -46,5 +46,10 @@ class RegionScheduler {
   RegionId next_id_ = 1, last_region_ = 0;
   std::vector<RegionId> labels_, stack_;
   std::map<RegionId, RegionRecord> regions_;
+  // Last owner of a world cell survives temporary disappearance and merges.
+  struct CellHistory { RegionId owner; std::uint64_t seen; };
+  std::map<std::pair<std::int64_t, std::int64_t>, CellHistory> history_;
+  std::uint64_t revision_ = 0;
+
 };
 }  // namespace navigation2d
