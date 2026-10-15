@@ -85,6 +85,14 @@ int main() {
   const auto tour = tour_explorer.BuildTour(tour_robot_x, tour_robot_y);
   assert(!tour.empty());
   assert(tour.front().x < 1.5);
+  // Near-duplicate hallway standoffs for the same mouth must not fill the tour.
+  for (std::size_t i = 0; i < tour.size(); ++i) {
+    for (std::size_t j = i + 1; j < tour.size(); ++j) {
+      assert(std::hypot(tour[i].x - tour[j].x, tour[i].y - tour[j].y) > .50 ||
+             std::hypot(tour[i].frontier_x - tour[j].frontier_x,
+                        tour[i].frontier_y - tour[j].frontier_y) > .45);
+    }
+  }
 
   // One unknown cell in an open room is below minimum_frontier_cells, so it
   // stays out of the exploring tour. It must still become an approach goal.

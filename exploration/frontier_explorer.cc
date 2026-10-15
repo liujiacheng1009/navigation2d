@@ -873,6 +873,48 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
   auto remaining = SelectGoals(robot_x, robot_y);
   if (remaining.empty()) return {};
 
+  // One physical doorway often fragments into several frontier clusters that
+  // all pick nearly the same hallway standoff. Collapse those into a single
+  // observation task before ordering the tour, otherwise the UI shows a pile
+  // of T-labels and the robot revisits the same mouth.
+  constexpr double kMergeViewpointM = .55;
+  constexpr double kMergeFrontierM = .50;
+  std::vector<ExplorationGoal> merged;
+  merged.reserve(remaining.size());
+  for (const auto& goal : remaining) {
+    bool absorbed = false;
+    for (auto& keep : merged) {
+      const double viewpoint_gap = std::hypot(keep.x - goal.x, keep.y - goal.y);
+      const double frontier_gap =
+          std::hypot(keep.frontier_x - goal.frontier_x, keep.frontier_y - goal.frontier_y);
+      if (viewpoint_gap > kMergeViewpointM && frontier_gap > kMergeFrontierM) continue;
+      if (goal.information_gain > keep.information_gain + 1e-9 ||
+          (std::abs(goal.information_gain - keep.information_gain) <= 1e-9 &&
+           goal.frontier_cells > keep.frontier_cells) ||
+          (std::abs(goal.information_gain - keep.information_gain) <= 1e-9 &&
+           goal.frontier_cells == keep.frontier_cells && goal.score > keep.score)) {
+        keep = goal;
+      } else {
+        keep.frontier_cells = std::max(keep.frontier_cells, goal.frontier_cells);
+        keep.information_gain = std::max(keep.information_gain, goal.information_gain);
+      }
+      absorbed = true;
+      break;
+    }
+    if (!absorbed) merged.push_back(goal);
+  }
+  remaining = std::move(merged);
+
+  // Prefer a pose past the doorway mouth when the planning graph already
+  // opened that corridor. Hallway standoffs alone leave rooms unexplored.
+  for (auto& goal : remaining) {
+    if (auto probe = SelectEntryProbe(goal, robot_x, robot_y, .22, .70)) {
+      goal.x = probe->x;
+      goal.y = probe->y;
+      goal.yaw = probe->yaw;
+    }
+  }
+
   // `safe` is the vertex set of the free-space connectivity graph.  Edges are
   // the four cardinal grid neighbours, so BFS distance is the path length the
   // robot can actually traverse, not a straight-line proxy through walls.
