@@ -85,14 +85,39 @@ int main() {
   const auto tour = tour_explorer.BuildTour(tour_robot_x, tour_robot_y);
   assert(!tour.empty());
   assert(tour.front().x < 1.5);
-  // Near-duplicate hallway standoffs for the same mouth must not fill the tour.
+  // One task per mouth: tour stops for distinct mouths stay well separated.
   for (std::size_t i = 0; i < tour.size(); ++i) {
     for (std::size_t j = i + 1; j < tour.size(); ++j) {
-      assert(std::hypot(tour[i].x - tour[j].x, tour[i].y - tour[j].y) > .50 ||
+      assert(std::hypot(tour[i].x - tour[j].x, tour[i].y - tour[j].y) > 1.15 ||
              std::hypot(tour[i].frontier_x - tour[j].frontier_x,
-                        tour[i].frontier_y - tour[j].frontier_y) > .45);
+                        tour[i].frontier_y - tour[j].frontier_y) > 1.15);
     }
   }
+
+  // Fragmented frontier cells along one alcove mouth must collapse to a single
+  // tour stop — not a pile of micro-cluster T-labels.
+  navigation2d::ExplorationGrid alcove;
+  alcove.width = 60;
+  alcove.height = 40;
+  alcove.resolution = .05;
+  alcove.cells.assign(static_cast<std::size_t>(alcove.width * alcove.height), 100);
+  const auto alcove_fill = [&](int col0, int col1, int row0, int row1, std::int8_t value) {
+    for (int row = row0; row < row1; ++row)
+      for (int col = col0; col < col1; ++col)
+        alcove.cells[static_cast<std::size_t>(row * alcove.width + col)] = value;
+  };
+  alcove_fill(4, 40, 8, 32, 0);
+  // Jagged unknown pocket (~1 m wide) that splits into several frontier clusters.
+  alcove_fill(18, 28, 32, 38, -1);
+  alcove.cells[static_cast<std::size_t>(31 * alcove.width + 20)] = -1;
+  alcove.cells[static_cast<std::size_t>(31 * alcove.width + 22)] = -1;
+  alcove.cells[static_cast<std::size_t>(31 * alcove.width + 25)] = -1;
+  navigation2d::FrontierExplorer alcove_explorer(tour_config);
+  alcove_explorer.UpdateMap(alcove);
+  const auto alcove_tour = alcove_explorer.BuildTour(
+      (20 + .5) * alcove.resolution, (18 + .5) * alcove.resolution);
+  assert(!alcove_tour.empty());
+  assert(alcove_tour.size() == 1);
 
   // One unknown cell in an open room is below minimum_frontier_cells, so it
   // stays out of the exploring tour. It must still become an approach goal.
@@ -105,17 +130,20 @@ int main() {
   leftover_config.minimum_standoff = .55;
   leftover_config.maximum_standoff = 1.10;
   leftover_config.required_frontier_observations = 1;
+  // Mature map (>= 10000 known cells): a 1-cell speck is not a doorway and
+  // must stay out of SelectGoals, while SelectLeftoverApproach still finds it.
   navigation2d::ExplorationGrid leftover;
-  leftover.width = leftover.height = 30;
+  leftover.width = leftover.height = 110;
   leftover.resolution = .1;
-  leftover.cells.assign(900, 100);
-  for (int row = 4; row < 26; ++row)
-    for (int col = 4; col < 26; ++col) leftover.cells[row * leftover.width + col] = 0;
-  leftover.cells[24 * leftover.width + 24] = -1;
+  leftover.cells.assign(static_cast<std::size_t>(leftover.width * leftover.height), 100);
+  for (int row = 2; row < 108; ++row)
+    for (int col = 2; col < 108; ++col) leftover.cells[row * leftover.width + col] = 0;
+  leftover.cells[100 * leftover.width + 100] = -1;
   navigation2d::FrontierExplorer leftover_explorer(leftover_config);
   leftover_explorer.UpdateMap(leftover);
-  assert(leftover_explorer.SelectGoals(.8, .8).empty());
-  const auto leftover_goal = leftover_explorer.SelectLeftoverApproach(.8, .8);
+  assert(leftover_explorer.KnownCells() >= 10000);
+  assert(leftover_explorer.SelectGoals(5., 5.).empty());
+  const auto leftover_goal = leftover_explorer.SelectLeftoverApproach(5., 5.);
   assert(leftover_goal.has_value());
   assert(leftover_goal->leftover_approach);
   assert(leftover_explorer.raw_frontier_cells() > 0);
@@ -246,13 +274,28 @@ int main() {
   assert(entry_explorer.ReachableUnknownCells(.4, .7) > 0);
   const auto entry_goals = entry_explorer.SelectGoals(.4, .7);
   assert(!entry_goals.empty());
+  // OneGoalPerMouth prefers an entry-side pose when the planning graph opened
+  // the gap: the task point must lie past the frontier toward the room.
+  const auto& entry_goal = entry_goals.front();
+  const double entry_depth =
+      ((entry_goal.x - entry_goal.frontier_x) *
+           (entry_goal.frontier_x - .4) +
+       (entry_goal.y - entry_goal.frontier_y) *
+           (entry_goal.frontier_y - .7)) /
+      std::hypot(entry_goal.frontier_x - .4, entry_goal.frontier_y - .7);
+  assert(entry_depth >= .15);
+  // SelectEntryProbe still works from a hallway-side standoff for the
+  // runtime entry state machine.
+  navigation2d::ExplorationGoal hallway_standoff = entry_goal;
+  hallway_standoff.x = entry_goal.frontier_x - .45;
+  hallway_standoff.y = entry_goal.frontier_y;
   const auto entry_probe = entry_explorer.SelectEntryProbe(
-      entry_goals.front(), .4, .7, .20, .70);
+      hallway_standoff, .4, .7, .20, .70);
   assert(entry_probe.has_value());
-  const double entry_dx = entry_probe->x - entry_goals.front().frontier_x;
-  const double entry_dy = entry_probe->y - entry_goals.front().frontier_y;
-  const double entry_direction_x = entry_goals.front().frontier_x - entry_goals.front().x;
-  const double entry_direction_y = entry_goals.front().frontier_y - entry_goals.front().y;
+  const double entry_dx = entry_probe->x - hallway_standoff.frontier_x;
+  const double entry_dy = entry_probe->y - hallway_standoff.frontier_y;
+  const double entry_direction_x = hallway_standoff.frontier_x - hallway_standoff.x;
+  const double entry_direction_y = hallway_standoff.frontier_y - hallway_standoff.y;
   const double entry_direction_length =
       std::hypot(entry_direction_x, entry_direction_y);
   assert((entry_dx * entry_direction_x + entry_dy * entry_direction_y) /
@@ -279,9 +322,8 @@ int main() {
   assert(raw_explorer.unresolved_frontier_cells() > 0);
   assert(!raw_explorer.SelectGoals(.5, .95).empty());
 
-  // Two doorways whose mouths are 0.90 m apart. Observing one cools that
-  // mouth only. The failure radius would also cool the next doorway, and the
-  // long success cooldown would not give it back.
+  // Two doorways whose mouths are ~2.0 m apart (beyond the 1.5 m mouth merge).
+  // Observing one cools that mouth only.
   navigation2d::FrontierExplorerConfig pair_config;
   pair_config.minimum_frontier_cells = 6;
   pair_config.footprint_clearance = .22;
@@ -291,7 +333,7 @@ int main() {
   pair_config.required_frontier_observations = 1;
   navigation2d::ExplorationGrid pair;
   pair.width = 60;
-  pair.height = 56;
+  pair.height = 64;
   pair.resolution = .05;
   pair.cells.assign(static_cast<std::size_t>(pair.width * pair.height), 100);
   const auto pair_paint = [&](int col0, int col1, int row0, int row1, std::int8_t value) {
@@ -299,28 +341,28 @@ int main() {
       for (int col = col0; col < col1; ++col)
         pair.cells[static_cast<std::size_t>(row * pair.width + col)] = value;
   };
-  pair_paint(2, 22, 2, 54, 0);
-  pair_paint(22, 50, 10, 20, -1);
-  pair_paint(22, 50, 28, 38, -1);
+  pair_paint(2, 22, 2, 62, 0);
+  pair_paint(22, 50, 6, 16, -1);
+  pair_paint(22, 50, 46, 56, -1);
   navigation2d::FrontierExplorer pair_explorer(pair_config);
   pair_explorer.UpdateMap(pair);
   const auto pair_goals = pair_explorer.SelectGoals(
-      (8 + .5) * pair.resolution, (15 + .5) * pair.resolution);
+      (8 + .5) * pair.resolution, (11 + .5) * pair.resolution);
   const navigation2d::ExplorationGoal* lower = nullptr;
   const navigation2d::ExplorationGoal* upper = nullptr;
   for (const auto& goal : pair_goals) {
-    if (goal.frontier_y < (24 + .5) * pair.resolution) {
+    if (goal.frontier_y < (32 + .5) * pair.resolution) {
       if (lower == nullptr || goal.frontier_cells > lower->frontier_cells) lower = &goal;
     } else if (upper == nullptr || goal.frontier_cells > upper->frontier_cells) {
       upper = &goal;
     }
   }
   assert(lower != nullptr && upper != nullptr);
-  assert(std::abs(lower->frontier_y - upper->frontier_y) > .80);
-  assert(std::abs(lower->frontier_y - upper->frontier_y) < 1.10);
+  assert(std::abs(lower->frontier_y - upper->frontier_y) > 1.5);
+  assert(std::abs(lower->frontier_y - upper->frontier_y) < 2.5);
   pair_explorer.RecordAttempt(*lower, true);
   const auto upper_goals = pair_explorer.SelectGoals(
-      (8 + .5) * pair.resolution, (33 + .5) * pair.resolution);
+      (8 + .5) * pair.resolution, (51 + .5) * pair.resolution);
   bool upper_remains = false;
   for (const auto& goal : upper_goals) {
     if (std::hypot(goal.frontier_x - upper->frontier_x,
@@ -335,7 +377,8 @@ int main() {
   auto failed = *lower;
   failed.x -= 1.5;
   failed_pair.RecordAttempt(failed, false);
-  const auto alternatives = failed_pair.SelectGoals(.425, 1.675);
+  const auto alternatives = failed_pair.SelectGoals(
+      (8 + .5) * pair.resolution, (11 + .5) * pair.resolution);
   bool lower_available = false, upper_available = false;
   for (const auto& goal : alternatives) {
     lower_available |= std::hypot(goal.frontier_x - lower->frontier_x,

@@ -6,6 +6,7 @@
 #include <deque>
 #include <limits>
 #include <optional>
+#include <utility>
 
 namespace {
 
@@ -736,8 +737,12 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
   }
   std::sort(goals.begin(), goals.end(),
             [](const auto& a, const auto& b) { return a.score > b.score; });
-  candidate_frontier_goals_ = goals.size();
-  auto stable = StableGoals(std::move(goals));
+  // Stage A/B: mouth is the task unit — one goal per doorway/alcove, not per
+  // frontier micro-cluster. Entry probe moves the pose into the room when the
+  // planning graph already opened that corridor.
+  auto mouths = OneGoalPerMouth(std::move(goals), robot_x, robot_y);
+  candidate_frontier_goals_ = mouths.size();
+  auto stable = StableGoals(std::move(mouths));
   executable_frontier_goals_ = stable.size();
   return stable;
 }
@@ -868,34 +873,33 @@ std::vector<ExplorationGoal> FrontierExplorer::StableGoals(
   return stable;
 }
 
-std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
-    double robot_x, double robot_y) {
-  auto remaining = SelectGoals(robot_x, robot_y);
-  if (remaining.empty()) return {};
-
-  // One physical doorway often fragments into several frontier clusters that
-  // all pick nearly the same hallway standoff. Collapse those into a single
-  // observation task before ordering the tour, otherwise the UI shows a pile
-  // of T-labels and the robot revisits the same mouth.
-  // One alcove/door mouth can span ~1 m of frontier cells; merge on either
-  // viewpoint or frontier proximity so the tour keeps one task per mouth.
-  constexpr double kMergeViewpointM = .80;
-  constexpr double kMergeFrontierM = .80;
-  std::vector<ExplorationGoal> merged;
-  merged.reserve(remaining.size());
-  for (const auto& goal : remaining) {
+std::vector<ExplorationGoal> FrontierExplorer::OneGoalPerMouth(
+    std::vector<ExplorationGoal> goals, double robot_x, double robot_y) const {
+  // Spatial hypercluster: micro-cluster frontiers within ~1.75 m are one mouth
+  // (doorway / alcove). Only the strongest viewpoint survives; then prefer an
+  // entry pose on the unknown side when the planning graph permits it.
+  constexpr double kMouthMergeM = 1.5;
+  const auto better = [](const ExplorationGoal& a, const ExplorationGoal& b) {
+    if (a.information_gain > b.information_gain + 1e-9) return true;
+    if (b.information_gain > a.information_gain + 1e-9) return false;
+    if (a.frontier_cells != b.frontier_cells) return a.frontier_cells > b.frontier_cells;
+    return a.score > b.score;
+  };
+  std::vector<ExplorationGoal> mouths;
+  mouths.reserve(goals.size());
+  for (const auto& goal : goals) {
     bool absorbed = false;
-    for (auto& keep : merged) {
-      const double viewpoint_gap = std::hypot(keep.x - goal.x, keep.y - goal.y);
-      const double frontier_gap =
-          std::hypot(keep.frontier_x - goal.frontier_x, keep.frontier_y - goal.frontier_y);
-      if (viewpoint_gap > kMergeViewpointM && frontier_gap > kMergeFrontierM) continue;
-      if (goal.information_gain > keep.information_gain + 1e-9 ||
-          (std::abs(goal.information_gain - keep.information_gain) <= 1e-9 &&
-           goal.frontier_cells > keep.frontier_cells) ||
-          (std::abs(goal.information_gain - keep.information_gain) <= 1e-9 &&
-           goal.frontier_cells == keep.frontier_cells && goal.score > keep.score)) {
+    for (auto& keep : mouths) {
+      if (std::hypot(keep.frontier_x - goal.frontier_x,
+                     keep.frontier_y - goal.frontier_y) > kMouthMergeM &&
+          std::hypot(keep.x - goal.x, keep.y - goal.y) > kMouthMergeM)
+        continue;
+      if (better(goal, keep)) {
+        const int cells = std::max(keep.frontier_cells, goal.frontier_cells);
+        const double gain = std::max(keep.information_gain, goal.information_gain);
         keep = goal;
+        keep.frontier_cells = cells;
+        keep.information_gain = gain;
       } else {
         keep.frontier_cells = std::max(keep.frontier_cells, goal.frontier_cells);
         keep.information_gain = std::max(keep.information_gain, goal.information_gain);
@@ -903,23 +907,40 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
       absorbed = true;
       break;
     }
-    if (!absorbed) merged.push_back(goal);
+    if (!absorbed) mouths.push_back(goal);
   }
-  remaining = std::move(merged);
-
-  // Prefer a pose past the doorway mouth when the planning graph already
-  // opened that corridor. Hallway standoffs alone leave rooms unexplored.
-  for (auto& goal : remaining) {
+  // Prefer a room-side pose when the viewpoint is still on the approach side.
+  // If the viewpoint search already placed the goal past the mouth, do not let
+  // SelectEntryProbe reverse the approach vector and pull it back into the hall.
+  const auto depth_past_frontier = [&](const ExplorationGoal& goal, double x,
+                                       double y) {
+    const double to_fx = goal.frontier_x - robot_x;
+    const double to_fy = goal.frontier_y - robot_y;
+    const double length = std::hypot(to_fx, to_fy);
+    if (length < .05) return 0.;
+    return ((x - goal.frontier_x) * to_fx + (y - goal.frontier_y) * to_fy) / length;
+  };
+  for (auto& goal : mouths) {
+    const double current_depth = depth_past_frontier(goal, goal.x, goal.y);
+    if (current_depth >= .15) continue;
     if (auto probe = SelectEntryProbe(goal, robot_x, robot_y, .22, .70)) {
-      goal.x = probe->x;
-      goal.y = probe->y;
-      goal.yaw = probe->yaw;
+      if (depth_past_frontier(goal, probe->x, probe->y) > current_depth + .05) {
+        goal.x = probe->x;
+        goal.y = probe->y;
+        goal.yaw = probe->yaw;
+      }
     }
   }
+  return mouths;
+}
 
-  // `safe` is the vertex set of the free-space connectivity graph.  Edges are
-  // the four cardinal grid neighbours, so BFS distance is the path length the
-  // robot can actually traverse, not a straight-line proxy through walls.
+std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
+    double robot_x, double robot_y) {
+  // Stage C only: order mouth goals by nearest-coverage BFS. Mouth collapse and
+  // entry-side posing already happened in SelectGoals / OneGoalPerMouth.
+  auto remaining = SelectGoals(robot_x, robot_y);
+  if (remaining.empty()) return {};
+
   std::vector<unsigned char> safe(map_.cells.size(), 0);
   for (int row = 0; row < map_.height; ++row) {
     for (int col = 0; col < map_.width; ++col) {
@@ -931,8 +952,6 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
     const int center_row = static_cast<int>(std::floor((y - map_.origin_y) / map_.resolution));
     int best = -1;
     double best_distance = std::numeric_limits<double>::infinity();
-    // A viewpoint always has an exact safe cell.  The small local search only
-    // accommodates a robot pose that lies on a grid boundary.
     const int radius = static_cast<int>(std::ceil(1.0 / map_.resolution));
     for (int row = std::max(0, center_row - radius);
          row <= std::min(map_.height - 1, center_row + radius); ++row) {
@@ -971,11 +990,8 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
   std::vector<ExplorationGoal> tour;
   int current = nearest_safe(robot_x, robot_y);
   // Coverage / vacuum policy: finish the local free-space neighbourhood before
-  // a long transit. Remote NBV greed creates cross-map backtracking; path
-  // length with few revisits matters more than peeking the largest unknown
-  // blob first. Information gain only breaks exact BFS-distance ties.
+  // a long transit. Information gain only breaks exact BFS-distance ties.
   std::vector<int> region_distance;
-  // ~5 m neighbourhood: clear adjacent rooms/hall before the next transit.
   const int region_radius_cells = std::max(
       1, static_cast<int>(std::ceil(5.0 / map_.resolution)));
   while (!remaining.empty() && current >= 0) {
@@ -987,7 +1003,6 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
     for (auto candidate = remaining.begin(); candidate != remaining.end(); ++candidate) {
       const int viewpoint = nearest_safe(candidate->x, candidate->y);
       if (viewpoint < 0 || distances[viewpoint] < 0) continue;
-      // Stay inside the committed BFS pocket until it has no frontiers left.
       if (!region_distance.empty() &&
           (region_distance[viewpoint] < 0 ||
            region_distance[viewpoint] > region_radius_cells))
@@ -1007,7 +1022,6 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
       best_frontier_cells = candidate->frontier_cells;
     }
     if (next == remaining.end() && !region_distance.empty()) {
-      // Local pocket empty — hop to the globally nearest leftover frontier.
       region_distance.clear();
       continue;
     }

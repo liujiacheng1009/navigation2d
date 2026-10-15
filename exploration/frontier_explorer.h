@@ -71,14 +71,15 @@ class FrontierExplorer {
  public:
   explicit FrontierExplorer(FrontierExplorerConfig config = {});
   void UpdateMap(ExplorationGrid map);
+  // Mouth-normalized goals: micro-clusters are hyperclustered to doorway/
+  // alcove mouths (one task each), preferring a room-side entry pose.
   std::vector<ExplorationGoal> SelectGoals(double robot_x, double robot_y);
   // One open-space approach to leftover free/unknown specks that failed the
   // ordinary cluster/standoff tests.  Not part of the exploring tour.
   std::optional<ExplorationGoal> SelectLeftoverApproach(double robot_x, double robot_y);
-  // Builds a coverage tour over the connected safe-space graph. Each entry is
-  // a collision-safe viewpoint for a distinct reachable frontier. Vacuum-style
-  // policy: exhaust the local free-space neighbourhood (nearest BFS first)
-  // before a long transit; information gain is only a near-tie breaker.
+  // Nearest-coverage ordering over SelectGoals mouths. Exhaust the local
+  // free-space neighbourhood (BFS) before a long transit; information gain is
+  // only a near-tie breaker. Does not merge or re-pose goals.
   std::vector<ExplorationGoal> BuildTour(double robot_x, double robot_y);
   // Returns a reachable pose beyond a doorway frontier.  The pose is chosen
   // from the private planning grid, where only physically passable narrow
@@ -134,6 +135,10 @@ class FrontierExplorer {
   std::size_t CountRawFrontierCells() const;
   bool Blacklisted(double x, double y, bool boundary = false) const;
   std::vector<ExplorationGoal> StableGoals(std::vector<ExplorationGoal> goals);
+  // Collapse micro-cluster viewpoints into one task per doorway/alcove mouth.
+  // Prefers SelectEntryProbe (room side) over hallway standoffs.
+  std::vector<ExplorationGoal> OneGoalPerMouth(std::vector<ExplorationGoal> goals,
+                                               double robot_x, double robot_y) const;
   std::pair<double, double> CellCenter(int col, int row) const;
 
   FrontierExplorerConfig config_;
