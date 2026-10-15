@@ -510,6 +510,58 @@ class AutonomousExplorer final : public rclcpp::Node {
                 committed_tour_.size());
   }
 
+  bool StartEntryProbe() {
+    if (!pending_entry_goal_ || !pose_) return false;
+    const double minimum_depth = .22 + .12 * entry_probe_attempts_;
+    const auto probe = explorer_.SelectEntryProbe(
+        *pending_entry_goal_, pose_->pose.position.x, pose_->pose.position.y,
+        minimum_depth, .70);
+    if (!probe) {
+      RCLCPP_WARN(get_logger(),
+                  "Entry probe unavailable: frontier=(%.2f,%.2f) attempts=%d",
+                  pending_entry_goal_->frontier_x, pending_entry_goal_->frontier_y,
+                  entry_probe_attempts_);
+      return false;
+    }
+    ++entry_probe_attempts_;
+    entry_probe_initial_known_cells_ = KnownCells();
+    entry_probe_initial_map_revision_ = map_revision_;
+    if (!StartNavigation(*probe, false)) {
+      RCLCPP_WARN(get_logger(),
+                  "Entry probe rejected: target=(%.2f,%.2f) depth=%.2f attempt=%d",
+                  probe->x, probe->y, minimum_depth, entry_probe_attempts_);
+      return false;
+    }
+    RCLCPP_INFO(get_logger(),
+                "Entry probe started: frontier=(%.2f,%.2f) target=(%.2f,%.2f) "
+                "depth=%.2f attempt=%d",
+                pending_entry_goal_->frontier_x, pending_entry_goal_->frontier_y,
+                probe->x, probe->y, minimum_depth, entry_probe_attempts_);
+    PublishStatus("COMPLETING", "crossing frontier entry and waiting for map growth");
+    return true;
+  }
+
+  double EntryProbeDepth() const {
+    if (!pending_entry_goal_ || !pose_) return 0.;
+    const double direction_x = pending_entry_goal_->frontier_x - pending_entry_goal_->x;
+    const double direction_y = pending_entry_goal_->frontier_y - pending_entry_goal_->y;
+    const double length = std::hypot(direction_x, direction_y);
+    if (length < .05) return 0.;
+    return ((pose_->pose.position.x - pending_entry_goal_->frontier_x) * direction_x +
+            (pose_->pose.position.y - pending_entry_goal_->frontier_y) * direction_y) /
+           length;
+  }
+
+  bool EntryProbeSatisfied() const {
+    if (!pending_entry_goal_) return false;
+    const double depth = EntryProbeDepth();
+    const bool crossed = depth >= .20;
+    const bool fresh_map = map_revision_ > entry_probe_initial_map_revision_;
+    const bool boundary_resolved =
+        !explorer_.GoalRegionStillFrontier(*pending_entry_goal_);
+    return crossed && fresh_map && boundary_resolved;
+  }
+
   std::pair<int, int> PoseCell() const {
     const double resolution = map_ ? map_->info.resolution : .05;
     return {static_cast<int>(std::floor(pose_->pose.position.x / resolution)),
@@ -678,11 +730,16 @@ class AutonomousExplorer final : public rclcpp::Node {
         completing_probe_used_ = false;
         return;
       }
-      // A pre-execution rejection (occupied start/goal or stale map) is not a
-      // failed frontier. Drop this stale tour entry and let the next map
-      // revision regenerate it without blacklisting the region.
+      // Pre-execution rejection at a doorway: try the bounded room-side entry
+      // probe instead of stuffing more hallway standoffs into the tour.
       committed_tour_.pop_front();
       ++attempted;
+      pending_entry_goal_ = goal;
+      entry_probe_attempts_ = 0;
+      entry_probe_initial_known_cells_ = KnownCells();
+      entry_probe_initial_map_revision_ = map_revision_;
+      if (StartEntryProbe()) return;
+      pending_entry_goal_.reset();
     }
     geometry_msgs::msg::Twist stop;
     command_publisher_->publish(stop);
@@ -829,6 +886,8 @@ class AutonomousExplorer final : public rclcpp::Node {
   void Finish(bool success, const std::string& message) {
     if (finished_) return;
     finished_ = true;
+    pending_entry_goal_.reset();
+    entry_probe_attempts_ = 0;
     geometry_msgs::msg::Twist stop;
     command_publisher_->publish(stop);
     std::string final_message = message;
@@ -1094,7 +1153,8 @@ class AutonomousExplorer final : public rclcpp::Node {
     frontiers.header = global.header;
     // committed_tour_ keeps the active goal at the front for bookkeeping.
     // Publishing both active_goal_ and the full queue duplicated the current
-    // mouth as T0+T1 and made doorway piles look twice as dense in the UI.
+    // mouth as T0+T1. Frontier markers are only the active mouth — publishing
+    // every queued frontier_xy stacked another cyan pile on the boundary.
     bool published_active = false;
     if (std::isfinite(active_goal_.x) && std::isfinite(active_goal_.y)) {
       geometry_msgs::msg::PoseStamped stamped;
@@ -1117,7 +1177,6 @@ class AutonomousExplorer final : public rclcpp::Node {
       stamped.header = tour.header;
       stamped.pose = PoseFromXyYaw(goal.x, goal.y, goal.yaw);
       tour.poses.push_back(stamped);
-      frontiers.poses.push_back(PoseFromXyYaw(goal.frontier_x, goal.frontier_y, goal.yaw));
     }
     tour_publisher_->publish(tour);
     frontiers_publisher_->publish(frontiers);
@@ -1221,6 +1280,45 @@ class AutonomousExplorer final : public rclcpp::Node {
       } else if (phase_ == MissionPhase::kCompleting) {
         explorer_.RecordAttempt(active_goal_, true);
         FinishCompleting();
+      } else if (pending_entry_goal_) {
+        if (EntryProbeSatisfied()) {
+          explorer_.RecordAttempt(*pending_entry_goal_, true, false);
+          pending_entry_goal_.reset();
+          entry_probe_attempts_ = 0;
+          committed_tour_.clear();
+          next_selection_ = now();
+          PublishStatus("SELECTING", "frontier entered; rebuilding tour");
+        } else if (entry_probe_attempts_ < 2 && StartEntryProbe()) {
+          return;
+        } else {
+          RCLCPP_WARN(get_logger(),
+                      "Frontier entry incomplete: frontier=(%.2f,%.2f) attempts=%d "
+                      "depth=%.2f; keeping unresolved",
+                      pending_entry_goal_->frontier_x, pending_entry_goal_->frontier_y,
+                      entry_probe_attempts_, EntryProbeDepth());
+          explorer_.RecordAttempt(*pending_entry_goal_, false);
+          pending_entry_goal_.reset();
+          entry_probe_attempts_ = 0;
+          committed_tour_.clear();
+          next_selection_ = now();
+          PublishStatus("SELECTING", "frontier entry blocked; unresolved boundary retained");
+        }
+      } else if (explorer_.GoalRegionStillFrontier(active_goal_)) {
+        // Hallway arrival with the mouth still open — cross into the room.
+        pending_entry_goal_ = active_goal_;
+        entry_probe_attempts_ = 0;
+        entry_probe_initial_known_cells_ = KnownCells();
+        entry_probe_initial_map_revision_ = map_revision_;
+        committed_tour_.clear();
+        if (StartEntryProbe()) return;
+        RCLCPP_WARN(get_logger(),
+                    "Frontier reached but no safe entry probe: frontier=(%.2f,%.2f)",
+                    pending_entry_goal_->frontier_x, pending_entry_goal_->frontier_y);
+        explorer_.RecordAttempt(*pending_entry_goal_, false);
+        pending_entry_goal_.reset();
+        entry_probe_attempts_ = 0;
+        next_selection_ = now();
+        PublishStatus("SELECTING", "frontier entry unavailable; unresolved boundary retained");
       } else {
         explorer_.RecordAttempt(active_goal_, true);
         if (!committed_tour_.empty()) committed_tour_.pop_front();
@@ -1381,6 +1479,10 @@ class AutonomousExplorer final : public rclcpp::Node {
   bool truth_origin_ = false;
   std::string pose_source_;
   Goal active_goal_;
+  std::optional<Goal> pending_entry_goal_;
+  int entry_probe_attempts_ = 0;
+  std::size_t entry_probe_initial_known_cells_ = 0;
+  std::uint64_t entry_probe_initial_map_revision_ = 0;
   std::deque<Goal> committed_tour_;
   rclcpp::Time started_{0, 0, RCL_ROS_TIME};
   rclcpp::Time goal_started_{0, 0, RCL_ROS_TIME};
