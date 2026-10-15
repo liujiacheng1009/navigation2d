@@ -27,6 +27,17 @@ struct NavigationConfig {
   double min_approach_velocity = .05;
   double regulated_min_radius = .50;
   double regulated_min_speed = .08;
+  // Soft clearance band outside the hard footprint. Inside this band linear
+  // speed is scaled with a smoothstep on (nearest_lethal - robot_radius).
+  // Hard stops remain CollisionImminent / collision monitor — not this curve.
+  double regulated_soft_clearance = .08;
+  // When the short forward corridor is free (near-field trust), use a tighter
+  // band and a higher floor so side-wall proximity does not crawl the robot.
+  double regulated_soft_clearance_trusted = .05;
+  double regulated_clearance_min_scale = .40;
+  double regulated_clearance_min_scale_trusted = .65;
+  double regulated_forward_trust_length = .55;
+  double regulated_forward_trust_half_width = .10;
   double max_reverse_velocity = .12;
   double max_angular_velocity = .9;
   double max_linear_acceleration = .8;

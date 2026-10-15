@@ -6,7 +6,69 @@
 #include <limits>
 
 namespace navigation2d {
-namespace { double Angle(double a) { return std::atan2(std::sin(a), std::cos(a)); } }
+namespace {
+double Angle(double a) { return std::atan2(std::sin(a), std::cos(a)); }
+
+double Smoothstep01(double t) {
+  t = std::clamp(t, 0., 1.);
+  return t * t * (3. - 2. * t);
+}
+
+// Local lethal clearance — full-map nearestLethalDistance is O(WH) per tick.
+double LocalLethalClearance(const LayeredCostmap& costmap, double x, double y,
+                            double search_radius) {
+  const auto& grid = costmap.grid();
+  const double resolution = grid.resolution();
+  if (resolution <= 1e-9) return 0.;
+  const double half = .5 * resolution;
+  const int span = std::max(1, static_cast<int>(std::ceil(search_radius / resolution)));
+  const auto [cx, cy] = grid.ToCell(x, y);
+  double best = search_radius;
+  bool found = false;
+  for (int dy = -span; dy <= span; ++dy) {
+    for (int dx = -span; dx <= span; ++dx) {
+      const int ix = cx + dx, iy = cy + dy;
+      if (ix < 0 || iy < 0 || ix >= grid.width() || iy >= grid.height()) continue;
+      if (costmap.cost(ix, iy) != kLethal) continue;
+      const auto [wx, wy] = grid.CellCenter(ix, iy);
+      const double nearest_x = std::max(std::abs(x - wx) - half, 0.);
+      const double nearest_y = std::max(std::abs(y - wy) - half, 0.);
+      best = std::min(best, std::hypot(nearest_x, nearest_y));
+      found = true;
+    }
+  }
+  return found ? best : search_radius;
+}
+
+bool ForwardCorridorTrusted(const LayeredCostmap& costmap, const Pose2d& pose,
+                            double robot_radius, double length, double half_width) {
+  const double yaw = Yaw(pose);
+  const double c = std::cos(yaw), s = std::sin(yaw);
+  const double lateral_c = -s, lateral_s = c;
+  constexpr int kAlong = 4;
+  for (int i = 1; i <= kAlong; ++i) {
+    const double d = length * (static_cast<double>(i) / kAlong);
+    for (const double lat : {0., half_width, -half_width}) {
+      const double x = X(pose) + d * c + lat * lateral_c;
+      const double y = Y(pose) + d * s + lat * lateral_s;
+      if (costmap.lethal(x, y, robot_radius)) return false;
+    }
+  }
+  return true;
+}
+
+double ClearanceSpeedScale(double margin, bool forward_trusted,
+                           const NavigationConfig& config) {
+  const double band = forward_trusted ? config.regulated_soft_clearance_trusted
+                                      : config.regulated_soft_clearance;
+  const double floor_scale = forward_trusted ? config.regulated_clearance_min_scale_trusted
+                                             : config.regulated_clearance_min_scale;
+  if (band <= 1e-9 || margin >= band) return 1.;
+  if (margin <= 0.) return floor_scale;
+  const double s = Smoothstep01(margin / band);
+  return floor_scale + (1. - floor_scale) * s;
+}
+}  // namespace
 
 Twist2d RegulatedPurePursuit::Compute(const Path& path, const Pose2d& pose, Twist2d current,
                                        const LayeredCostmap& costmap,
@@ -100,9 +162,22 @@ Twist2d RegulatedPurePursuit::Compute(const Path& path, const Pose2d& pose, Twis
     if (radius < config_.regulated_min_radius)
       linear = std::max(config_.regulated_min_speed,
                         linear * radius / config_.regulated_min_radius);
-    const auto [cx, cy] = costmap.grid().ToCell(X(pose), Y(pose));
-    const double normalized_cost = static_cast<double>(costmap.cost(cx, cy)) / 252.;
-    linear *= std::max(.25, 1. - normalized_cost);
+    // Soft near-field regulation uses lethal clearance, not inflated cost.
+    // Inflation remains for global planning preference; hard contact is still
+    // CollisionImminent. When the short forward corridor is free, side walls
+    // (door frames) keep a higher speed floor instead of crawling to 0.25×.
+    const double search = config_.robot_radius +
+        std::max(config_.regulated_soft_clearance, config_.regulated_soft_clearance_trusted) +
+        .25;
+    const double clearance = LocalLethalClearance(costmap, X(pose), Y(pose), search);
+    const double margin = clearance - config_.robot_radius;
+    const bool forward_trusted = ForwardCorridorTrusted(
+        costmap, pose, config_.robot_radius, config_.regulated_forward_trust_length,
+        config_.regulated_forward_trust_half_width);
+    const double clearance_scale = ClearanceSpeedScale(margin, forward_trusted, config_);
+    if (clearance_scale < 1.) {
+      linear = std::max(config_.regulated_min_speed, linear * clearance_scale);
+    }
     return Twist2d{linear, std::clamp(linear * curvature, -config_.max_angular_velocity,
                                       config_.max_angular_velocity)};
   };
@@ -229,9 +304,19 @@ Twist2d RegulatedPurePursuit::Compute(const Path& path, const Pose2d& pose, Twis
     if (!begin_path_alignment()) return {};
     return stopping_command();
   }
+  // Remember whether the geometric target was rotate-only before the accel
+  // clamp reintroduces residual translation from the previous command.
+  const bool rotate_only_target = std::abs(target.linear) < 1e-9;
   target.linear = std::clamp(target.linear, current.linear - dv, current.linear + dv);
   target.angular = std::clamp(target.angular, current.angular - dw, current.angular + dw);
   if (CollisionImminent(pose, target, costmap)) {
+    // A pure-rotation request that only collides after the linear accel clamp
+    // must stop and align — not binary-search a residual forward crawl into
+    // the obstacle (shelf-corner / doorway yaw mismatch).
+    if (rotate_only_target) {
+      if (!begin_path_alignment()) return {};
+      return stopping_command();
+    }
     // Preserve the executable prefix: shorten the current control arc before
     // abandoning the route.  A binary search gives the largest safe command
     // without rejecting a path merely because its nominal horizon reaches a
