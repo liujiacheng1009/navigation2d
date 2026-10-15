@@ -27,17 +27,11 @@ constexpr double kCloseStandoff = .08;
 constexpr double kVisitedViewpointRadius = .45;
 constexpr double kVisitedFrontierRadius = .60;
 
-// NBV utility: maximize newly observable unknown area per metre of travel.
-// Region ordering is only a tie-breaker; it must never override information
-// gain, otherwise the robot enters a nearby low-value room while a much larger
-// unknown area is visible from another candidate.
+// Ranks observation poses inside one frontier cluster (which standoff cell to
+// stand on). Tour order between rooms is decided separately by BuildTour with
+// nearest-first coverage — do not use this score to jump across the map.
 double ViewpointScore(double information_gain, double travel, double standoff,
                       double gain_weight) {
-  // Keep the utility in the same scale as the observable area.  The previous
-  // discontinuous 60-point penalty made every useful doorway viewpoint score
-  // around -60, hiding information gain and encouraging repeated retries of
-  // the same mouth.  Travel is handled by the region scheduler; this value
-  // only ranks viewpoints inside one frontier cluster.
   return gain_weight * information_gain / (0.45 + travel) - 2.0 * standoff;
 }
 
@@ -932,74 +926,49 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
 
   std::vector<ExplorationGoal> tour;
   int current = nearest_safe(robot_x, robot_y);
-  // Frontier components are observation tasks, not independent destinations.
-  // First choose a worthwhile reachable region, then exhaust its adjacent
-  // components before paying for another cross-map transit.  This is the
-  // region-growing counterpart to frontier utility planning: it retains an
-  // information/travel objective between regions while preventing a global
-  // greedy sort from interleaving opposite sides of the same warehouse.
+  // Coverage / vacuum policy: finish the local free-space neighbourhood before
+  // a long transit. Remote NBV greed creates cross-map backtracking; path
+  // length with few revisits matters more than peeking the largest unknown
+  // blob first. Information gain only breaks exact BFS-distance ties.
   std::vector<int> region_distance;
+  // ~5 m neighbourhood: clear adjacent rooms/hall before the next transit.
   const int region_radius_cells = std::max(
-      1, static_cast<int>(std::ceil(3. * config_.maximum_standoff / map_.resolution)));
+      1, static_cast<int>(std::ceil(5.0 / map_.resolution)));
   while (!remaining.empty() && current >= 0) {
     const auto distances = distance_field(current);
     auto next = remaining.end();
     int best_distance = std::numeric_limits<int>::max();
-    double best_utility = -std::numeric_limits<double>::infinity();
-    // Keep the tour local, but retain NBV discrimination inside that local
-    // window. A fixed one-metre allowance avoids a far candidate winning over
-    // a nearby doorway while still allowing a clearly higher-gain viewpoint
-    // to win when it is only a short detour away.
-    int nearest_distance = std::numeric_limits<int>::max();
-    for (const auto& candidate : remaining) {
-      const int viewpoint = nearest_safe(candidate.x, candidate.y);
-      if (viewpoint < 0 || distances[viewpoint] < 0) continue;
-      if (!region_distance.empty() &&
-          (region_distance[viewpoint] < 0 ||
-           region_distance[viewpoint] > region_radius_cells)) continue;
-      nearest_distance = std::min(nearest_distance, distances[viewpoint]);
-    }
-    const int local_distance_limit = nearest_distance == std::numeric_limits<int>::max()
-        ? nearest_distance
-        : nearest_distance + std::max(1, static_cast<int>(std::ceil(1.0 / map_.resolution)));
+    double best_gain = -1.;
+    int best_frontier_cells = -1;
     for (auto candidate = remaining.begin(); candidate != remaining.end(); ++candidate) {
       const int viewpoint = nearest_safe(candidate->x, candidate->y);
       if (viewpoint < 0 || distances[viewpoint] < 0) continue;
-      // After entering a region, only serve frontiers connected to the same
-      // local free-space neighbourhood.  If none remain, the second pass
-      // below selects the next high-value region globally.
+      // Stay inside the committed BFS pocket until it has no frontiers left.
       if (!region_distance.empty() &&
           (region_distance[viewpoint] < 0 ||
            region_distance[viewpoint] > region_radius_cells))
         continue;
       const int distance = distances[viewpoint];
-      if (distance > local_distance_limit) continue;
-      // The tour is a local coverage walk. The distance window prevents a
-      // remote high-gain boundary from skipping a nearby doorway; within the
-      // window, NBV gain per metre is the decision criterion.
-      const double travel_m = distance * map_.resolution;
-      const double utility = 1.5 * candidate->information_gain - .65 * travel_m;
-      if (utility > best_utility + 1e-9 ||
-          (std::abs(utility - best_utility) <= 1e-9 &&
-           (distance < best_distance ||
-            (distance == best_distance &&
-             (next == remaining.end() || candidate->frontier_cells > next->frontier_cells))))) {
-        next = candidate;
-        best_distance = distance;
-        best_utility = utility;
-      }
+      const bool better =
+          next == remaining.end() ||
+          distance < best_distance ||
+          (distance == best_distance &&
+           (candidate->information_gain > best_gain + 1e-9 ||
+            (std::abs(candidate->information_gain - best_gain) <= 1e-9 &&
+             candidate->frontier_cells > best_frontier_cells)));
+      if (!better) continue;
+      next = candidate;
+      best_distance = distance;
+      best_gain = candidate->information_gain;
+      best_frontier_cells = candidate->frontier_cells;
     }
     if (next == remaining.end() && !region_distance.empty()) {
-      // The committed region is complete.  Deliberately reset the locality
-      // constraint rather than silently alternating between far components.
+      // Local pocket empty — hop to the globally nearest leftover frontier.
       region_distance.clear();
       continue;
     }
     if (next == remaining.end()) break;
     current = nearest_safe(next->x, next->y);
-    // The first task after a global selection becomes the anchor for a
-    // contiguous coverage sweep.  BFS makes this a free-space region, not a
-    // Euclidean circle leaking through a shelf or wall.
     if (region_distance.empty()) region_distance = distance_field(current);
     tour.push_back(*next);
     remaining.erase(next);

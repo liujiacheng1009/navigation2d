@@ -75,10 +75,10 @@ class FrontierExplorer {
   // One open-space approach to leftover free/unknown specks that failed the
   // ordinary cluster/standoff tests.  Not part of the exploring tour.
   std::optional<ExplorationGoal> SelectLeftoverApproach(double robot_x, double robot_y);
-  // Builds a utility-ordered tour over the connected safe-space graph. Each
-  // entry is a collision-safe viewpoint for a distinct reachable frontier.
-  // The next viewpoint minimizes travel potential minus frontier information
-  // gain, following the established explore_lite frontier policy.
+  // Builds a coverage tour over the connected safe-space graph. Each entry is
+  // a collision-safe viewpoint for a distinct reachable frontier. Vacuum-style
+  // policy: exhaust the local free-space neighbourhood (nearest BFS first)
+  // before a long transit; information gain is only a near-tie breaker.
   std::vector<ExplorationGoal> BuildTour(double robot_x, double robot_y);
   // Returns a reachable pose beyond a doorway frontier.  The pose is chosen
   // from the private planning grid, where only physically passable narrow
