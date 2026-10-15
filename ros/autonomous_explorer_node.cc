@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "geometry_msgs/msg/pose_array.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
@@ -78,6 +79,55 @@ const char* BackendName(navigation2d::ControllerBackend backend) {
   return "unknown";
 }
 
+const char* NavStatusName(navigation2d::NavigationStatus status) {
+  switch (status) {
+    case navigation2d::NavigationStatus::kIdle: return "idle";
+    case navigation2d::NavigationStatus::kNavigating: return "navigating";
+    case navigation2d::NavigationStatus::kSucceeded: return "succeeded";
+    case navigation2d::NavigationStatus::kBlocked: return "blocked";
+  }
+  return "unknown";
+}
+
+const char* NavPhaseName(navigation2d::NavigationPhase phase) {
+  switch (phase) {
+    case navigation2d::NavigationPhase::kAlignToPath: return "align_to_path";
+    case navigation2d::NavigationPhase::kTrackPath: return "track_path";
+    case navigation2d::NavigationPhase::kDockToGoal: return "dock_to_goal";
+  }
+  return "unknown";
+}
+
+const char* ManeuverName(navigation2d::ControllerManeuver maneuver) {
+  switch (maneuver) {
+    case navigation2d::ControllerManeuver::kTracking: return "tracking";
+    case navigation2d::ControllerManeuver::kStopping: return "stopping";
+    case navigation2d::ControllerManeuver::kRotateToPath: return "rotate_to_path";
+    case navigation2d::ControllerManeuver::kRouteInfeasible: return "route_infeasible";
+  }
+  return "unknown";
+}
+
+const char* MonitorActionName(navigation2d::CollisionMonitorAction action) {
+  switch (action) {
+    case navigation2d::CollisionMonitorAction::kNone: return "none";
+    case navigation2d::CollisionMonitorAction::kSlowdown: return "slowdown";
+    case navigation2d::CollisionMonitorAction::kStop: return "stop";
+    case navigation2d::CollisionMonitorAction::kBlindZoneStop: return "blind_zone_stop";
+    case navigation2d::CollisionMonitorAction::kSourceTimeout: return "source_timeout";
+  }
+  return "unknown";
+}
+
+geometry_msgs::msg::Pose PoseFromXyYaw(double x, double y, double yaw) {
+  geometry_msgs::msg::Pose pose;
+  pose.position.x = x;
+  pose.position.y = y;
+  pose.orientation.z = std::sin(yaw / 2.);
+  pose.orientation.w = std::cos(yaw / 2.);
+  return pose;
+}
+
 class AutonomousExplorer final : public rclcpp::Node {
  public:
   AutonomousExplorer() : Node("sweepnav_autonomous_explorer"), explorer_(ExplorerConfig()) {
@@ -99,6 +149,12 @@ class AutonomousExplorer final : public rclcpp::Node {
         "/navigation/path", rclcpp::QoS(1).transient_local().reliable());
     local_trajectory_publisher_ = create_publisher<nav_msgs::msg::Path>(
         "/navigation/local_trajectory", rclcpp::QoS(1).transient_local().reliable());
+    tour_publisher_ = create_publisher<nav_msgs::msg::Path>(
+        "/navigation/tour", rclcpp::QoS(1).transient_local().reliable());
+    carrot_publisher_ = create_publisher<geometry_msgs::msg::PoseStamped>(
+        "/navigation/carrot", rclcpp::QoS(1).transient_local().reliable());
+    frontiers_publisher_ = create_publisher<geometry_msgs::msg::PoseArray>(
+        "/exploration/frontier_goals", rclcpp::QoS(1).transient_local().reliable());
     planning_input_publisher_ = create_publisher<nav_msgs::msg::OccupancyGrid>(
         "/exploration/global_planning_input", rclcpp::QoS(1).transient_local().reliable());
     inflated_costmap_publisher_ = create_publisher<nav_msgs::msg::OccupancyGrid>(
@@ -840,10 +896,32 @@ class AutonomousExplorer final : public rclcpp::Node {
   void PublishStatus(const std::string& state, const std::string& message) {
     last_state_ = state;
     last_message_ = message;
+    std::string tour_json = "[";
+    bool first_tour = true;
+    auto append_tour_goal = [&](const Goal& goal) {
+      if (!first_tour) tour_json += ",";
+      first_tour = false;
+      tour_json +=
+          "{\"x\":" + std::to_string(goal.x) +
+          ",\"y\":" + std::to_string(goal.y) +
+          ",\"yaw\":" + std::to_string(goal.yaw) +
+          ",\"frontier_x\":" + std::to_string(goal.frontier_x) +
+          ",\"frontier_y\":" + std::to_string(goal.frontier_y) +
+          ",\"frontier_cells\":" + std::to_string(goal.frontier_cells) +
+          ",\"information_gain\":" + std::to_string(goal.information_gain) + "}";
+    };
+    if (std::isfinite(active_goal_.x) && std::isfinite(active_goal_.y)) {
+      append_tour_goal(active_goal_);
+    }
+    for (const Goal& goal : committed_tour_) append_tour_goal(goal);
+
     std_msgs::msg::String status;
     status.data =
         "{\"state\":\"" + EscapeJson(state) +
         "\",\"message\":\"" + EscapeJson(message) +
+        "\",\"mission_phase\":\"" + EscapeJson(
+            phase_ == MissionPhase::kCompleting ? "completing" :
+            phase_ == MissionPhase::kReturning ? "returning" : "exploring") +
         "\",\"known_cells\":" + std::to_string(KnownCells()) +
         ",\"completed_goals\":" + std::to_string(explorer_.completed_goals()) +
         ",\"failed_goals\":" + std::to_string(explorer_.failed_goals()) +
@@ -852,6 +930,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         std::to_string(explorer_.unresolved_frontier_cells()) +
         ",\"candidates\":" + std::to_string(explorer_.candidate_frontier_goals()) +
         ",\"tour_remaining\":" + std::to_string(committed_tour_.size()) +
+        ",\"tour\":" + tour_json + "]" +
         ",\"current_goal\":{\"x\":" + std::to_string(active_goal_.x) +
         ",\"y\":" + std::to_string(active_goal_.y) +
         ",\"yaw\":" + std::to_string(active_goal_.yaw) +
@@ -859,15 +938,80 @@ class AutonomousExplorer final : public rclcpp::Node {
         ",\"frontier_y\":" + std::to_string(active_goal_.frontier_y) +
         ",\"frontier_cells\":" + std::to_string(active_goal_.frontier_cells) +
         ",\"information_gain\":" + std::to_string(active_goal_.information_gain) +
+        "},\"carrot\":{\"x\":" + std::to_string(last_carrot_x_) +
+        ",\"y\":" + std::to_string(last_carrot_y_) +
+        ",\"yaw\":" + std::to_string(last_carrot_yaw_) +
+        ",\"valid\":" + (last_carrot_valid_ ? "true" : "false") +
         "},\"path_progress_m\":" + std::to_string(last_path_progress_m_) +
         ",\"path_length_m\":" + std::to_string(last_path_length_m_) +
         ",\"path_min_clearance_m\":" + std::to_string(last_path_min_clearance_m_) +
+        ",\"path_max_curvature\":" + std::to_string(last_path_max_curvature_) +
         ",\"replans\":" + std::to_string(last_replans_) +
+        ",\"incremental_replans\":" + std::to_string(last_incremental_replans_) +
+        ",\"recoveries\":" + std::to_string(last_recoveries_) +
+        ",\"emergency_stops\":" + std::to_string(last_emergency_stops_) +
         ",\"controller_backend\":\"" + EscapeJson(last_backend_) +
-        "\",\"cmd_vel\":{\"linear\":" + std::to_string(last_cmd_linear_) +
+        "\",\"nav_status\":\"" + EscapeJson(last_nav_status_) +
+        "\",\"nav_phase\":\"" + EscapeJson(last_nav_phase_) +
+        "\",\"maneuver\":\"" + EscapeJson(last_maneuver_) +
+        "\",\"monitor_action\":\"" + EscapeJson(last_monitor_action_) +
+        "\",\"planning_failure_reason\":\"" + EscapeJson(last_planning_failure_) +
+        "\",\"controller_commanded_motion\":" +
+        (last_controller_commanded_ ? "true" : "false") +
+        ",\"safety_stopped_motion\":" + (last_safety_stopped_ ? "true" : "false") +
+        ",\"intentional_stop\":" + (last_intentional_stop_ ? "true" : "false") +
+        ",\"fallback_level\":" + std::to_string(last_fallback_level_) +
+        ",\"controller_solve_us\":" + std::to_string(last_controller_solve_us_) +
+        ",\"minimum_ttc_s\":" + std::to_string(last_minimum_ttc_s_) +
+        ",\"planner_expansions\":" + std::to_string(last_planner_expansions_) +
+        ",\"planner_elapsed_s\":" + std::to_string(last_planner_elapsed_s_) +
+        ",\"robot_radius_m\":0.28" +
+        ",\"cmd_vel\":{\"linear\":" + std::to_string(last_cmd_linear_) +
         ",\"angular\":" + std::to_string(last_cmd_angular_) +
+        "},\"requested_cmd\":{\"linear\":" + std::to_string(last_requested_linear_) +
+        ",\"angular\":" + std::to_string(last_requested_angular_) +
+        "},\"published_cmd\":{\"linear\":" + std::to_string(last_published_linear_) +
+        ",\"angular\":" + std::to_string(last_published_angular_) +
+        "},\"measured_vel\":{\"linear\":" + std::to_string(last_measured_linear_) +
+        ",\"angular\":" + std::to_string(last_measured_angular_) +
         "},\"pose_source\":\"" + EscapeJson(pose_source_) + "\"}";
     status_publisher_->publish(status);
+  }
+
+  void CaptureNavTelemetry(const navigation2d::NavigationState& state,
+                           const navigation2d::Twist2d& measured_velocity) {
+    last_backend_ = BackendName(state.controller_diagnostics.backend);
+    last_nav_status_ = NavStatusName(state.status);
+    last_nav_phase_ = NavPhaseName(state.phase);
+    last_maneuver_ = ManeuverName(state.controller_diagnostics.maneuver);
+    last_monitor_action_ = MonitorActionName(state.collision_monitor_action);
+    last_planning_failure_ = state.planning_failure_reason;
+    last_path_progress_m_ = state.path_progress_m;
+    last_path_length_m_ = state.global_path_length_m;
+    last_path_min_clearance_m_ = state.global_planning.path_min_clearance_m;
+    last_path_max_curvature_ = state.global_planning.path_max_curvature;
+    last_replans_ = state.replans;
+    last_incremental_replans_ = state.incremental_replans;
+    last_recoveries_ = state.recoveries;
+    last_emergency_stops_ = state.emergency_stops;
+    last_cmd_linear_ = state.command.linear;
+    last_cmd_angular_ = state.command.angular;
+    last_requested_linear_ = state.requested_command.linear;
+    last_requested_angular_ = state.requested_command.angular;
+    last_published_linear_ = state.published_command.linear;
+    last_published_angular_ = state.published_command.angular;
+    last_measured_linear_ = measured_velocity.linear;
+    last_measured_angular_ = measured_velocity.angular;
+    last_controller_commanded_ = state.controller_commanded_motion;
+    last_safety_stopped_ = state.safety_stopped_motion;
+    last_intentional_stop_ = state.controller_diagnostics.intentional_stop;
+    last_fallback_level_ = state.controller_diagnostics.fallback_level;
+    last_controller_solve_us_ = state.controller_diagnostics.solve_us > 0.
+                                    ? state.controller_diagnostics.solve_us
+                                    : state.controller_solve_us;
+    last_minimum_ttc_s_ = state.minimum_ttc_s;
+    last_planner_expansions_ = static_cast<int>(state.global_planning.expansions);
+    last_planner_elapsed_s_ = state.global_planning.elapsed_s;
   }
 
   void PublishDebugPaths(const navigation2d::NavigationState& state) {
@@ -880,27 +1024,35 @@ class AutonomousExplorer final : public rclcpp::Node {
     for (const auto& pose : route) {
       geometry_msgs::msg::PoseStamped stamped;
       stamped.header = global.header;
-      stamped.pose.position.x = navigation2d::X(pose) + navigation_origin_x_;
-      stamped.pose.position.y = navigation2d::Y(pose) + navigation_origin_y_;
-      stamped.pose.orientation.z = std::sin(navigation2d::Yaw(pose) / 2.);
-      stamped.pose.orientation.w = std::cos(navigation2d::Yaw(pose) / 2.);
+      stamped.pose = PoseFromXyYaw(
+          navigation2d::X(pose) + navigation_origin_x_,
+          navigation2d::Y(pose) + navigation_origin_y_,
+          navigation2d::Yaw(pose));
       global.poses.push_back(stamped);
     }
     path_publisher_->publish(global);
 
     nav_msgs::msg::Path local;
     local.header = global.header;
-    // Publish a short lookahead along the global path from current progress.
+    // Lookahead band from current progress (Nav2-style local plan window).
     double traveled = 0.;
     bool started = false;
+    last_carrot_valid_ = false;
     for (std::size_t i = 1; i < global.poses.size(); ++i) {
       const auto& a = global.poses[i - 1].pose.position;
       const auto& b = global.poses[i].pose.position;
       const double seg = std::hypot(b.x - a.x, b.y - a.y);
+      const double prev = traveled;
       traveled += seg;
       if (!started && traveled + 1e-6 >= state.path_progress_m) {
         started = true;
         local.poses.push_back(global.poses[i - 1]);
+        const double remain = state.path_progress_m - prev;
+        const double t = seg > 1e-6 ? std::clamp(remain / seg, 0., 1.) : 0.;
+        last_carrot_x_ = a.x + t * (b.x - a.x);
+        last_carrot_y_ = a.y + t * (b.y - a.y);
+        last_carrot_yaw_ = Yaw(global.poses[i].pose.orientation);
+        last_carrot_valid_ = true;
       }
       if (started) {
         local.poses.push_back(global.poses[i]);
@@ -909,8 +1061,41 @@ class AutonomousExplorer final : public rclcpp::Node {
     }
     if (local.poses.empty() && !global.poses.empty()) {
       local.poses.push_back(global.poses.front());
+      last_carrot_x_ = global.poses.front().pose.position.x;
+      last_carrot_y_ = global.poses.front().pose.position.y;
+      last_carrot_yaw_ = Yaw(global.poses.front().pose.orientation);
+      last_carrot_valid_ = true;
     }
     local_trajectory_publisher_->publish(local);
+
+    geometry_msgs::msg::PoseStamped carrot;
+    carrot.header = global.header;
+    if (last_carrot_valid_) {
+      carrot.pose = PoseFromXyYaw(last_carrot_x_, last_carrot_y_, last_carrot_yaw_);
+    }
+    carrot_publisher_->publish(carrot);
+
+    nav_msgs::msg::Path tour;
+    tour.header = global.header;
+    geometry_msgs::msg::PoseArray frontiers;
+    frontiers.header = global.header;
+    if (std::isfinite(active_goal_.x) && std::isfinite(active_goal_.y)) {
+      geometry_msgs::msg::PoseStamped stamped;
+      stamped.header = tour.header;
+      stamped.pose = PoseFromXyYaw(active_goal_.x, active_goal_.y, active_goal_.yaw);
+      tour.poses.push_back(stamped);
+      frontiers.poses.push_back(
+          PoseFromXyYaw(active_goal_.frontier_x, active_goal_.frontier_y, active_goal_.yaw));
+    }
+    for (const Goal& goal : committed_tour_) {
+      geometry_msgs::msg::PoseStamped stamped;
+      stamped.header = tour.header;
+      stamped.pose = PoseFromXyYaw(goal.x, goal.y, goal.yaw);
+      tour.poses.push_back(stamped);
+      frontiers.poses.push_back(PoseFromXyYaw(goal.frontier_x, goal.frontier_y, goal.yaw));
+    }
+    tour_publisher_->publish(tour);
+    frontiers_publisher_->publish(frontiers);
   }
 
   void Tick() {
@@ -965,13 +1150,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     const auto measured_velocity = FreshVelocity(tick_time);
     const auto state = navigation_->ComputeCommand(local_pose, measured_velocity,
                                                     tick_time.seconds());
-    last_backend_ = BackendName(state.controller_diagnostics.backend);
-    last_path_progress_m_ = state.path_progress_m;
-    last_path_length_m_ = state.global_path_length_m;
-    last_path_min_clearance_m_ = state.global_planning.path_min_clearance_m;
-    last_replans_ = state.replans;
-    last_cmd_linear_ = state.command.linear;
-    last_cmd_angular_ = state.command.angular;
+    CaptureNavTelemetry(state, measured_velocity);
     if (state.controller_diagnostics.backend == navigation2d::ControllerBackend::kAcados)
       ++acados_commands_;
     else if (state.controller_diagnostics.backend == navigation2d::ControllerBackend::kMppi)
@@ -1140,12 +1319,39 @@ class AutonomousExplorer final : public rclcpp::Node {
   std::string last_backend_ = "not-run";
   std::string last_state_;
   std::string last_message_;
+  std::string last_nav_status_ = "idle";
+  std::string last_nav_phase_ = "align_to_path";
+  std::string last_maneuver_ = "tracking";
+  std::string last_monitor_action_ = "none";
+  std::string last_planning_failure_;
   double last_path_progress_m_ = 0.;
   double last_path_length_m_ = 0.;
   double last_path_min_clearance_m_ = 0.;
+  double last_path_max_curvature_ = 0.;
   double last_cmd_linear_ = 0.;
   double last_cmd_angular_ = 0.;
+  double last_requested_linear_ = 0.;
+  double last_requested_angular_ = 0.;
+  double last_published_linear_ = 0.;
+  double last_published_angular_ = 0.;
+  double last_measured_linear_ = 0.;
+  double last_measured_angular_ = 0.;
+  double last_controller_solve_us_ = 0.;
+  double last_minimum_ttc_s_ = 0.;
+  double last_planner_elapsed_s_ = 0.;
+  double last_carrot_x_ = 0.;
+  double last_carrot_y_ = 0.;
+  double last_carrot_yaw_ = 0.;
+  bool last_carrot_valid_ = false;
+  bool last_controller_commanded_ = false;
+  bool last_safety_stopped_ = false;
+  bool last_intentional_stop_ = false;
   int last_replans_ = 0;
+  int last_incremental_replans_ = 0;
+  int last_recoveries_ = 0;
+  int last_emergency_stops_ = 0;
+  int last_fallback_level_ = 0;
+  int last_planner_expansions_ = 0;
   bool returning_ = false, finished_ = false, mission_started_ = false;
   bool truth_origin_ = false;
   std::string pose_source_;
@@ -1170,6 +1376,9 @@ class AutonomousExplorer final : public rclcpp::Node {
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_publisher_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr local_trajectory_publisher_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr tour_publisher_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr carrot_publisher_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr frontiers_publisher_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr planning_input_publisher_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr inflated_costmap_publisher_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_subscription_;
