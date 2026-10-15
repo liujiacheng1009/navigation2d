@@ -424,6 +424,8 @@ NavigationSystem::~NavigationSystem() = default;
 NavigationSystem::NavigationSystem(NavigationSystem&&) noexcept = default;
 NavigationSystem& NavigationSystem::operator=(NavigationSystem&&) noexcept = default;
 
+const Path& NavigationSystem::path() const { return impl_->path; }
+
 void NavigationSystem::SetGoal(Pose2d goal) {
   impl_->goal = goal; impl_->path.clear(); impl_->state.status = NavigationStatus::kNavigating;
   impl_->state.global_path_length_m = 0.;

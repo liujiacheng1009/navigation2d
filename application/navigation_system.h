@@ -8,6 +8,7 @@
 #include "navigation2d/control/local_controller.h"
 #include "navigation2d/control/collision_monitor.h"
 #include "navigation2d/geometry/pose_2d.h"
+#include "navigation2d/planning/global_planner.h"
 #include "navigation2d/sensor/observations.h"
 
 namespace navigation2d {
@@ -87,6 +88,8 @@ class NavigationSystem {
   void UpdateGuidanceCandidates(std::vector<GuidanceCandidate> candidates);
   NavigationState ComputeCommand(const Pose2d& pose, Twist2d measured_velocity,
                                  double timestamp);
+  // Active global route in the navigation/map frame (empty when idle).
+  const Path& path() const;
 
  private:
   class Impl;

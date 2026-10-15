@@ -18,6 +18,7 @@
 #include "geometry_msgs/msg/twist.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav_msgs/msg/odometry.hpp"
+#include "nav_msgs/msg/path.hpp"
 #include "navigation2d/application/navigation_system.h"
 #include "navigation2d/exploration/frontier_explorer.h"
 #include "rclcpp/rclcpp.hpp"
@@ -94,6 +95,10 @@ class AutonomousExplorer final : public rclcpp::Node {
     command_publisher_ = create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
     status_publisher_ = create_publisher<std_msgs::msg::String>(
         "/exploration/status", rclcpp::QoS(1).transient_local().reliable());
+    path_publisher_ = create_publisher<nav_msgs::msg::Path>(
+        "/navigation/path", rclcpp::QoS(1).transient_local().reliable());
+    local_trajectory_publisher_ = create_publisher<nav_msgs::msg::Path>(
+        "/navigation/local_trajectory", rclcpp::QoS(1).transient_local().reliable());
     planning_input_publisher_ = create_publisher<nav_msgs::msg::OccupancyGrid>(
         "/exploration/global_planning_input", rclcpp::QoS(1).transient_local().reliable());
     inflated_costmap_publisher_ = create_publisher<nav_msgs::msg::OccupancyGrid>(
@@ -817,15 +822,95 @@ class AutonomousExplorer final : public rclcpp::Node {
            << "  \"failed_goals\": " << explorer_.failed_goals() << ",\n"
            << "  \"return_error_m\": " << return_error << "\n}\n";
     PublishStatus(!success ? "FAILED" : (partial_return_ ? "PARTIAL" : "COMPLETE"), final_message);
+    // Leave the process so the debug UI can Start a new run without a stuck
+    // finished_ node continuing to republish the old latched status.
+    rclcpp::shutdown();
+  }
+
+  static std::string EscapeJson(const std::string& value) {
+    std::string out;
+    out.reserve(value.size() + 8);
+    for (const char ch : value) {
+      if (ch == '"' || ch == '\\') out.push_back('\\');
+      out.push_back(ch);
+    }
+    return out;
   }
 
   void PublishStatus(const std::string& state, const std::string& message) {
+    last_state_ = state;
+    last_message_ = message;
     std_msgs::msg::String status;
-    status.data = "{\"state\":\"" + state + "\",\"message\":\"" + message +
+    status.data =
+        "{\"state\":\"" + EscapeJson(state) +
+        "\",\"message\":\"" + EscapeJson(message) +
         "\",\"known_cells\":" + std::to_string(KnownCells()) +
         ",\"completed_goals\":" + std::to_string(explorer_.completed_goals()) +
-        ",\"failed_goals\":" + std::to_string(explorer_.failed_goals()) + "}";
+        ",\"failed_goals\":" + std::to_string(explorer_.failed_goals()) +
+        ",\"raw_frontier_cells\":" + std::to_string(explorer_.raw_frontier_cells()) +
+        ",\"unresolved_frontier_cells\":" +
+        std::to_string(explorer_.unresolved_frontier_cells()) +
+        ",\"candidates\":" + std::to_string(explorer_.candidate_frontier_goals()) +
+        ",\"tour_remaining\":" + std::to_string(committed_tour_.size()) +
+        ",\"current_goal\":{\"x\":" + std::to_string(active_goal_.x) +
+        ",\"y\":" + std::to_string(active_goal_.y) +
+        ",\"yaw\":" + std::to_string(active_goal_.yaw) +
+        ",\"frontier_x\":" + std::to_string(active_goal_.frontier_x) +
+        ",\"frontier_y\":" + std::to_string(active_goal_.frontier_y) +
+        ",\"frontier_cells\":" + std::to_string(active_goal_.frontier_cells) +
+        ",\"information_gain\":" + std::to_string(active_goal_.information_gain) +
+        "},\"path_progress_m\":" + std::to_string(last_path_progress_m_) +
+        ",\"path_length_m\":" + std::to_string(last_path_length_m_) +
+        ",\"path_min_clearance_m\":" + std::to_string(last_path_min_clearance_m_) +
+        ",\"replans\":" + std::to_string(last_replans_) +
+        ",\"controller_backend\":\"" + EscapeJson(last_backend_) +
+        "\",\"cmd_vel\":{\"linear\":" + std::to_string(last_cmd_linear_) +
+        ",\"angular\":" + std::to_string(last_cmd_angular_) +
+        "},\"pose_source\":\"" + EscapeJson(pose_source_) + "\"}";
     status_publisher_->publish(status);
+  }
+
+  void PublishDebugPaths(const navigation2d::NavigationState& state) {
+    if (!navigation_ || !pose_) return;
+    const auto& route = navigation_->path();
+    nav_msgs::msg::Path global;
+    global.header.stamp = now();
+    global.header.frame_id = "map";
+    global.poses.reserve(route.size());
+    for (const auto& pose : route) {
+      geometry_msgs::msg::PoseStamped stamped;
+      stamped.header = global.header;
+      stamped.pose.position.x = navigation2d::X(pose) + navigation_origin_x_;
+      stamped.pose.position.y = navigation2d::Y(pose) + navigation_origin_y_;
+      stamped.pose.orientation.z = std::sin(navigation2d::Yaw(pose) / 2.);
+      stamped.pose.orientation.w = std::cos(navigation2d::Yaw(pose) / 2.);
+      global.poses.push_back(stamped);
+    }
+    path_publisher_->publish(global);
+
+    nav_msgs::msg::Path local;
+    local.header = global.header;
+    // Publish a short lookahead along the global path from current progress.
+    double traveled = 0.;
+    bool started = false;
+    for (std::size_t i = 1; i < global.poses.size(); ++i) {
+      const auto& a = global.poses[i - 1].pose.position;
+      const auto& b = global.poses[i].pose.position;
+      const double seg = std::hypot(b.x - a.x, b.y - a.y);
+      traveled += seg;
+      if (!started && traveled + 1e-6 >= state.path_progress_m) {
+        started = true;
+        local.poses.push_back(global.poses[i - 1]);
+      }
+      if (started) {
+        local.poses.push_back(global.poses[i]);
+        if (traveled - state.path_progress_m > 2.5) break;
+      }
+    }
+    if (local.poses.empty() && !global.poses.empty()) {
+      local.poses.push_back(global.poses.front());
+    }
+    local_trajectory_publisher_->publish(local);
   }
 
   void Tick() {
@@ -881,6 +966,12 @@ class AutonomousExplorer final : public rclcpp::Node {
     const auto state = navigation_->ComputeCommand(local_pose, measured_velocity,
                                                     tick_time.seconds());
     last_backend_ = BackendName(state.controller_diagnostics.backend);
+    last_path_progress_m_ = state.path_progress_m;
+    last_path_length_m_ = state.global_path_length_m;
+    last_path_min_clearance_m_ = state.global_planning.path_min_clearance_m;
+    last_replans_ = state.replans;
+    last_cmd_linear_ = state.command.linear;
+    last_cmd_angular_ = state.command.angular;
     if (state.controller_diagnostics.backend == navigation2d::ControllerBackend::kAcados)
       ++acados_commands_;
     else if (state.controller_diagnostics.backend == navigation2d::ControllerBackend::kMppi)
@@ -891,6 +982,13 @@ class AutonomousExplorer final : public rclcpp::Node {
     command.linear.x = state.command.linear;
     command.angular.z = state.command.angular;
     command_publisher_->publish(command);
+    // Throttle debug topics; control still runs every tick.
+    if ((now() - last_debug_publish_).seconds() >= 0.2) {
+      last_debug_publish_ = now();
+      PublishDebugPaths(state);
+      PublishStatus(last_state_.empty() ? "NAVIGATING" : last_state_,
+                    last_message_.empty() ? "navigating" : last_message_);
+    }
     if (state.recoveries > reported_recoveries_) {
       reported_recoveries_ = state.recoveries;
       RCLCPP_WARN(get_logger(),
@@ -913,7 +1011,9 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (state.status == navigation2d::NavigationStatus::kSucceeded) {
       navigation_.reset();
       if (phase_ == MissionPhase::kReturning || returning_) {
-        Finish(true, "frontiers exhausted and robot returned through final-map global path");
+        Finish(true, partial_return_
+                         ? "returned home early; some frontiers left unreachable"
+                         : "frontiers exhausted and robot returned through final-map global path");
       } else if (phase_ == MissionPhase::kCompleting) {
         explorer_.RecordAttempt(active_goal_, true);
         FinishCompleting();
@@ -985,7 +1085,10 @@ class AutonomousExplorer final : public rclcpp::Node {
         return;
       navigation_.reset();
       if (phase_ == MissionPhase::kReturning || returning_) {
-        Finish(false, "final online-map return path execution failed");
+        // Exploration itself may have covered useful space; a blocked home
+        // path is a partial mission, not a hard algorithm failure for debug UI.
+        partial_return_ = true;
+        Finish(true, "exploration ended; return path blocked on online map");
       } else if (phase_ == MissionPhase::kCompleting) {
         if (!first_segment_stall) explorer_.RecordAttempt(active_goal_, false);
         FinishCompleting();
@@ -1035,6 +1138,14 @@ class AutonomousExplorer final : public rclcpp::Node {
   double total_distance_m_ = 0.;
   double truth_origin_x_ = 0., truth_origin_y_ = 0., truth_origin_yaw_ = 0.;
   std::string last_backend_ = "not-run";
+  std::string last_state_;
+  std::string last_message_;
+  double last_path_progress_m_ = 0.;
+  double last_path_length_m_ = 0.;
+  double last_path_min_clearance_m_ = 0.;
+  double last_cmd_linear_ = 0.;
+  double last_cmd_angular_ = 0.;
+  int last_replans_ = 0;
   bool returning_ = false, finished_ = false, mission_started_ = false;
   bool truth_origin_ = false;
   std::string pose_source_;
@@ -1046,6 +1157,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   rclcpp::Time bootstrap_until_{0, 0, RCL_ROS_TIME};
   rclcpp::Time frontier_probe_until_{0, 0, RCL_ROS_TIME};
   rclcpp::Time velocity_stamp_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time last_debug_publish_{0, 0, RCL_ROS_TIME};
   int frontier_probe_count_ = 0;
   std::optional<nav_msgs::msg::OccupancyGrid> map_;
   std::optional<geometry_msgs::msg::PoseStamped> pose_, start_pose_;
@@ -1056,6 +1168,8 @@ class AutonomousExplorer final : public rclcpp::Node {
   std::unique_ptr<navigation2d::NavigationSystem> navigation_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr command_publisher_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_publisher_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr local_trajectory_publisher_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr planning_input_publisher_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr inflated_costmap_publisher_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_subscription_;
