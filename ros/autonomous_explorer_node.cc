@@ -912,10 +912,21 @@ class AutonomousExplorer final : public rclcpp::Node {
           ",\"frontier_cells\":" + std::to_string(goal.frontier_cells) +
           ",\"information_gain\":" + std::to_string(goal.information_gain) + "}";
     };
+    bool status_published_active = false;
     if (std::isfinite(active_goal_.x) && std::isfinite(active_goal_.y)) {
       append_tour_goal(active_goal_);
+      status_published_active = true;
     }
-    for (const Goal& goal : committed_tour_) append_tour_goal(goal);
+    for (const Goal& goal : committed_tour_) {
+      if (status_published_active &&
+          std::hypot(goal.x - active_goal_.x, goal.y - active_goal_.y) < .05 &&
+          std::hypot(goal.frontier_x - active_goal_.frontier_x,
+                     goal.frontier_y - active_goal_.frontier_y) < .05) {
+        status_published_active = false;
+        continue;
+      }
+      append_tour_goal(goal);
+    }
 
     std_msgs::msg::String status;
     status.data =
