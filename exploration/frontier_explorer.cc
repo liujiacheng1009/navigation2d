@@ -877,8 +877,10 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
   // all pick nearly the same hallway standoff. Collapse those into a single
   // observation task before ordering the tour, otherwise the UI shows a pile
   // of T-labels and the robot revisits the same mouth.
-  constexpr double kMergeViewpointM = .55;
-  constexpr double kMergeFrontierM = .50;
+  // One alcove/door mouth can span ~1 m of frontier cells; merge on either
+  // viewpoint or frontier proximity so the tour keeps one task per mouth.
+  constexpr double kMergeViewpointM = .80;
+  constexpr double kMergeFrontierM = .80;
   std::vector<ExplorationGoal> merged;
   merged.reserve(remaining.size());
   for (const auto& goal : remaining) {

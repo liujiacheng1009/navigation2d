@@ -1081,6 +1081,10 @@ class AutonomousExplorer final : public rclcpp::Node {
     tour.header = global.header;
     geometry_msgs::msg::PoseArray frontiers;
     frontiers.header = global.header;
+    // committed_tour_ keeps the active goal at the front for bookkeeping.
+    // Publishing both active_goal_ and the full queue duplicated the current
+    // mouth as T0+T1 and made doorway piles look twice as dense in the UI.
+    bool published_active = false;
     if (std::isfinite(active_goal_.x) && std::isfinite(active_goal_.y)) {
       geometry_msgs::msg::PoseStamped stamped;
       stamped.header = tour.header;
@@ -1088,8 +1092,16 @@ class AutonomousExplorer final : public rclcpp::Node {
       tour.poses.push_back(stamped);
       frontiers.poses.push_back(
           PoseFromXyYaw(active_goal_.frontier_x, active_goal_.frontier_y, active_goal_.yaw));
+      published_active = true;
     }
     for (const Goal& goal : committed_tour_) {
+      if (published_active &&
+          std::hypot(goal.x - active_goal_.x, goal.y - active_goal_.y) < .05 &&
+          std::hypot(goal.frontier_x - active_goal_.frontier_x,
+                     goal.frontier_y - active_goal_.frontier_y) < .05) {
+        published_active = false;  // skip only the matching front entry once
+        continue;
+      }
       geometry_msgs::msg::PoseStamped stamped;
       stamped.header = tour.header;
       stamped.pose = PoseFromXyYaw(goal.x, goal.y, goal.yaw);
