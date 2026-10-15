@@ -56,13 +56,10 @@ navigation2d::FrontierExplorerConfig ExplorerConfig() {
   config.minimum_frontier_cells = 6;
   // Keep frontier generation consistent with the navigation costmap: a goal
   // must leave room for the physical footprint and its obstacle buffer, not
-  // merely be free in the raw occupancy image.
-  // 0.50 m rejected every boundary viewpoint at valid corner spawns.  The
-  // physical radius is 0.28 m; retain a 0.12 m planning margin here and let
-  // Navigation2D's footprint, global path check, and live laser perform the
-  // authoritative second-stage feasibility test.
-  config.footprint_clearance = .40;
-  config.minimum_standoff = .55;
+  // merely be free in the raw occupancy image. CAD max footprint radius is
+  // ~0.207 m; planning uses 0.22 m + inflation 0.30 m (same as production).
+  config.footprint_clearance = .30;
+  config.minimum_standoff = .10;
   config.maximum_standoff = 1.10;
   config.blacklist_radius = 1.20;
   return config;
@@ -310,7 +307,9 @@ class AutonomousExplorer final : public rclcpp::Node {
     // a valid current pose is not rejected as "start occupied" on a replan
     // after a tight-corner approach.  This only clears the measured current
     // footprint; all cells ahead remain lethal unless observed free.
-    const double snapshot_clearance = .40;
+    // Slightly wider than planning radius so the measured pose is never
+    // rejected as "start occupied" after a tight corner approach.
+    const double snapshot_clearance = .30;
     const int robot_clearance = static_cast<int>(
         std::ceil(snapshot_clearance / map_->info.resolution));
     // Near-field lidar is fresher than the online occupancy grid. Preserve
@@ -376,16 +375,18 @@ class AutonomousExplorer final : public rclcpp::Node {
     // and replans from the measured pose; it never replays a breadcrumb path
     // or issues a scripted reverse manoeuvre.
     config.max_reverse_velocity = 0.;
-    config.robot_radius = .28;
-    config.inflation_radius = .32;
+    // CAD: chassis 290×230 mm, wheel envelope half-width 0.147 m, max
+    // footprint radius ~0.207 m. Match production navigation2d_node (+margin).
+    config.robot_radius = .22;
+    config.footprint = {{-.145, -.147}, {.115, -.147}, {.145, -.132},
+                        {.145, .132}, {.115, .147}, {-.145, .147}};
+    // Derived: footprint ~0.207 + loc 0.03 + raster/track 0.06 ≈ 0.30 m.
+    config.inflation_radius = .30;
     // The global plan already enforces the footprint buffer.  A long local
     // collision projection into sparse unknown cells caused false stops in
     // visibly clear aisles; retain near-field collision checking only.
-    config.collision_horizon = .35;
-    // Hard footprint collision remains robot_radius=.28. Requiring .36 m in
-    // the optional smoother rejected otherwise valid narrow-door paths and
-    // contradicted the exploration viewpoint clearance.
-    config.smoother_min_clearance = .28;
+    config.collision_horizon = .50;
+    config.smoother_min_clearance = .22;
     // Frontier goals are observation viewpoints, but home is a docking pose.
     // Keep their completion contracts separate: return must converge to the
     // recorded ground-truth start instead of stopping at the edge of the
@@ -464,7 +465,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         (pose_->pose.position.x - navigation_origin_x_) / map_->info.resolution));
     const int robot_row = static_cast<int>(std::floor(
         (pose_->pose.position.y - navigation_origin_y_) / map_->info.resolution));
-    const double evidence_clearance = .34;
+    const double evidence_clearance = .30;
     const int evidence_cells = static_cast<int>(std::ceil(evidence_clearance / map_->info.resolution));
     input.data.assign(map_->data.size(), 100);
     for (std::size_t index = 0; index < map_->data.size(); ++index) {
@@ -477,7 +478,8 @@ class AutonomousExplorer final : public rclcpp::Node {
     planning_input_publisher_->publish(input);
 
     nav_msgs::msg::OccupancyGrid inflated = input;
-    const int inflation_cells = static_cast<int>(std::ceil(.32 / map_->info.resolution));
+    constexpr double kInflationRadius = .30;
+    const int inflation_cells = static_cast<int>(std::ceil(kInflationRadius / map_->info.resolution));
     for (int row = 0; row < static_cast<int>(map_->info.height); ++row) {
       for (int col = 0; col < static_cast<int>(map_->info.width); ++col) {
         if (input.data[static_cast<std::size_t>(row) * map_->info.width + col] == 0) continue;
@@ -486,7 +488,7 @@ class AutonomousExplorer final : public rclcpp::Node {
             const int x = col + dx, y = row + dy;
             if (x < 0 || y < 0 || x >= static_cast<int>(map_->info.width) ||
                 y >= static_cast<int>(map_->info.height) ||
-                std::hypot(dx, dy) * map_->info.resolution > .32)
+                std::hypot(dx, dy) * map_->info.resolution > kInflationRadius)
               continue;
             inflated.data[static_cast<std::size_t>(y) * map_->info.width + x] = 100;
           }
@@ -965,7 +967,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         ",\"minimum_ttc_s\":" + std::to_string(last_minimum_ttc_s_) +
         ",\"planner_expansions\":" + std::to_string(last_planner_expansions_) +
         ",\"planner_elapsed_s\":" + std::to_string(last_planner_elapsed_s_) +
-        ",\"robot_radius_m\":0.28" +
+        ",\"robot_radius_m\":0.22" +
         ",\"cmd_vel\":{\"linear\":" + std::to_string(last_cmd_linear_) +
         ",\"angular\":" + std::to_string(last_cmd_angular_) +
         "},\"requested_cmd\":{\"linear\":" + std::to_string(last_requested_linear_) +
