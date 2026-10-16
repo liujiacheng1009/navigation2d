@@ -232,11 +232,13 @@ bool FrontierExplorer::SafeViewpoint(int col, int row) const {
   const int narrow_max = static_cast<int>(std::floor(kNarrowMaxWidth / map_.resolution));
   const bool corridor = (horizontal >= narrow_min && horizontal <= narrow_max) !=
                         (vertical >= narrow_min && vertical <= narrow_max);
-  // The configured footprint clearance is the contract with the executable
-  // planner. The historical narrow constant is only a lower bound for tests
-  // and legacy callers; production exploration config is .30 m.
-  const double corridor_clearance = config_.footprint_clearance >= .30
-      ? config_.footprint_clearance : kNarrowClearance;
+  // Wide open space keeps footprint_clearance (typically .30 with inflation).
+  // Corridor / doorway cells must use the planning radius (.22): requiring
+  // .30 m half-width rejects a physical 0.70 m kitchen door after SLAM
+  // thickens the jambs, so entry probes never reach the room side.
+  constexpr double kPlanningRadius = .22;
+  const double corridor_clearance =
+      std::max(kNarrowClearance, std::min(config_.footprint_clearance, kPlanningRadius));
   return corridor && ClearAt(col, row, corridor_clearance);
 }
 
@@ -920,16 +922,76 @@ std::vector<ExplorationGoal> FrontierExplorer::OneGoalPerMouth(
     if (length < .05) return 0.;
     return ((x - goal.frontier_x) * to_fx + (y - goal.frontier_y) * to_fy) / length;
   };
+  const auto corridor_mouth = [&](const ExplorationGoal& goal) {
+    const int col = static_cast<int>(std::floor(
+        (goal.frontier_x - map_.origin_x) / map_.resolution));
+    const int row = static_cast<int>(std::floor(
+        (goal.frontier_y - map_.origin_y) / map_.resolution));
+    const int probe = static_cast<int>(std::ceil(1.4 / map_.resolution));
+    int horizontal = 0, vertical = 0;
+    for (int x = col; x >= 0 && x > col - probe && Free(x, row); --x) ++horizontal;
+    for (int x = col + 1; x < map_.width && x <= col + probe && Free(x, row); ++x)
+      ++horizontal;
+    for (int y = row; y >= 0 && y > row - probe && Free(col, y); --y) ++vertical;
+    for (int y = row + 1; y < map_.height && y <= row + probe && Free(col, y); ++y)
+      ++vertical;
+    const int narrow_min = static_cast<int>(std::ceil(kNarrowMinWidth / map_.resolution));
+    const int narrow_max = static_cast<int>(std::floor(kNarrowMaxWidth / map_.resolution));
+    return (horizontal >= narrow_min && horizontal <= narrow_max) !=
+           (vertical >= narrow_min && vertical <= narrow_max);
+  };
+  const auto snap_to_door_centerline = [&](ExplorationGoal& goal) {
+    const double to_fx = goal.frontier_x - robot_x;
+    const double to_fy = goal.frontier_y - robot_y;
+    const double length = std::hypot(to_fx, to_fy);
+    if (length < .05) return;
+    const double dir_x = to_fx / length;
+    const double dir_y = to_fy / length;
+    const int search = static_cast<int>(std::ceil(.70 / map_.resolution));
+    const int fcol = static_cast<int>(std::floor(
+        (goal.frontier_x - map_.origin_x) / map_.resolution));
+    const int frow = static_cast<int>(std::floor(
+        (goal.frontier_y - map_.origin_y) / map_.resolution));
+    double best_depth = depth_past_frontier(goal, goal.x, goal.y);
+    int best_col = -1, best_row = -1;
+    for (int row = std::max(0, frow - search);
+         row <= std::min(map_.height - 1, frow + search); ++row) {
+      for (int col = std::max(0, fcol - search);
+           col <= std::min(map_.width - 1, fcol + search); ++col) {
+        if (!SafeViewpoint(col, row)) continue;
+        const auto [x, y] = CellCenter(col, row);
+        const double depth = depth_past_frontier(goal, x, y);
+        const double lateral = std::abs((x - goal.frontier_x) * dir_y -
+                                        (y - goal.frontier_y) * dir_x);
+        if (lateral > .38 || depth < -.05 || depth > .55) continue;
+        if (depth > best_depth + .02) {
+          best_depth = depth;
+          best_col = col;
+          best_row = row;
+        }
+      }
+    }
+    if (best_col < 0) return;
+    const auto [x, y] = CellCenter(best_col, best_row);
+    goal.x = x;
+    goal.y = y;
+    goal.yaw = std::atan2(dir_y, dir_x);
+  };
   for (auto& goal : mouths) {
     const double current_depth = depth_past_frontier(goal, goal.x, goal.y);
     if (current_depth >= .15) continue;
+    bool advanced = false;
     if (auto probe = SelectEntryProbe(goal, robot_x, robot_y, .22, .70)) {
       if (depth_past_frontier(goal, probe->x, probe->y) > current_depth + .05) {
         goal.x = probe->x;
         goal.y = probe->y;
         goal.yaw = probe->yaw;
+        advanced = true;
       }
     }
+    // Corridor mouths must not remain as far hallway standoffs when the
+    // planning graph already opened the gap: snap to the door centerline.
+    if (!advanced && corridor_mouth(goal)) snap_to_door_centerline(goal);
   }
   return mouths;
 }
