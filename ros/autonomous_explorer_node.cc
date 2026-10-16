@@ -414,10 +414,9 @@ class AutonomousExplorer final : public rclcpp::Node {
     // robot path following. Its velocity regulation around curvature and
     // obstacles avoids MPPI fallback oscillation on partially observed maps.
     config.controller = "rpp";
-    // Exploration tracking is forward-only. Recovery invalidates the route
-    // and replans from the measured pose; it never replays a breadcrumb path
-    // or issues a scripted reverse manoeuvre.
-    config.max_reverse_velocity = 0.;
+    // Prefer forward tracking, but allow a short reverse so a U-alcove tip
+    // can back out a few tens of centimetres while turning toward the exit.
+    config.max_reverse_velocity = .10;
     // CAD: chassis 290×230 mm, wheel envelope half-width 0.147 m, max
     // footprint radius ~0.207 m. Match production navigation2d_node (+margin).
     config.robot_radius = .22;
@@ -679,15 +678,29 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (!scan_ || !pose_ || now() < escape_until_) return false;
     const double front = SectorMinRange(0., .45);
     const double back = SectorMinRange(std::acos(-1.), .45);
+    const double left = SectorMinRange(+std::acos(-1.) / 2., .45);
+    const double right = SectorMinRange(-std::acos(-1.) / 2., .45);
     geometry_msgs::msg::Twist command;
-    if (front >= .45) command.linear.x = .12;
-    else if (back >= .45) command.linear.x = -.12;
-    else return false;
+    if (front >= .45) {
+      command.linear.x = .12;
+    } else if (back >= .35) {
+      // Brief reverse out of a wall tip; bias yaw toward the more open side.
+      command.linear.x = -.10;
+      if (left > right + .05) command.angular.z = .50;
+      else if (right > left + .05) command.angular.z = -.50;
+    } else if (std::max(left, right) >= .35) {
+      // Too tight to translate — turn toward the open flank first.
+      command.angular.z = left >= right ? .55 : -.55;
+    } else {
+      return false;
+    }
     escape_command_ = command;
-    escape_until_ = now() + rclcpp::Duration::from_seconds(1.6);
+    escape_until_ = now() + rclcpp::Duration::from_seconds(
+        std::abs(command.linear.x) > .01 ? 1.8 : 1.2);
     RCLCPP_WARN(get_logger(),
-                "Starting clearance escape: front=%.2f back=%.2f v=%.2f",
-                front, back, command.linear.x);
+                "Starting clearance escape: front=%.2f back=%.2f left=%.2f "
+                "right=%.2f v=%.2f w=%.2f",
+                front, back, left, right, command.linear.x, command.angular.z);
     return true;
   }
 
@@ -1420,6 +1433,49 @@ class AutonomousExplorer final : public rclcpp::Node {
                   state.planning_failure_reason.empty() ? "none" :
                       state.planning_failure_reason.c_str());
     }
+    // Dead-end tip crawl: GOAL sits in a U-alcove against the wall. The exit
+    // is open sideways/behind, but RPP keeps probing into the wall. Drop the
+    // terminal cell (lidar already saw the pocket), then turn/brief-reverse
+    // out along the driven trail instead of kissing the wall until timeout.
+    const double goal_distance_now = pose_
+        ? std::hypot(active_goal_.x - pose_->pose.position.x,
+                     active_goal_.y - pose_->pose.position.y)
+        : std::numeric_limits<double>::infinity();
+    const double front_range = SectorMinRange(0., .40);
+    const double left_range = SectorMinRange(+std::acos(-1.) / 2., .40);
+    const double right_range = SectorMinRange(-std::acos(-1.) / 2., .40);
+    const double side_range = std::min(left_range > 0. ? left_range : 10.,
+                                       right_range > 0. ? right_range : 10.);
+    const bool near_goal_alcove_crawl =
+        phase_ == MissionPhase::kExploring && !returning_ && !retreat_goal_ &&
+        (goal_distance_now < .45 ||
+         (state.global_path_length_m > .20 &&
+          state.path_progress_m >= .80 * state.global_path_length_m)) &&
+        last_goal_path_progress_time_.nanoseconds() > 0 &&
+        (now() - last_goal_path_progress_time_).seconds() > 2.5 &&
+        state.requested_command.linear < .06 &&
+        ((front_range > 0. && front_range < .35) || side_range < .40);
+    if (near_goal_alcove_crawl) {
+      RCLCPP_WARN(get_logger(),
+                  "Leaving near-goal alcove tip: dist=%.2f front=%.2f side=%.2f "
+                  "progress=%.2f/%.2f elapsed=%.1f",
+                  goal_distance_now, front_range, side_range,
+                  state.path_progress_m, state.global_path_length_m,
+                  (now() - goal_started_).seconds());
+      navigation_.reset();
+      explorer_.RecordAttempt(active_goal_, true);
+      pending_entry_goal_.reset();
+      entry_probe_attempts_ = 0;
+      if (!committed_tour_.empty()) committed_tour_.pop_front();
+      if (StartRetreat()) {
+        PublishStatus("RECOVERING", "alcove tip; turning back along driven trail");
+        return;
+      }
+      if (TryStartEscape()) return;
+      next_selection_ = now();
+      PublishStatus("SELECTING", "alcove tip left; selecting next viewpoint");
+      return;
+    }
     if (state.status == navigation2d::NavigationStatus::kSucceeded) {
       navigation_.reset();
       if (phase_ == MissionPhase::kReturning || returning_) {
@@ -1481,7 +1537,12 @@ class AutonomousExplorer final : public rclcpp::Node {
         PublishStatus("SELECTING", "frontier reached; continuing committed tour");
       }
     } else if (state.status == navigation2d::NavigationStatus::kBlocked ||
-               (state.phase != navigation2d::NavigationPhase::kDockToGoal &&
+               // Explore goals used to skip the wall-clock timeout while the
+               // controller sat in kDockToGoal / terminal crawl. Keep the dock
+               // exemption only for the home return pose.
+               (((phase_ == MissionPhase::kReturning || returning_)
+                     ? state.phase != navigation2d::NavigationPhase::kDockToGoal
+                     : true) &&
                 (now() - goal_started_).seconds() > goal_timeout_s_) ||
                // NavigationSystem's internal recovery can keep returning a
                // nominal command while the robot has made no progress on the
@@ -1504,9 +1565,14 @@ class AutonomousExplorer final : public rclcpp::Node {
                // but the robot sits in a doorway spinning/creeping without
                // meaningful advance. First-segment watches never fire here and
                // the full goal timeout left the robot stuck for minutes.
+               // Tight front/side clearance shortens the grace to 5 s so a
+               // U-alcove tip does not burn the remaining goal budget.
                (state.path_progress_m >= .05 &&
                 last_goal_path_progress_time_.nanoseconds() > 0 &&
-                (now() - last_goal_path_progress_time_).seconds() > 10.0 &&
+                (now() - last_goal_path_progress_time_).seconds() >
+                    (((front_range > 0. && front_range < .45) || side_range < .40)
+                         ? 5.0
+                         : 10.0) &&
                 (SectorMinRange(0., .50) < .45 || state.recoveries >= 2 ||
                  (state.requested_command.linear < .05 &&
                   std::abs(state.requested_command.angular) > .15))) ||
@@ -1535,7 +1601,10 @@ class AutonomousExplorer final : public rclcpp::Node {
       const bool mid_path_pinch =
           state.path_progress_m >= .05 &&
           last_goal_path_progress_time_.nanoseconds() > 0 &&
-          (now() - last_goal_path_progress_time_).seconds() > 10.0;
+          (now() - last_goal_path_progress_time_).seconds() >
+              (((front_range > 0. && front_range < .45) || side_range < .40)
+                   ? 5.0
+                   : 10.0);
       if (first_segment_stall || mid_path_pinch) {
         const bool force_return =
             first_segment_stall ? NoteFirstSegmentFailure(state) : false;
