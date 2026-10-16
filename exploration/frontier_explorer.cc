@@ -1159,21 +1159,20 @@ std::vector<ExplorationGoal> FrontierExplorer::OneGoalPerMouth(
   };
   for (auto& goal : mouths) {
     const double current_depth = depth_past_frontier(goal, goal.x, goal.y);
-    if (current_depth >= .20) continue;
+    if (current_depth >= kCloseStandoff) continue;
     bool advanced = false;
-    // Shallower first probe: 0.28 m often sits past SLAM speckles and fails,
-    // leaving a hallway standoff that makes the robot spin at the jamb.
-    if (auto probe = SelectEntryProbe(goal, robot_x, robot_y, .16, .70)) {
-      if (depth_past_frontier(goal, probe->x, probe->y) > current_depth + .04) {
+    // Prefer a room-side cell on the planning graph; fall back to snapping
+    // onto the free centerline of the mouth so the goal is not a hall spin.
+    if (auto probe = SelectEntryProbe(goal, robot_x, robot_y, kCloseStandoff,
+                                      .5 * kNarrowMaxWidth)) {
+      if (depth_past_frontier(goal, probe->x, probe->y) > current_depth) {
         goal.x = probe->x;
         goal.y = probe->y;
         goal.yaw = probe->yaw;
         advanced = true;
       }
     }
-    // Corridor / vestibule mouths must not remain as far hallway standoffs.
-    if (!advanced) snap_to_door_centerline(goal);
-    else if (corridor_mouth(goal)) snap_to_door_centerline(goal);
+    if (!advanced || corridor_mouth(goal)) snap_to_door_centerline(goal);
   }
   return mouths;
 }

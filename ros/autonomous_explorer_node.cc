@@ -422,17 +422,10 @@ class AutonomousExplorer final : public rclcpp::Node {
     config.robot_radius = .22;
     config.footprint = {{-.145, -.147}, {.115, -.147}, {.145, -.132},
                         {.145, .132}, {.115, .147}, {-.145, .147}};
-    // Soft preference only — inscribed lethal stays at robot_radius (.22).
-    // 0.30 m inflation painted kitchen mouths shut in the cost field and made
-    // RPP crawl-to-stop on doors that still had ~0.55 m free.
-    config.inflation_radius = .26;
-    // Door jambs sit ~0.10–0.15 m off the centerline. Default stop_distance
-    // 0.10 m latched STOP on every kitchen entry (ttc≈0.06) and caused the
-    // hesitate / abandon / replan loop. Keep a real contact floor, but let the
-    // chassis thread a 0.55 m throat.
-    config.collision_monitor_stop_distance = .05;
-    config.collision_monitor_slowdown_distance = .28;
-    config.collision_monitor_slowdown_ratio = .45;
+    // Soft preference band outside the inscribed robot_radius. Keep the
+    // production footprint contract; doorway progress is handled by mouth
+    // geometry / entry locking, not by shrinking safety distances.
+    config.inflation_radius = .30;
     // The global plan already enforces the footprint buffer.  A long local
     // collision projection into sparse unknown cells caused false stops in
     // visibly clear aisles; retain near-field collision checking only.
@@ -650,18 +643,28 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   bool EntryProbeSatisfied() const {
-    if (!pending_entry_goal_) return false;
-    const double depth = EntryProbeDepth();
-    // Deep past the mouth: treat as entered even if a speck of frontier
-    // remains — otherwise bathroom tips loop "incomplete at depth 0.8+".
-    if (depth >= .50) return true;
-    // 0.20 m + "frontier resolved" fired from the hallway when lidar peeked
-    // into the kitchen — robot declared entered without crossing the jambs.
-    const bool crossed = depth >= .35;
-    const bool fresh_map = map_revision_ > entry_probe_initial_map_revision_;
-    const bool boundary_resolved =
-        !explorer_.GoalRegionStillFrontier(*pending_entry_goal_);
-    return crossed && fresh_map && boundary_resolved;
+    if (!pending_entry_goal_ || !pose_) return false;
+    // Geometric mouth crossing: hallway viewpoint is on the approach side of
+    // the frontier plane; the robot has entered when it is on the opposite
+    // side. Depth thresholds falsely fired when lidar peeked from the hall.
+    const double ax =
+        pending_entry_goal_->frontier_x - pending_entry_goal_->x;
+    const double ay =
+        pending_entry_goal_->frontier_y - pending_entry_goal_->y;
+    const double length = std::hypot(ax, ay);
+    if (length < .05) return false;
+    const double ux = ax / length, uy = ay / length;
+    const double hall_side =
+        (pending_entry_goal_->x - pending_entry_goal_->frontier_x) * ux +
+        (pending_entry_goal_->y - pending_entry_goal_->frontier_y) * uy;
+    const double robot_side =
+        (pose_->pose.position.x - pending_entry_goal_->frontier_x) * ux +
+        (pose_->pose.position.y - pending_entry_goal_->frontier_y) * uy;
+    const double cell = map_ ? map_->info.resolution : .05;
+    if (hall_side < 0. && robot_side > cell) return true;
+    // Tip already deep in a pocket with the local boundary gone.
+    return robot_side > cell &&
+           !explorer_.GoalRegionStillFrontier(*pending_entry_goal_);
   }
 
   std::pair<int, int> PoseCell() const {
@@ -852,26 +855,43 @@ class AutonomousExplorer final : public rclcpp::Node {
       BeginReturn(partial_return_);
       return;
     }
+    // Finish the active doorway before rebuilding the global tour. Tour
+    // rebuilds at every reject were the hesitation loop: stop, replan far
+    // mouths, spin, repeat — without ever committing the kitchen entry.
+    if (pending_entry_goal_) {
+      if (EntryProbeSatisfied()) {
+        explorer_.RecordAttempt(*pending_entry_goal_, true, false);
+        pending_entry_goal_.reset();
+        entry_probe_attempts_ = 0;
+      } else if (entry_probe_attempts_ < 2 && StartEntryProbe()) {
+        return;
+      } else {
+        explorer_.RecordAttempt(*pending_entry_goal_, false);
+        pending_entry_goal_.reset();
+        entry_probe_attempts_ = 0;
+      }
+    }
     // Rebuild only at a goal decision boundary, never during execution.
     // Locking a multi-room tour across map growth skipped newly opened local
     // mouths at junctions (drive far, then backtrack). Mouth collapse already
     // prevents fragment chasing from decision-point rebuilds.
     BuildTour();
     // BuildTour can be empty while mouths still exist (pinched kitchen graph).
-    // Only enqueue the nearest two — dumping every mouth caused reject/escape
-    // ping-pong and visible hesitation.
+    // Take only the nearest mouth — one commitment, not a reject ping-pong.
     if (committed_tour_.empty() && explorer_.candidate_frontier_goals() > 0) {
       auto mouths = explorer_.SelectGoals(
           pose_->pose.position.x, pose_->pose.position.y);
-      std::sort(mouths.begin(), mouths.end(), [&](const Goal& a, const Goal& b) {
-        const double da = std::hypot(a.x - pose_->pose.position.x,
-                                     a.y - pose_->pose.position.y);
-        const double db = std::hypot(b.x - pose_->pose.position.x,
-                                     b.y - pose_->pose.position.y);
-        return da < db;
-      });
-      for (std::size_t i = 0; i < mouths.size() && i < 2; ++i)
-        committed_tour_.push_back(mouths[i]);
+      if (!mouths.empty()) {
+        auto nearest = std::min_element(
+            mouths.begin(), mouths.end(), [&](const Goal& a, const Goal& b) {
+              const double da = std::hypot(a.x - pose_->pose.position.x,
+                                           a.y - pose_->pose.position.y);
+              const double db = std::hypot(b.x - pose_->pose.position.x,
+                                           b.y - pose_->pose.position.y);
+              return da < db;
+            });
+        committed_tour_.push_back(*nearest);
+      }
     }
     // A frontier extractor can emit many viewpoints around one wall.  Do not
     // synchronously exhaust that list when the local controller rejects a
@@ -960,20 +980,11 @@ class AutonomousExplorer final : public rclcpp::Node {
         BeginReturn(reachable_unknown > 0);
         return;
       }
-      if (explorer_.candidate_frontier_goals() > 0) {
-        // Mouths remain, but do not zero the budget forever — that parked the
-        // robot in a 0.5 s reject/rebuild hesitation loop. Cap retries, then
-        // PARTIAL-return so motion resumes toward home instead of spinning.
-        PublishStatus("SELECTING", "candidate rejected; trying another viewpoint");
-        if (no_executable_frontier_cycles_ >= 18) BeginReturn(true);
-        else next_selection_ = now() + rclcpp::Duration::from_seconds(.15);
-        return;
-      }
+      // Failed mouths were already RecordAttempt'd. Wait for the next map
+      // tick instead of a busy reject/rebuild loop (that was the hesitation).
       PublishStatus("SELECTING",
                     "frontiers locally blocked; waiting for map update");
-      // Do not convert a transient maze doorway disagreement into completion.
-      const int give_up_cycles = reachable_unknown > 0 ? 24 : 12;
-      if (no_executable_frontier_cycles_ >= give_up_cycles) BeginReturn(true);
+      if (no_executable_frontier_cycles_ >= 12) BeginReturn(true);
       return;
     }
     ++empty_frontier_cycles_;
@@ -1596,9 +1607,7 @@ class AutonomousExplorer final : public rclcpp::Node {
                       "depth=%.2f; keeping unresolved",
                       pending_entry_goal_->frontier_x, pending_entry_goal_->frontier_y,
                       entry_probe_attempts_, EntryProbeDepth());
-          // Pose cool with enough growth that the same shallow crawl is not
-          // immediately rebuilt into the next tour (hesitation loop).
-          explorer_.CoolRegion(active_goal_.x, active_goal_.y, .55, 2000u);
+          explorer_.RecordAttempt(*pending_entry_goal_, false);
           pending_entry_goal_.reset();
           entry_probe_attempts_ = 0;
           committed_tour_.clear();
@@ -1667,24 +1676,17 @@ class AutonomousExplorer final : public rclcpp::Node {
                 (SectorMinRange(0., .50) < .45 || state.recoveries >= 2 ||
                  (state.requested_command.linear < .05 &&
                   std::abs(state.requested_command.angular) > .15))) ||
-               // Pure rotate-to-heading at a kitchen/jamb approach used to burn
-               // the full ~55 s goal timeout (visible hesitation). Bail sooner.
-               (state.path_progress_m >= .05 &&
-                last_goal_path_progress_time_.nanoseconds() > 0 &&
-                (now() - last_goal_path_progress_time_).seconds() > 8.0 &&
-                state.requested_command.linear < .02 &&
-                std::abs(state.requested_command.angular) > .12) ||
-               // Mid-route safety latch near an obstacle. Entry probes get a
-               // longer latch — door side-walls briefly trip STOP without a
-               // real front collision.
+               // Mid-route safety latch: only when the forward corridor is
+               // actually blocked. Side-jamb STOP during a door entry is not a
+               // failed mouth — abandoning it caused hesitate/replan loops.
                (state.path_progress_m >= .05 &&
                 state.collision_monitor_action ==
                     navigation2d::CollisionMonitorAction::kStop &&
                 state.requested_command.linear > .01 &&
                 state.minimum_ttc_s < .15 &&
+                SectorMinRange(0., .50) < .28 &&
                 last_goal_path_progress_time_.nanoseconds() > 0 &&
-                (now() - last_goal_path_progress_time_).seconds() >
-                    (pending_entry_goal_ ? 6.0 : 3.0))) {
+                (now() - last_goal_path_progress_time_).seconds() > 2.0)) {
       RCLCPP_WARN(get_logger(),
                   "Navigation2D frontier failed: status=%s phase=%d elapsed=%.1f replans=%d path=%.2f requested=(%.3f,%.3f) published=(%.3f,%.3f) controller_maneuver=%d intentional_stop=%s monitor_action=%d ttc=%.3f path_signature=%llu planner_error=%s",
                   state.status == navigation2d::NavigationStatus::kBlocked ? "blocked" : "timeout",
@@ -1709,19 +1711,13 @@ class AutonomousExplorer final : public rclcpp::Node {
       if (first_segment_stall || mid_path_pinch) {
         const bool force_return =
             first_segment_stall ? NoteFirstSegmentFailure(state) : false;
-        // Entry-probe pinch: cool the pose firmly so the same jamb is not
-        // re-queued every second (soft 800-cell cools caused hesitate loops).
-        // Keep the mouth eligible after real map growth (~2000 cells).
         if (phase_ != MissionPhase::kReturning && !returning_) {
-          if (pending_entry_goal_) {
-            explorer_.CoolRegion(active_goal_.x, active_goal_.y, .55, 2000u);
-            if (entry_probe_attempts_ >= 2) {
-              explorer_.CoolRegion(pending_entry_goal_->frontier_x,
-                                  pending_entry_goal_->frontier_y, .80, 2500u);
-            }
-          } else {
-            explorer_.RecordAttempt(active_goal_, false);
-          }
+          // One failed execution cools that mouth via the explorer policy —
+          // do not soft-cool and immediately reselect the same doorway.
+          explorer_.RecordAttempt(
+              pending_entry_goal_.value_or(active_goal_), false);
+          pending_entry_goal_.reset();
+          entry_probe_attempts_ = 0;
         }
         // Returning already owns the home path.  A short clearance jiggle
         // here only changes the start cell, so the next plan looks new and
