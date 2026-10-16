@@ -533,6 +533,20 @@ bool FrontierExplorer::Blacklisted(double x, double y, bool boundary) const {
   });
 }
 
+bool FrontierExplorer::PersistentlyBlacklisted(double x, double y) const {
+  return std::any_of(blacklist_.begin(), blacklist_.end(), [&](const auto& entry) {
+    return entry.persistent && std::hypot(x - entry.x, y - entry.y) < entry.radius;
+  });
+}
+
+void FrontierExplorer::ClearFailedBlacklist() {
+  blacklist_.erase(std::remove_if(blacklist_.begin(), blacklist_.end(),
+                                  [](const BlacklistEntry& entry) {
+                                    return !entry.persistent;
+                                  }),
+                   blacklist_.end());
+}
+
 bool FrontierExplorer::HasFreeLineOfSight(
     int from_col, int from_row, int to_col, int to_row) const {
   // A standoff pose is useful only when its lidar can actually observe the
@@ -988,9 +1002,17 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
 
 std::optional<ExplorationGoal> FrontierExplorer::SelectLeftoverApproach(
     double robot_x, double robot_y) {
-  if (map_.width <= 2 || map_.height <= 2 || map_.resolution <= 0. ||
+  const auto leftovers = SelectLeftoverApproaches(robot_x, robot_y, 1);
+  if (leftovers.empty()) return std::nullopt;
+  return leftovers.front();
+}
+
+std::vector<ExplorationGoal> FrontierExplorer::SelectLeftoverApproaches(
+    double robot_x, double robot_y, int max_count) {
+  std::vector<ExplorationGoal> leftovers;
+  if (max_count <= 0 || map_.width <= 2 || map_.height <= 2 || map_.resolution <= 0. ||
       map_.cells.size() != static_cast<std::size_t>(map_.width * map_.height))
-    return std::nullopt;
+    return leftovers;
   std::vector<unsigned char> frontier(map_.cells.size(), 0);
   // Same planning-radius graph as SelectGoals / StartNavigation. A looser
   // ClearAt(.18) leftover was rejected as goal-occupied before execution.
@@ -1013,7 +1035,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectLeftoverApproach(
     const double distance = std::hypot(col - robot_col, row - robot_row);
     if (distance < start_distance) { start_distance = distance; start = index; }
   }
-  if (start < 0) return std::nullopt;
+  if (start < 0) return leftovers;
   std::vector<int> travel_cells(map_.cells.size(), -1);
   std::deque<int> reachable{start};
   travel_cells[start] = 0;
@@ -1037,21 +1059,26 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectLeftoverApproach(
   }
   unresolved_frontier_cells_ = CountRawFrontierCells();
   raw_frontier_cells_ = unresolved_frontier_cells_;
-  if (raw_frontier_cells_ == 0) return std::nullopt;
+  if (raw_frontier_cells_ == 0) return leftovers;
   // Leftover free/unknown specks are often smaller than
   // minimum_frontier_cells, so the exploring tour drops them.  The pocket
   // they belong to is usually still reachable through ordinary open space.
-  // Place a normal 0.40 m viewpoint on that open graph; the planner takes
-  // the wide route, it does not squeeze a 1.2 m end gap.
+  // Place a normal viewpoint on that open graph; the planner takes the wide
+  // route, it does not squeeze a 1.2 m end gap.
   constexpr double kLeftoverRadius = 6.0;
   const int leftover_search = static_cast<int>(std::ceil(kLeftoverRadius / map_.resolution));
-  std::optional<ExplorationGoal> leftover;
-  bool leftover_room_mouth = false;
+  struct RankedLeftover {
+    ExplorationGoal goal;
+    bool room_mouth = false;
+  };
+  std::vector<RankedLeftover> ranked;
   for (int index = 0; index < map_.width * map_.height; ++index) {
     if (!frontier[index]) continue;
     const int target_row = index / map_.width, target_col = index % map_.width;
     const auto [frontier_x, frontier_y] = CellCenter(target_col, target_row);
-    if (Blacklisted(frontier_x, frontier_y, true)) continue;
+    // Completing must still see mouths that temporary failure cools hid from
+    // the exploring tour. Only a successful visit permanently suppresses them.
+    if (PersistentlyBlacklisted(frontier_x, frontier_y)) continue;
     // Skip tips with no reachable approach cell — wall-external unknown.
     bool approachable = travel_cells[static_cast<std::size_t>(index)] >= 0;
     if (!approachable) {
@@ -1068,6 +1095,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectLeftoverApproach(
     }
     if (!approachable) continue;
     const bool room_mouth = CorridorMouthAt(map_, frontier_x, frontier_y);
+    std::optional<ExplorationGoal> best_for_tip;
     for (int row = std::max(0, target_row - leftover_search);
          row <= std::min(map_.height - 1, target_row + leftover_search); ++row) {
       for (int col = std::max(0, target_col - leftover_search);
@@ -1075,24 +1103,37 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectLeftoverApproach(
         const int viewpoint_index = row * map_.width + col;
         if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0) continue;
         const auto [x, y] = CellCenter(col, row);
-        if (Blacklisted(x, y)) continue;
+        if (PersistentlyBlacklisted(x, y)) continue;
         const double standoff = std::hypot(x - frontier_x, y - frontier_y);
         if (standoff < kCloseStandoff || standoff > kLeftoverRadius) continue;
         const double travel = travel_cells[viewpoint_index] * map_.resolution;
         ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
                                   frontier_x, frontier_y, 1, map_.resolution,
                                   ViewpointScore(map_.resolution, travel, standoff, .8), true};
-        // Unfinished alcove/door tips beat open-wall speck leftovers.
-        const bool better =
-            !leftover || (room_mouth && !leftover_room_mouth) ||
-            (room_mouth == leftover_room_mouth && candidate.score > leftover->score);
-        if (!better) continue;
-        leftover = candidate;
-        leftover_room_mouth = room_mouth;
+        if (!best_for_tip || candidate.score > best_for_tip->score)
+          best_for_tip = candidate;
       }
     }
+    if (!best_for_tip) continue;
+    ranked.push_back({*best_for_tip, room_mouth});
   }
-  return leftover;
+  std::sort(ranked.begin(), ranked.end(), [](const RankedLeftover& a,
+                                             const RankedLeftover& b) {
+    if (a.room_mouth != b.room_mouth) return a.room_mouth && !b.room_mouth;
+    return a.goal.score > b.goal.score;
+  });
+  for (const auto& entry : ranked) {
+    const bool duplicate = std::any_of(
+        leftovers.begin(), leftovers.end(), [&](const ExplorationGoal& prior) {
+          return std::hypot(prior.frontier_x - entry.goal.frontier_x,
+                            prior.frontier_y - entry.goal.frontier_y) < .80 ||
+                 std::hypot(prior.x - entry.goal.x, prior.y - entry.goal.y) < .80;
+        });
+    if (duplicate) continue;
+    leftovers.push_back(entry.goal);
+    if (static_cast<int>(leftovers.size()) >= max_count) break;
+  }
+  return leftovers;
 }
 
 std::vector<ExplorationGoal> FrontierExplorer::StableGoals(

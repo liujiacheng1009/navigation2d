@@ -77,6 +77,13 @@ class FrontierExplorer {
   // One open-space approach to leftover free/unknown specks that failed the
   // ordinary cluster/standoff tests.  Not part of the exploring tour.
   std::optional<ExplorationGoal> SelectLeftoverApproach(double robot_x, double robot_y);
+  // Up to `max_count` leftover approaches on distinct unfinished mouths.
+  // Temporary failure cools are ignored so demoted alcoves stay finishable.
+  std::vector<ExplorationGoal> SelectLeftoverApproaches(double robot_x, double robot_y,
+                                                        int max_count = 3);
+  // Drop non-persistent blacklist entries so completing can retry mouths that
+  // failed once while their unknown tip is still visible.
+  void ClearFailedBlacklist();
   // Order SelectGoals mouths: unfinished doorway/alcove throats before
   // open-boundary expansion, then nearest BFS in the local pocket. Information
   // gain breaks near ties. Does not merge or re-pose goals.
@@ -145,6 +152,7 @@ class FrontierExplorer {
   bool RawFrontier(int col, int row) const;
   std::size_t CountRawFrontierCells() const;
   bool Blacklisted(double x, double y, bool boundary = false) const;
+  bool PersistentlyBlacklisted(double x, double y) const;
   std::vector<ExplorationGoal> StableGoals(std::vector<ExplorationGoal> goals);
   // Collapse micro-cluster viewpoints into one task per doorway/alcove mouth.
   // Prefers SelectEntryProbe (room side) over hallway standoffs.

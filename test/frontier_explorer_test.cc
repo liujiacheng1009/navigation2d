@@ -177,6 +177,15 @@ int main() {
   assert(leftover_goal.has_value());
   assert(leftover_goal->leftover_approach);
   assert(leftover_explorer.raw_frontier_cells() > 0);
+  // A temporary failure cool must not hide the unfinished tip from leftover
+  // completing — that was returning PARTIAL with white alcoves still visible.
+  leftover_explorer.RecordAttempt(*leftover_goal, false);
+  assert(leftover_explorer.SelectGoals(5., 5.).empty());
+  const auto leftover_after_fail =
+      leftover_explorer.SelectLeftoverApproach(5., 5.);
+  assert(leftover_after_fail.has_value());
+  leftover_explorer.ClearFailedBlacklist();
+  assert(leftover_explorer.SelectLeftoverApproaches(5., 5., 3).size() >= 1);
 
   // A 0.45 m pinch is wide enough for the 0.29 m chassis. The observation
   // pose has to sit on the far side of that pinch, beside the unknown

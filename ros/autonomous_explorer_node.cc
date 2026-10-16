@@ -846,18 +846,21 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   void StartCompletingProbe() {
-    completing_probe_used_ = true;
+    ++completing_probe_rounds_;
     phase_ = MissionPhase::kCompleting;
     committed_tour_.clear();
-    const auto leftover = explorer_.SelectLeftoverApproach(
-        pose_->pose.position.x, pose_->pose.position.y);
-    if (!leftover) {
+    // Failure cools hid unfinished alcove mouths from the exploring tour.
+    // Completing must see them again or PARTIAL leaves visible white tips.
+    explorer_.ClearFailedBlacklist();
+    cooled_signatures_.clear();
+    const auto leftovers = explorer_.SelectLeftoverApproaches(
+        pose_->pose.position.x, pose_->pose.position.y, 3);
+    if (leftovers.empty()) {
       RCLCPP_WARN(get_logger(),
-                  "Completing probe found no leftover approach: raw_cells=%zu",
-                  explorer_.raw_frontier_cells());
+                  "Completing probe found no leftover approach: raw_cells=%zu rounds=%d",
+                  explorer_.raw_frontier_cells(), completing_probe_rounds_);
       phase_ = MissionPhase::kExploring;
-      if (explorer_.raw_frontier_cells() > 0 &&
-          no_executable_frontier_cycles_ < 24) {
+      if (ShouldKeepWaitingForFrontiers()) {
         PublishStatus("SELECTING",
                       "unresolved boundary; waiting for map before return");
         return;
@@ -865,47 +868,39 @@ class AutonomousExplorer final : public rclcpp::Node {
       BeginReturn(explorer_.raw_frontier_cells() > 0);
       return;
     }
-    // Leftover goals inside the same doorway cell just bounce the robot on
-    // the threshold (frontier_cells=0 goals at ~0.5 m). Skip those.
-    if (std::hypot(leftover->x - pose_->pose.position.x,
-                    leftover->y - pose_->pose.position.y) < .60) {
-      RCLCPP_WARN(get_logger(),
-                  "Completing leftover is on the current doorway cell (%.2f, %.2f); skipping",
-                  leftover->x, leftover->y);
-      explorer_.RecordAttempt(*leftover, false);
-      phase_ = MissionPhase::kExploring;
-      if (explorer_.raw_frontier_cells() > 0 &&
-          no_executable_frontier_cycles_ < 24) {
-        PublishStatus("SELECTING",
-                      "doorway leftover skipped; waiting for map update");
+    for (const auto& leftover : leftovers) {
+      // Leftover goals inside the same doorway cell just bounce the robot on
+      // the threshold. Skip without cooling the mouth.
+      if (std::hypot(leftover.x - pose_->pose.position.x,
+                      leftover.y - pose_->pose.position.y) < .60) {
+        RCLCPP_WARN(get_logger(),
+                    "Completing leftover is on the current doorway cell (%.2f, %.2f); skipping",
+                    leftover.x, leftover.y);
+        continue;
+      }
+      if (StartNavigation(leftover, false)) return;
+      // Doorway leftovers often need a room-side entry pose; hallway standoffs
+      // fail StartNavigation while the mouth is still openable.
+      pending_entry_goal_ = leftover;
+      entry_probe_attempts_ = 0;
+      entry_probe_initial_known_cells_ = KnownCells();
+      entry_probe_initial_map_revision_ = map_revision_;
+      if (StartEntryProbe()) {
+        RCLCPP_WARN(get_logger(),
+                    "Completing leftover unplannable at (%.2f, %.2f); trying entry probe",
+                    leftover.x, leftover.y);
         return;
       }
-      BeginReturn(true);
-      return;
-    }
-    if (StartNavigation(*leftover, false)) return;
-    // Doorway leftovers often need a room-side entry pose; hallway standoffs
-    // fail StartNavigation while the mouth is still openable.
-    pending_entry_goal_ = *leftover;
-    entry_probe_attempts_ = 0;
-    entry_probe_initial_known_cells_ = KnownCells();
-    entry_probe_initial_map_revision_ = map_revision_;
-    if (StartEntryProbe()) {
       RCLCPP_WARN(get_logger(),
-                  "Completing leftover unplannable at (%.2f, %.2f); trying entry probe",
-                  leftover->x, leftover->y);
-      return;
+                  "Completing leftover approach is unplannable at (%.2f, %.2f)",
+                  leftover.x, leftover.y);
+      explorer_.RecordAttempt(leftover, false);
+      pending_entry_goal_.reset();
     }
-    RCLCPP_WARN(get_logger(),
-                "Completing leftover approach is unplannable at (%.2f, %.2f)",
-                leftover->x, leftover->y);
-    explorer_.RecordAttempt(*leftover, false);
-    pending_entry_goal_.reset();
     // Keep exploring while raw frontiers remain — one failed leftover must
     // not abandon unfinished alcoves/rooms.
     phase_ = MissionPhase::kExploring;
-    if (explorer_.raw_frontier_cells() > 0 &&
-        no_executable_frontier_cycles_ < 24) {
+    if (ShouldKeepWaitingForFrontiers()) {
       PublishStatus("SELECTING",
                     "leftover blocked; waiting for map update before return");
       return;
@@ -913,6 +908,13 @@ class AutonomousExplorer final : public rclcpp::Node {
     BeginReturn(explorer_.raw_frontier_cells() > 0 ||
                 explorer_.ReachableUnknownCells(pose_->pose.position.x,
                                                 pose_->pose.position.y) > 0);
+  }
+
+  bool ShouldKeepWaitingForFrontiers() const {
+    if (explorer_.raw_frontier_cells() == 0) return false;
+    // Allow several completing rounds on distinct mouths before giving up.
+    if (completing_probe_rounds_ < 3) return true;
+    return no_executable_frontier_cycles_ < 36;
   }
 
   void FinishCompleting() {
@@ -926,7 +928,16 @@ class AutonomousExplorer final : public rclcpp::Node {
       SelectNextGoal();
       return;
     }
-    BeginReturn();
+    if (explorer_.raw_frontier_cells() > 0 && completing_probe_rounds_ < 3) {
+      StartCompletingProbe();
+      return;
+    }
+    if (ShouldKeepWaitingForFrontiers()) {
+      PublishStatus("SELECTING",
+                    "completing emptied tour; waiting for unresolved frontiers");
+      return;
+    }
+    BeginReturn(explorer_.raw_frontier_cells() > 0);
   }
 
   bool StartRetreat() {
@@ -1038,7 +1049,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         frontier_probe_count_ = 0;
         reject_streak_ = 0;
         phase_ = MissionPhase::kExploring;
-        completing_probe_used_ = false;
+        completing_probe_rounds_ = 0;
         return;
       }
       committed_tour_.pop_front();
@@ -1102,7 +1113,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         last_no_executable_known_cells_ = known_now;
         frontier_probe_count_ = 0;
         // New map evidence may open a tip the previous leftover missed.
-        completing_probe_used_ = false;
+        completing_probe_rounds_ = 0;
       }
       NoteKnownProgress(known_now);
       ++no_executable_frontier_cycles_;
@@ -1116,15 +1127,14 @@ class AutonomousExplorer final : public rclcpp::Node {
       const bool no_executable_mouths =
           explorer_.candidate_frontier_goals() == 0 || tour_unplannable;
       if (explorer_.raw_frontier_cells() > 0 && no_executable_mouths) {
-        if (!completing_probe_used_) {
+        if (completing_probe_rounds_ < 3) {
           StartCompletingProbe();
           return;
         }
         // Completing probe can fail while OpenPassable still opens sealed
         // mouths into unknown rooms. Returning here left kitchen/side rooms
         // unexplored with PARTIAL and unresolved frontiers.
-        if ((reachable_unknown > 0 || explorer_.raw_frontier_cells() > 0) &&
-            no_executable_frontier_cycles_ < 24) {
+        if (ShouldKeepWaitingForFrontiers()) {
           PublishStatus("SELECTING",
                         "openable unknown remains; waiting for map update");
           return;
@@ -1137,10 +1147,11 @@ class AutonomousExplorer final : public rclcpp::Node {
       PublishStatus("SELECTING",
                     "frontiers locally blocked; waiting for map update");
       if (no_executable_frontier_cycles_ >= 12) {
-        if (!completing_probe_used_ && explorer_.raw_frontier_cells() > 0) {
+        if (completing_probe_rounds_ < 3 && explorer_.raw_frontier_cells() > 0) {
           StartCompletingProbe();
           return;
         }
+        if (ShouldKeepWaitingForFrontiers()) return;
         BeginReturn(true);
       }
       return;
@@ -2107,7 +2118,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   rclcpp::Time last_progress_time_{0, 0, RCL_ROS_TIME};
   enum class MissionPhase { kExploring, kCompleting, kReturning };
   MissionPhase phase_ = MissionPhase::kExploring;
-  bool completing_probe_used_ = false;
+  int completing_probe_rounds_ = 0;
   std::unordered_set<std::uint64_t> cooled_signatures_;
   int reject_streak_ = 0;
   bool reject_pose_valid_ = false;
