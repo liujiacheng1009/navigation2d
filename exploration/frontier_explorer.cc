@@ -48,6 +48,40 @@ namespace navigation2d {
 
 namespace {
 
+// True when the frontier sits in a door/alcove throat (narrow free run), not
+// an open-boundary wall expansion. Used to prefer unfinished rooms over
+// nearby hallway frontier crawling.
+bool CorridorMouthAt(const ExplorationGrid& map, double frontier_x,
+                     double frontier_y) {
+  if (map.resolution <= 0. || map.width <= 0 || map.height <= 0) return false;
+  const int col = static_cast<int>(
+      std::floor((frontier_x - map.origin_x) / map.resolution));
+  const int row = static_cast<int>(
+      std::floor((frontier_y - map.origin_y) / map.resolution));
+  if (col < 0 || row < 0 || col >= map.width || row >= map.height) return false;
+  auto free = [&](int c, int r) {
+    if (c < 0 || r < 0 || c >= map.width || r >= map.height) return false;
+    return map.cells[static_cast<std::size_t>(r) * map.width + c] == 0;
+  };
+  const int probe = static_cast<int>(std::ceil(1.4 / map.resolution));
+  int horizontal = 0, vertical = 0;
+  for (int x = col; x >= 0 && x > col - probe && free(x, row); --x) ++horizontal;
+  for (int x = col + 1; x < map.width && x <= col + probe && free(x, row); ++x)
+    ++horizontal;
+  for (int y = row; y >= 0 && y > row - probe && free(col, y); --y) ++vertical;
+  for (int y = row + 1; y < map.height && y <= row + probe && free(col, y); ++y)
+    ++vertical;
+  const int narrow_min = static_cast<int>(std::ceil(kNarrowMinWidth / map.resolution));
+  const int narrow_max = static_cast<int>(std::floor(kNarrowMaxWidth / map.resolution));
+  const bool narrow_h = horizontal >= narrow_min && horizontal <= narrow_max;
+  const bool narrow_v = vertical >= narrow_min && vertical <= narrow_max;
+  const int smaller = std::min(horizontal, vertical);
+  return narrow_h || narrow_v ||
+         (smaller >= narrow_min && smaller <= narrow_max);
+}
+
+
+
 int OpeningCells(const ExplorationGrid& grid, int col, int row, int step_col, int step_row) {
   if (grid.resolution <= 0.) return -1;
   const int limit = static_cast<int>(std::floor(kNarrowMaxWidth / grid.resolution)) + 1;
@@ -1099,26 +1133,7 @@ std::vector<ExplorationGoal> FrontierExplorer::OneGoalPerMouth(
     return ((x - goal.frontier_x) * to_fx + (y - goal.frontier_y) * to_fy) / length;
   };
   const auto corridor_mouth = [&](const ExplorationGoal& goal) {
-    const int col = static_cast<int>(std::floor(
-        (goal.frontier_x - map_.origin_x) / map_.resolution));
-    const int row = static_cast<int>(std::floor(
-        (goal.frontier_y - map_.origin_y) / map_.resolution));
-    const int probe = static_cast<int>(std::ceil(1.4 / map_.resolution));
-    int horizontal = 0, vertical = 0;
-    for (int x = col; x >= 0 && x > col - probe && Free(x, row); --x) ++horizontal;
-    for (int x = col + 1; x < map_.width && x <= col + probe && Free(x, row); ++x)
-      ++horizontal;
-    for (int y = row; y >= 0 && y > row - probe && Free(col, y); --y) ++vertical;
-    for (int y = row + 1; y < map_.height && y <= row + probe && Free(col, y); ++y)
-      ++vertical;
-    const int narrow_min = static_cast<int>(std::ceil(kNarrowMinWidth / map_.resolution));
-    const int narrow_max = static_cast<int>(std::floor(kNarrowMaxWidth / map_.resolution));
-    const bool narrow_h = horizontal >= narrow_min && horizontal <= narrow_max;
-    const bool narrow_v = vertical >= narrow_min && vertical <= narrow_max;
-    const int smaller = std::min(horizontal, vertical);
-    // Match SafeViewpoint: both-narrow kitchen vestibules are still doors.
-    return narrow_h || narrow_v ||
-           (smaller >= narrow_min && smaller <= narrow_max);
+    return CorridorMouthAt(map_, goal.frontier_x, goal.frontier_y);
   };
   const auto snap_to_door_centerline = [&](ExplorationGoal& goal) {
     const double to_fx = goal.frontier_x - robot_x;
@@ -1237,8 +1252,8 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
 
   std::vector<ExplorationGoal> tour;
   int current = nearest_safe(robot_x, robot_y);
-  // Coverage / vacuum policy: finish the local free-space neighbourhood before
-  // a long transit. Information gain only breaks exact BFS-distance ties.
+  // Coverage policy: unfinished doorway/alcove mouths before open-boundary
+  // expansion, then nearest BFS in the local pocket. Gain only breaks ties.
   std::vector<int> region_distance;
   const int region_radius_cells = std::max(
       1, static_cast<int>(std::ceil(5.0 / map_.resolution)));
@@ -1248,6 +1263,7 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
     int best_distance = std::numeric_limits<int>::max();
     double best_gain = -1.;
     int best_frontier_cells = -1;
+    bool best_room_mouth = false;
     for (auto candidate = remaining.begin(); candidate != remaining.end(); ++candidate) {
       const int viewpoint = nearest_safe(candidate->x, candidate->y);
       if (viewpoint < 0 || distances[viewpoint] < 0) continue;
@@ -1256,10 +1272,13 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
            region_distance[viewpoint] > region_radius_cells))
         continue;
       const int distance = distances[viewpoint];
+      const bool room_mouth =
+          CorridorMouthAt(map_, candidate->frontier_x, candidate->frontier_y);
       const bool better =
           next == remaining.end() ||
-          distance < best_distance ||
-          (distance == best_distance &&
+          (room_mouth && !best_room_mouth) ||
+          (room_mouth == best_room_mouth && distance < best_distance) ||
+          (room_mouth == best_room_mouth && distance == best_distance &&
            (candidate->information_gain > best_gain + 1e-9 ||
             (std::abs(candidate->information_gain - best_gain) <= 1e-9 &&
              candidate->frontier_cells > best_frontier_cells)));
@@ -1268,6 +1287,7 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
       best_distance = distance;
       best_gain = candidate->information_gain;
       best_frontier_cells = candidate->frontier_cells;
+      best_room_mouth = room_mouth;
     }
     if (next == remaining.end() && !region_distance.empty()) {
       region_distance.clear();

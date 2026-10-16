@@ -85,6 +85,36 @@ int main() {
   const auto tour = tour_explorer.BuildTour(tour_robot_x, tour_robot_y);
   assert(!tour.empty());
   assert(tour.front().x < 1.5);
+
+  // Nearby open-boundary expansion must not beat a farther unfinished kitchen
+  // doorway. Room/alcove throats lead the tour before hallway wall crawling.
+  navigation2d::ExplorationGrid kitchen_first;
+  kitchen_first.width = 100;
+  kitchen_first.height = 50;
+  kitchen_first.resolution = .05;
+  kitchen_first.cells.assign(
+      static_cast<std::size_t>(kitchen_first.width * kitchen_first.height), 100);
+  const auto kfirst = [&](int col0, int col1, int row0, int row1, std::int8_t value) {
+    for (int row = row0; row < row1; ++row)
+      for (int col = col0; col < col1; ++col)
+        kitchen_first.cells[static_cast<std::size_t>(row * kitchen_first.width + col)] =
+            value;
+  };
+  kfirst(4, 70, 18, 34, 0);          // hallway
+  kfirst(4, 22, 34, 46, -1);         // nearby wide open expansion (not a door)
+  kfirst(70, 96, 10, 40, -1);        // kitchen room
+  kfirst(68, 70, 20, 32, 0);         // 0.60 m throat into kitchen
+  kfirst(68, 70, 20, 24, 0);
+  navigation2d::OpenPassableOpenings(&kitchen_first);
+  navigation2d::FrontierExplorer kitchen_first_explorer(tour_config);
+  kitchen_first_explorer.UpdateMap(kitchen_first);
+  const double kfx = (20 + .5) * kitchen_first.resolution;
+  const double kfy = (26 + .5) * kitchen_first.resolution;
+  const auto kitchen_first_tour = kitchen_first_explorer.BuildTour(kfx, kfy);
+  assert(!kitchen_first_tour.empty());
+  // Lead with the kitchen-side mouth, not the nearer left open wall.
+  assert(kitchen_first_tour.front().x > 2.5);
+
   // One task per mouth: tour stops for distinct mouths stay well separated.
   for (std::size_t i = 0; i < tour.size(); ++i) {
     for (std::size_t j = i + 1; j < tour.size(); ++j) {

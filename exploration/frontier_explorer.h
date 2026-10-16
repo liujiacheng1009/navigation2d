@@ -77,9 +77,9 @@ class FrontierExplorer {
   // One open-space approach to leftover free/unknown specks that failed the
   // ordinary cluster/standoff tests.  Not part of the exploring tour.
   std::optional<ExplorationGoal> SelectLeftoverApproach(double robot_x, double robot_y);
-  // Nearest-coverage ordering over SelectGoals mouths. Exhaust the local
-  // free-space neighbourhood (BFS) before a long transit; information gain is
-  // only a near-tie breaker. Does not merge or re-pose goals.
+  // Order SelectGoals mouths: unfinished doorway/alcove throats before
+  // open-boundary expansion, then nearest BFS in the local pocket. Information
+  // gain breaks near ties. Does not merge or re-pose goals.
   std::vector<ExplorationGoal> BuildTour(double robot_x, double robot_y);
   // True when a nearer executable mouth sits in the local pocket while the
   // active goal is a clearly longer transit — used to interrupt drive-past
