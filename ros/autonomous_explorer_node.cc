@@ -436,12 +436,16 @@ class AutonomousExplorer final : public rclcpp::Node {
     // collision projection into sparse unknown cells caused false stops in
     // visibly clear aisles; retain near-field collision checking only.
     config.collision_horizon = .50;
-    // Soft target above the 0.22 m footprint: pull paths off walls when the
-    // corridor is wide enough.  A 0.70 m doorway still has ~0.35 m half-width.
-    config.smoother_min_clearance = .28;
-    config.smoother_obstacle_weight = .55;
-    config.smoother_data_weight = .10;
-    config.smoother_max_deviation = .18;
+    config.desired_linear_velocity = .28;
+    config.regulated_min_speed = .10;
+    // Soft target in open space: pull paths off speckles/walls when the room
+    // is wide. Doorways cannot reach 0.50 m clearance; the footprint check
+    // keeps those segments on the throat centreline.
+    config.smoother_min_clearance = .50;
+    config.smoother_obstacle_weight = 1.4;
+    config.smoother_data_weight = .05;
+    config.smoother_max_deviation = .55;
+    config.smoother_max_step = .05;
     // Frontier goals are observation viewpoints, but home is a docking pose.
     // Keep their completion contracts separate: return must converge to the
     // recorded ground-truth start instead of stopping at the edge of the
@@ -742,22 +746,28 @@ class AutonomousExplorer final : public rclcpp::Node {
     const double left = SectorMinRange(+std::acos(-1.) / 2., .45);
     const double right = SectorMinRange(-std::acos(-1.) / 2., .45);
     geometry_msgs::msg::Twist command;
+    // Open room with one tight flank: peel into free space instead of
+    // crawling forward along the speck that stalled the monitor.
+    const bool pinched_side =
+        std::min(left, right) < .30 && std::max(left, right) >= .70;
     if (front >= .45) {
-      command.linear.x = .12;
+      command.linear.x = pinched_side ? .22 : .18;
+      if (left + .25 < right) command.angular.z = -.55;
+      else if (right + .25 < left) command.angular.z = .55;
     } else if (back >= .35) {
       // Brief reverse out of a wall tip; bias yaw toward the more open side.
-      command.linear.x = -.10;
-      if (left > right + .05) command.angular.z = .50;
-      else if (right > left + .05) command.angular.z = -.50;
+      command.linear.x = -.16;
+      if (left > right + .05) command.angular.z = .65;
+      else if (right > left + .05) command.angular.z = -.65;
     } else if (std::max(left, right) >= .35) {
       // Too tight to translate — turn toward the open flank first.
-      command.angular.z = left >= right ? .55 : -.55;
+      command.angular.z = left >= right ? .70 : -.70;
     } else {
       return false;
     }
     escape_command_ = command;
     escape_until_ = now() + rclcpp::Duration::from_seconds(
-        std::abs(command.linear.x) > .01 ? 1.8 : 1.2);
+        std::abs(command.linear.x) > .01 ? 1.4 : 1.0);
     RCLCPP_WARN(get_logger(),
                 "Starting clearance escape: front=%.2f back=%.2f left=%.2f "
                 "right=%.2f v=%.2f w=%.2f",

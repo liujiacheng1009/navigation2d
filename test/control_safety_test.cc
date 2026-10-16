@@ -90,11 +90,12 @@ int main() {
   assert(std::abs(result.command.linear - .24) < 1e-9);
 
   // A return directly ahead scales with clearance and stays far above the
-  // old 0.035 m/s crawl. Clearance here is 0.55 - 0.18 = 0.37 m.
+  // old 0.035 m/s crawl. Clearance here is 0.40 - 0.18 = 0.22 m (inside the
+  // 0.28 m slowdown band; farther returns must not throttle open travel).
   navigation2d::CollisionMonitor ahead_monitor(side_config);
   navigation2d::LaserScan ahead_scan = side_scan;
   ahead_scan.angle_min = 0.;
-  ahead_scan.ranges = {.55};
+  ahead_scan.ranges = {.40};
   ahead_monitor.UpdateLaserScan(origin, ahead_scan);
   result = ahead_monitor.Filter(origin, {.24, 0.}, 5.);
   assert(result.action == navigation2d::CollisionMonitorAction::kSlowdown);

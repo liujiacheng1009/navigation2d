@@ -30,12 +30,12 @@ struct NavigationConfig {
   // Soft clearance band outside the hard footprint. Inside this band linear
   // speed is scaled with a smoothstep on (nearest_lethal - robot_radius).
   // Hard stops remain CollisionImminent / collision monitor — not this curve.
-  double regulated_soft_clearance = .08;
+  double regulated_soft_clearance = .06;
   // When the short forward corridor is free (near-field trust), use a tighter
   // band and a higher floor so side-wall proximity does not crawl the robot.
-  double regulated_soft_clearance_trusted = .05;
-  double regulated_clearance_min_scale = .40;
-  double regulated_clearance_min_scale_trusted = .65;
+  double regulated_soft_clearance_trusted = .04;
+  double regulated_clearance_min_scale = .55;
+  double regulated_clearance_min_scale_trusted = .85;
   double regulated_forward_trust_length = .55;
   double regulated_forward_trust_half_width = .10;
   double max_reverse_velocity = .12;
@@ -45,9 +45,11 @@ struct NavigationConfig {
   double collision_horizon = 1.;
   bool collision_monitor_enabled = true;
   double collision_monitor_stop_distance = .10;
-  double collision_monitor_slowdown_distance = .45;
-  double collision_monitor_slowdown_ratio = .35;
-  double collision_monitor_approach_horizon = 2.;
+  // Slow only in the near field. A 0.45 m / 0.35× band turned open-room
+  // speck graze into a crawl, then the stop latch held ttc≈one cycle.
+  double collision_monitor_slowdown_distance = .28;
+  double collision_monitor_slowdown_ratio = .55;
+  double collision_monitor_approach_horizon = .90;
   double collision_monitor_source_timeout = .3;
   int collision_monitor_trigger_cycles = 2;
   int collision_monitor_release_cycles = 2;
