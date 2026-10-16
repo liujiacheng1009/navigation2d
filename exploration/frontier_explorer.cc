@@ -144,8 +144,12 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
       if (next_col < 0 || next_row < 0 || next_col >= width || next_row >= height) continue;
       const int next = next_row * width + next_col;
       if (value_at(next_col, next_row) >= 0) continue;
-      if (OpeningCells(*grid, next_col, next_row, 1, 0) < 0 &&
-          OpeningCells(*grid, next_col, next_row, 0, 1) < 0) continue;
+      // Seeds are already passable openings. Keep flooding unknown with the
+      // remaining budget even after the cell is no longer "opening-shaped":
+      // requiring OpeningCells here stopped at the jambs, left the kitchen
+      // unknown, and made every entry probe unplannable (planner cannot step
+      // into unknown). Budget is the door span in cells — enough for a short
+      // free nose into the next room without opening the whole floor plan.
       const int next_budget = budget[static_cast<std::size_t>(current)] - 1;
       if (next_budget <= budget[static_cast<std::size_t>(next)]) continue;
       budget[static_cast<std::size_t>(next)] = next_budget;
@@ -1188,6 +1192,13 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
   if (approach_length < .05) return std::nullopt;
   const double direction_x = approach_x / approach_length;
   const double direction_y = approach_y / approach_length;
+  // Doorway entry after SLAM thickening: use the narrow-passage clearance so
+  // the BFS can cross a ~0.46 m free throat. Full SafeViewpoint (.30) refuses
+  // the jambs and reports "no safe entry probe" while standing in the mouth.
+  constexpr double kEntryClearance = .20;
+  const auto entry_cell = [&](int col, int row) {
+    return Free(col, row) && ClearAt(col, row, kEntryClearance);
+  };
   const int robot_col = static_cast<int>(std::floor(
       (robot_x - map_.origin_x) / map_.resolution));
   const int robot_row = static_cast<int>(std::floor(
@@ -1199,7 +1210,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
        row <= std::min(map_.height - 1, robot_row + start_search); ++row) {
     for (int col = std::max(0, robot_col - start_search);
          col <= std::min(map_.width - 1, robot_col + start_search); ++col) {
-      if (!SafeViewpoint(col, row)) continue;
+      if (!entry_cell(col, row)) continue;
       const double distance = std::hypot(col - robot_col, row - robot_row);
       if (distance < start_distance) {
         start_distance = distance;
@@ -1210,8 +1221,8 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
   if (start < 0) return std::nullopt;
 
   // The entry probe is allowed to use only the planning copy. OpenPassable-
-  // Openings() may have converted a narrow, partly observed doorway to free,
-  // while the unknown room beyond it remains blocked.
+  // Openings() converts a narrow, partly observed doorway — and a short free
+  // nose into the next room — so theta* can step past the frontier.
   std::vector<int> distance(map_.cells.size(), -1);
   std::deque<int> queue{start};
   distance[start] = 0;
@@ -1229,7 +1240,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
           next_row >= map_.height)
         continue;
       const int next = next_row * map_.width + next_col;
-      if (distance[next] >= 0 || !SafeViewpoint(next_col, next_row)) continue;
+      if (distance[next] >= 0 || !entry_cell(next_col, next_row)) continue;
       distance[next] = distance[current] + 1;
       queue.push_back(next);
     }
@@ -1248,7 +1259,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
     for (int col = std::max(0, frontier_col - search);
          col <= std::min(map_.width - 1, frontier_col + search); ++col) {
       const int index = row * map_.width + col;
-      if (distance[index] < 0 || !SafeViewpoint(col, row)) continue;
+      if (distance[index] < 0 || !entry_cell(col, row)) continue;
       const auto [x, y] = CellCenter(col, row);
       const double relative_x = x - frontier_goal.frontier_x;
       const double relative_y = y - frontier_goal.frontier_y;
