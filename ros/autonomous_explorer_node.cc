@@ -1118,20 +1118,21 @@ class AutonomousExplorer final : public rclcpp::Node {
                     Yaw(start_pose_->pose.orientation)};
     cooled_signatures_.clear();
     if (StartNavigation(home, true)) {
+      return_escape_attempts_ = 0;
       RCLCPP_INFO(get_logger(), "Final online-map return path accepted; tracking with RPP");
       PublishStatus("RETURNING", "tracking shortest route home on final observed map");
       return;
     }
-    if (TryStartEscape()) {
+    // Cap escape→return retries. An uncapped loop (escape 1.8s → BeginReturn
+    // fails → escape again) thrashed for hundreds of cycles, disagreed scan
+    // vs odometry, and blew localization by >1 m / 180°.
+    constexpr int kMaxReturnEscapes = 3;
+    if (return_escape_attempts_ < kMaxReturnEscapes && TryStartEscape()) {
+      ++return_escape_attempts_;
       escape_then_return_ = true;
       return;
     }
-    if (StartNavigation(home, true)) {
-      RCLCPP_INFO(get_logger(), "Final online-map return path accepted after escape; tracking with RPP");
-      PublishStatus("RETURNING", "tracking shortest route home on final observed map");
-      return;
-    }
-    Finish(false, "final online-map return path is unavailable");
+    Finish(true, "return path unavailable; stopping to protect localization");
   }
 
   bool ReplanActiveGoalOnLatestMap(const char* reason) {
@@ -1459,6 +1460,8 @@ class AutonomousExplorer final : public rclcpp::Node {
       // once pose, scan and a usable map are simultaneously available.
       started_ = now();
       mission_started_ = true;
+      return_escape_attempts_ = 0;
+      escape_then_return_ = false;
       initial_known_cells_ = KnownCells();
       last_no_executable_known_cells_ = initial_known_cells_;
       last_progress_known_cells_ = initial_known_cells_;
@@ -1480,6 +1483,13 @@ class AutonomousExplorer final : public rclcpp::Node {
     }
     if (phase_ == MissionPhase::kReturning || returning_) {
       if (!navigation_) {
+        // Do not re-enter BeginReturn every tick while an escape is queued —
+        // that was the thrash. TickEscape already resumes return once.
+        if (escape_until_.nanoseconds() != 0 || escape_then_return_) return;
+        if (return_escape_attempts_ >= 3) {
+          Finish(true, "return path unavailable; stopping to protect localization");
+          return;
+        }
         BeginReturn(partial_return_);
         return;
       }
@@ -1817,6 +1827,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   bool paint_driven_corridor_ = false;
   std::unordered_set<std::size_t> driven_corridor_;
   bool escape_then_return_ = false;
+  int return_escape_attempts_ = 0;
   geometry_msgs::msg::Twist escape_command_;
   rclcpp::Time escape_until_{0, 0, RCL_ROS_TIME};
   int reported_recoveries_ = 0;
