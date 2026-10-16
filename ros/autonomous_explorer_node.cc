@@ -521,6 +521,17 @@ class AutonomousExplorer final : public rclcpp::Node {
         navigation_.reset();
         return false;
       }
+      // The planner snapshot opens thin SLAM seals. A chord that is legal on
+      // that copy can still put the 0.22 m body on cells the live map draws
+      // as occupied. Reject it before it is published or tracked.
+      if (PathCutsMappedObstacle()) {
+        last_planning_failure_ = "path intersects mapped obstacle";
+        RCLCPP_WARN(get_logger(),
+                    "Navigation2D rejected goal before execution: %s",
+                    last_planning_failure_.c_str());
+        navigation_.reset();
+        return false;
+      }
       // Do not classify a frontier from the controller's first sample. At a
       // continuous goal handoff the measured velocity still belongs to the
       // previous route, so acceleration and collision constraints may
@@ -1586,6 +1597,60 @@ class AutonomousExplorer final : public rclcpp::Node {
     last_planner_elapsed_s_ = state.global_planning.elapsed_s;
   }
 
+  bool PathCutsMappedObstacle() const {
+    if (!navigation_ || !map_ || map_->info.resolution <= 0.) return false;
+    const auto& route = navigation_->path();
+    if (route.size() < 2) return false;
+    const double resolution = map_->info.resolution;
+    const double origin_x = map_->info.origin.position.x;
+    const double origin_y = map_->info.origin.position.y;
+    const int width = static_cast<int>(map_->info.width);
+    const int height = static_cast<int>(map_->info.height);
+    constexpr double kBodyRadius = .22;
+    const double robot_x = pose_ ? pose_->pose.position.x : 0.;
+    const double robot_y = pose_ ? pose_->pose.position.y : 0.;
+    const auto hits = [&](double world_x, double world_y) {
+      // The chassis may already be beside a wall. Only the route ahead of
+      // the body has to stay off mapped obstacles.
+      if (pose_ && std::hypot(world_x - robot_x, world_y - robot_y) < .35)
+        return false;
+      const int col = static_cast<int>(std::floor((world_x - origin_x) / resolution));
+      const int row = static_cast<int>(std::floor((world_y - origin_y) / resolution));
+      const int reach = static_cast<int>(std::ceil(
+          (kBodyRadius + std::sqrt(.5) * resolution) / resolution));
+      for (int dy = -reach; dy <= reach; ++dy) {
+        for (int dx = -reach; dx <= reach; ++dx) {
+          const int x = col + dx, y = row + dy;
+          if (x < 0 || y < 0 || x >= width || y >= height) continue;
+          const auto cell = map_->data[static_cast<std::size_t>(y) * map_->info.width + x];
+          if (cell < 50) continue;
+          const double center_x = origin_x + (x + .5) * resolution;
+          const double center_y = origin_y + (y + .5) * resolution;
+          const double half = .5 * resolution;
+          const double nearest_x = std::max(std::abs(world_x - center_x) - half, 0.);
+          const double nearest_y = std::max(std::abs(world_y - center_y) - half, 0.);
+          if (std::hypot(nearest_x, nearest_y) <= kBodyRadius) return true;
+        }
+      }
+      return false;
+    };
+    for (std::size_t index = 0; index < route.size(); ++index) {
+      const double x = navigation2d::X(route[index]) + navigation_origin_x_;
+      const double y = navigation2d::Y(route[index]) + navigation_origin_y_;
+      if (hits(x, y)) return true;
+      if (index == 0) continue;
+      const double x0 = navigation2d::X(route[index - 1]) + navigation_origin_x_;
+      const double y0 = navigation2d::Y(route[index - 1]) + navigation_origin_y_;
+      const double length = std::hypot(x - x0, y - y0);
+      const int samples = std::max(1, static_cast<int>(std::ceil(length / std::max(.02, .5 * resolution))));
+      for (int sample = 1; sample < samples; ++sample) {
+        const double ratio = static_cast<double>(sample) / samples;
+        if (hits(x0 + ratio * (x - x0), y0 + ratio * (y - y0))) return true;
+      }
+    }
+    return false;
+  }
+
   void PublishDebugPaths(const navigation2d::NavigationState& state) {
     if (!navigation_ || !pose_) return;
     const auto& route = navigation_->path();
@@ -1743,6 +1808,24 @@ class AutonomousExplorer final : public rclcpp::Node {
     const auto measured_velocity = FreshVelocity(tick_time);
     const auto state = navigation_->ComputeCommand(local_pose, measured_velocity,
                                                     tick_time.seconds());
+    if (PathCutsMappedObstacle()) {
+      RCLCPP_WARN(get_logger(),
+                  "Dropping path that intersects mapped obstacles goal=(%.2f, %.2f)",
+                  active_goal_.x, active_goal_.y);
+      geometry_msgs::msg::Twist stop;
+      command_publisher_->publish(stop);
+      nav_msgs::msg::Path empty;
+      empty.header.stamp = now();
+      empty.header.frame_id = "map";
+      path_publisher_->publish(empty);
+      if (phase_ == MissionPhase::kReturning || returning_) {
+        partial_return_ = true;
+        Finish(true, "return path intersected mapped obstacles");
+      } else {
+        DemoteActiveGoal("path intersected mapped obstacles");
+      }
+      return;
+    }
     CaptureNavTelemetry(state, measured_velocity);
     if (state.path_progress_m >= best_goal_path_progress_m_ + .08) {
       best_goal_path_progress_m_ = state.path_progress_m;
