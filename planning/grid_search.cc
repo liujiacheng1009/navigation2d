@@ -65,8 +65,9 @@ Path GridSearch(const LayeredCostmap& costmap, const Pose2d& start,
   const Grid2d& grid = costmap.grid();
   const auto [sx, sy] = grid.ToCell(X(start), Y(start));
   const auto [gx, gy] = grid.ToCell(X(goal), Y(goal));
-  const auto reject_occupied = [&](const Pose2d& pose, const char* which) {
-    if (!costmap.lethal(X(pose), Y(pose), clearance)) return;
+  const auto reject_occupied = [&](const Pose2d& pose, const char* which,
+                                   double pose_clearance) {
+    if (!costmap.lethal(X(pose), Y(pose), pose_clearance)) return;
     const double nearest = costmap.nearestLethalDistance(X(pose), Y(pose));
     std::ostringstream message;
     message << which << " occupied";
@@ -75,8 +76,14 @@ Path GridSearch(const LayeredCostmap& costmap, const Pose2d& start,
     }
     throw std::runtime_error(message.str());
   };
-  reject_occupied(start, "start");
-  reject_occupied(goal, "goal");
+  reject_occupied(start, "start", clearance);
+  // Path search keeps the half-cell raster margin in `clearance`.  The
+  // terminal pose does not: explorers place doorway goals with ClearAt(robot
+  // radius) (~0.22 m).  Requiring the inflated planning radius (~0.255 m)
+  // rejected every 0.70 m kitchen entry with "goal occupied, nearest 0.23 m".
+  const double goal_clearance =
+      std::max(0., clearance - std::sqrt(.5) * grid.resolution());
+  reject_occupied(goal, "goal", goal_clearance);
   if (gx >= 0 && gy >= 0 && gx < grid.width() && gy < grid.height() &&
       costmap.cost(gx, gy) == kUnknown)
     throw std::runtime_error("goal occupied, cell is unknown");

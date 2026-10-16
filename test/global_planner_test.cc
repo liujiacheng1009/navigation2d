@@ -286,4 +286,32 @@ int main() {
   }
   assert(mid_count > 0);
   assert(std::abs(mid_y_sum / mid_count - 1.00) < .25);
+
+  // 0.50 m free width (half-clearance 0.25): EffectivePlanningRadius ≈ 0.255
+  // used to reject the goal while explorers only require robot_radius 0.22.
+  const char* door_path = "/tmp/navigation2d_door_goal_clearance_test.json";
+  {
+    std::ofstream door_output(door_path);
+    constexpr int kW = 40, kH = 20;
+    door_output << R"({"width":40,"height":20,"resolution":0.05,"cells":[)";
+    for (int i = 0; i < kW * kH; ++i) {
+      const int col = i % kW, row = i / kW;
+      // Horizontal corridor rows 5..14 inclusive => 10 cells = 0.50 m.
+      const bool wall = row < 5 || row > 14 || col == 0 || col == kW - 1;
+      door_output << (i ? "," : "") << (wall ? 100 : 0);
+    }
+    door_output << "]}";
+  }
+  navigation2d::NavigationConfig door_config;
+  door_config.robot_radius = .22;
+  door_config.inflation_radius = .30;
+  navigation2d::LayeredCostmap door_map(navigation2d::Grid2d::Load(door_path), door_config);
+  const double planning_clearance =
+      door_config.robot_radius + std::sqrt(.5) * door_map.grid().resolution();
+  assert(planning_clearance > .25);
+  navigation2d::ThetaStarPlanner door_planner(planning_clearance);
+  const auto door_route = door_planner.Plan(
+      door_map, navigation2d::MakePose2d(.40, .50, 0.),
+      navigation2d::MakePose2d(1.60, .50, 0.));
+  assert(door_route.size() > 2);
 }
