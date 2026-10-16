@@ -717,22 +717,39 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
     return static_cast<double>(std::count(seen.begin(), seen.end(), 1)) *
            observation_map_.resolution * observation_map_.resolution;
   };
+  // Actionable frontier: raw free↔unknown boundary that is on the travel
+  // graph, OR a pinched tip cell adjacent to a travel cell. Narrow alcove
+  // tips often fail ClearAt on the frontier cell itself while a centerline
+  // pose one step back is still reachable — requiring travel on the tip
+  // left candidates=0 with the alcove still visibly unfinished.
+  auto approachable_frontier = [&](int col, int row) {
+    if (!RawFrontier(col, row)) return false;
+    const int index = row * map_.width + col;
+    if (travel_cells[static_cast<std::size_t>(index)] >= 0) return true;
+    constexpr int dx[] = {-1, 1, 0, 0, -1, -1, 1, 1};
+    constexpr int dy[] = {0, 0, -1, 1, -1, 1, -1, 1};
+    for (int direction = 0; direction < 8; ++direction) {
+      const int nc = col + dx[direction];
+      const int nr = row + dy[direction];
+      if (nc < 0 || nr < 0 || nc >= map_.width || nr >= map_.height) continue;
+      if (travel_cells[static_cast<std::size_t>(nr * map_.width + nc)] >= 0)
+        return true;
+    }
+    return false;
+  };
   for (int row = 0; row < map_.height; ++row) for (int col = 0; col < map_.width; ++col) {
     const int index = row * map_.width + col;
     // Use the raw mapper grid for the boundary.  `map_` may contain unknown
     // cells opened in a narrow passage solely to make the navigation graph
     // traversable; using it here erases the doorway's room frontier.
-    if (travel_cells[index] >= 0 && RawFrontier(col, row)) frontier[index] = 1;
+    if (approachable_frontier(col, row)) frontier[index] = 1;
   }
-  // Only boundaries reachable through the safe planning graph are actionable
-  // frontiers. Unknown cells behind occupied walls, outside the observed
-  // component, or stranded by a completed room must not block completion.
+  // Only approachable boundaries count. Unknown behind walls or outside the
+  // observed component must not block completion.
   std::size_t reachable_frontier_cells = 0;
   for (int row = 0; row < map_.height; ++row) {
     for (int col = 0; col < map_.width; ++col) {
-      const int index = row * map_.width + col;
-      if (travel_cells[index] >= 0 && RawFrontier(col, row))
-        ++reachable_frontier_cells;
+      if (approachable_frontier(col, row)) ++reachable_frontier_cells;
     }
   }
   unresolved_frontier_cells_ = reachable_frontier_cells;
@@ -1030,11 +1047,28 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectLeftoverApproach(
   constexpr double kLeftoverRadius = 6.0;
   const int leftover_search = static_cast<int>(std::ceil(kLeftoverRadius / map_.resolution));
   std::optional<ExplorationGoal> leftover;
+  bool leftover_room_mouth = false;
   for (int index = 0; index < map_.width * map_.height; ++index) {
     if (!frontier[index]) continue;
     const int target_row = index / map_.width, target_col = index % map_.width;
     const auto [frontier_x, frontier_y] = CellCenter(target_col, target_row);
     if (Blacklisted(frontier_x, frontier_y, true)) continue;
+    // Skip tips with no reachable approach cell — wall-external unknown.
+    bool approachable = travel_cells[static_cast<std::size_t>(index)] >= 0;
+    if (!approachable) {
+      for (int dy = -1; dy <= 1 && !approachable; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+          const int nc = target_col + dx, nr = target_row + dy;
+          if (nc < 0 || nr < 0 || nc >= map_.width || nr >= map_.height) continue;
+          if (travel_cells[static_cast<std::size_t>(nr * map_.width + nc)] >= 0) {
+            approachable = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!approachable) continue;
+    const bool room_mouth = CorridorMouthAt(map_, frontier_x, frontier_y);
     for (int row = std::max(0, target_row - leftover_search);
          row <= std::min(map_.height - 1, target_row + leftover_search); ++row) {
       for (int col = std::max(0, target_col - leftover_search);
@@ -1049,7 +1083,13 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectLeftoverApproach(
         ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
                                   frontier_x, frontier_y, 1, map_.resolution,
                                   ViewpointScore(map_.resolution, travel, standoff, .8), true};
-        if (!leftover || candidate.score > leftover->score) leftover = candidate;
+        // Unfinished alcove/door tips beat open-wall speck leftovers.
+        const bool better =
+            !leftover || (room_mouth && !leftover_room_mouth) ||
+            (room_mouth == leftover_room_mouth && candidate.score > leftover->score);
+        if (!better) continue;
+        leftover = candidate;
+        leftover_room_mouth = room_mouth;
       }
     }
   }
