@@ -1034,6 +1034,84 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
   return tour;
 }
 
+bool FrontierExplorer::ShouldPreemptForNearerMouth(
+    double robot_x, double robot_y, const ExplorationGoal& active_goal,
+    double path_remaining_m) {
+  constexpr double kLocalPocketM = 3.0;
+  constexpr double kFarSlackM = 1.0;
+  constexpr double kFarRatio = 2.0;
+  constexpr double kSameMouthM = .80;
+  if (map_.width <= 2 || map_.height <= 2 || map_.resolution <= 0. ||
+      map_.cells.size() != static_cast<std::size_t>(map_.width * map_.height))
+    return false;
+
+  std::vector<unsigned char> safe(map_.cells.size(), 0);
+  for (int row = 0; row < map_.height; ++row) {
+    for (int col = 0; col < map_.width; ++col) {
+      safe[static_cast<std::size_t>(row) * map_.width + col] = SafeViewpoint(col, row);
+    }
+  }
+  const auto nearest_safe = [&](double x, double y) -> int {
+    const int center_col = static_cast<int>(std::floor((x - map_.origin_x) / map_.resolution));
+    const int center_row = static_cast<int>(std::floor((y - map_.origin_y) / map_.resolution));
+    int best = -1;
+    double best_distance = std::numeric_limits<double>::infinity();
+    const int radius = static_cast<int>(std::ceil(1.0 / map_.resolution));
+    for (int row = std::max(0, center_row - radius);
+         row <= std::min(map_.height - 1, center_row + radius); ++row) {
+      for (int col = std::max(0, center_col - radius);
+           col <= std::min(map_.width - 1, center_col + radius); ++col) {
+        const int index = row * map_.width + col;
+        if (!safe[index]) continue;
+        const double distance = std::hypot(col - center_col, row - center_row);
+        if (distance < best_distance) { best_distance = distance; best = index; }
+      }
+    }
+    return best;
+  };
+  const int start = nearest_safe(robot_x, robot_y);
+  if (start < 0) return false;
+  std::vector<int> distance(map_.cells.size(), -1);
+  std::deque<int> queue{start};
+  distance[start] = 0;
+  constexpr int dx[] = {-1, 1, 0, 0};
+  constexpr int dy[] = {0, 0, -1, 1};
+  while (!queue.empty()) {
+    const int current = queue.front();
+    queue.pop_front();
+    const int row = current / map_.width, col = current % map_.width;
+    for (int direction = 0; direction < 4; ++direction) {
+      const int x = col + dx[direction], y = row + dy[direction];
+      if (x < 0 || y < 0 || x >= map_.width || y >= map_.height) continue;
+      const int next = y * map_.width + x;
+      if (!safe[next] || distance[next] >= 0) continue;
+      distance[next] = distance[current] + 1;
+      queue.push_back(next);
+    }
+  }
+  const auto bfs_m = [&](double x, double y) -> double {
+    const int cell = nearest_safe(x, y);
+    if (cell < 0 || distance[cell] < 0) return std::numeric_limits<double>::infinity();
+    return distance[cell] * map_.resolution;
+  };
+
+  double d_far = path_remaining_m;
+  if (!(d_far >= 0.)) d_far = bfs_m(active_goal.x, active_goal.y);
+  if (!std::isfinite(d_far)) return false;
+
+  const auto mouths = SelectGoals(robot_x, robot_y);
+  double d_near = std::numeric_limits<double>::infinity();
+  for (const auto& mouth : mouths) {
+    if (std::hypot(mouth.x - active_goal.x, mouth.y - active_goal.y) < kSameMouthM ||
+        std::hypot(mouth.frontier_x - active_goal.frontier_x,
+                   mouth.frontier_y - active_goal.frontier_y) < kSameMouthM)
+      continue;
+    d_near = std::min(d_near, bfs_m(mouth.x, mouth.y));
+  }
+  if (!std::isfinite(d_near) || d_near > kLocalPocketM) return false;
+  return d_far >= kFarRatio * d_near + kFarSlackM;
+}
+
 std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
     const ExplorationGoal& frontier_goal, double robot_x, double robot_y,
     double minimum_depth_m, double maximum_depth_m) const {

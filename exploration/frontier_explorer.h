@@ -81,6 +81,13 @@ class FrontierExplorer {
   // free-space neighbourhood (BFS) before a long transit; information gain is
   // only a near-tie breaker. Does not merge or re-pose goals.
   std::vector<ExplorationGoal> BuildTour(double robot_x, double robot_y);
+  // True when a nearer executable mouth sits in the local pocket while the
+  // active goal is a clearly longer transit — used to interrupt drive-past
+  // behaviour at junctions without re-ranking every control tick.
+  // `path_remaining_m` < 0 falls back to BFS distance to `active_goal`.
+  bool ShouldPreemptForNearerMouth(double robot_x, double robot_y,
+                                   const ExplorationGoal& active_goal,
+                                   double path_remaining_m = -1.);
   // Returns a reachable pose beyond a doorway frontier.  The pose is chosen
   // from the private planning grid, where only physically passable narrow
   // openings have been opened; it never treats an arbitrary unknown room as

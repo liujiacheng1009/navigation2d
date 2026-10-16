@@ -701,12 +701,11 @@ class AutonomousExplorer final : public rclcpp::Node {
       BeginReturn(partial_return_);
       return;
     }
-    // Keep a topology-level tour commitment. Re-ranking every scan makes a
-    // robot chase freshly split fragments of the same local frontier and is
-    // the root cause of the visible knot/zig-zag trajectory. A queued goal is
-    // still discarded immediately if its exact frontier has resolved; only an
-    // exhausted or invalidated tour is rebuilt from the latest online map.
-    if (committed_tour_.empty()) BuildTour();
+    // Rebuild only at a goal decision boundary, never during execution.
+    // Locking a multi-room tour across map growth skipped newly opened local
+    // mouths at junctions (drive far, then backtrack). Mouth collapse already
+    // prevents fragment chasing from decision-point rebuilds.
+    BuildTour();
     // A frontier extractor can emit many viewpoints around one wall.  Do not
     // synchronously exhaust that list when the local controller rejects a
     // viewpoint: that turns one transient costmap disagreement into hundreds
@@ -799,12 +798,21 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (distance > .24) return false;
     const Goal completed = active_goal_;
     std::size_t next_index = 1;
+    // Match BuildTour's ~5 m pocket: cross-hall handoff must stop at a decision
+    // boundary so newly opened junction mouths are not skipped.
+    constexpr double kHandoffPocketM = 5.0;
     while (next_index < committed_tour_.size()) {
       const Goal next = committed_tour_[next_index];
       if (!explorer_.GoalRegionStillFrontier(next)) {
         ++next_index;
         continue;
       }
+      if (!explorer_.InSameReachableRegion(
+              pose_->pose.position.x, pose_->pose.position.y, next.x, next.y,
+              kHandoffPocketM) &&
+          !explorer_.InSameReachableRegion(
+              active_goal_.x, active_goal_.y, next.x, next.y, kHandoffPocketM))
+        return false;
       const double next_bearing = std::atan2(
           next.y - pose_->pose.position.y, next.x - pose_->pose.position.x);
       const double direction_change = std::abs(NormalizeAngle(
@@ -830,6 +838,32 @@ class AutonomousExplorer final : public rclcpp::Node {
       ++next_index;
     }
     return false;
+  }
+
+  bool MaybePreemptForNearerMouth(double path_remaining_m) {
+    if (phase_ != MissionPhase::kExploring || returning_ || !navigation_ ||
+        !pose_ || pending_entry_goal_) return false;
+    const auto now_t = now();
+    if (last_preempt_check_.nanoseconds() > 0 &&
+        (now_t - last_preempt_check_).seconds() < 1.0 &&
+        map_revision_ == last_preempt_map_revision_)
+      return false;
+    last_preempt_check_ = now_t;
+    last_preempt_map_revision_ = map_revision_;
+    if (!explorer_.ShouldPreemptForNearerMouth(
+            pose_->pose.position.x, pose_->pose.position.y, active_goal_,
+            path_remaining_m))
+      return false;
+    RCLCPP_WARN(get_logger(),
+                "Preempting far transit for nearer mouth: active=(%.2f,%.2f) "
+                "path_remaining=%.2f",
+                active_goal_.x, active_goal_.y, path_remaining_m);
+    navigation_.reset();
+    committed_tour_.clear();
+    next_selection_ = now_t;
+    PublishStatus("SELECTING", "nearer mouth opened; rebuilding local pocket tour");
+    SelectNextGoal();
+    return true;
   }
 
   void BeginReturn(bool force_return = false) {
@@ -1235,6 +1269,11 @@ class AutonomousExplorer final : public rclcpp::Node {
     const auto state = navigation_->ComputeCommand(local_pose, measured_velocity,
                                                     tick_time.seconds());
     CaptureNavTelemetry(state, measured_velocity);
+    if (phase_ == MissionPhase::kExploring && !returning_) {
+      const double path_remaining =
+          std::max(0., state.global_path_length_m - state.path_progress_m);
+      if (MaybePreemptForNearerMouth(path_remaining)) return;
+    }
     if (state.controller_diagnostics.backend == navigation2d::ControllerBackend::kAcados)
       ++acados_commands_;
     else if (state.controller_diagnostics.backend == navigation2d::ControllerBackend::kMppi)
@@ -1483,6 +1522,8 @@ class AutonomousExplorer final : public rclcpp::Node {
   int entry_probe_attempts_ = 0;
   std::size_t entry_probe_initial_known_cells_ = 0;
   std::uint64_t entry_probe_initial_map_revision_ = 0;
+  rclcpp::Time last_preempt_check_{0, 0, RCL_ROS_TIME};
+  std::uint64_t last_preempt_map_revision_ = 0;
   std::deque<Goal> committed_tour_;
   rclcpp::Time started_{0, 0, RCL_ROS_TIME};
   rclcpp::Time goal_started_{0, 0, RCL_ROS_TIME};
