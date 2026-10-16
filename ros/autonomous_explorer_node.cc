@@ -913,9 +913,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       BeginReturn(partial_return_);
       return;
     }
-    // Finish the active doorway before rebuilding the global tour. Tour
-    // rebuilds at every reject were the hesitation loop: stop, replan far
-    // mouths, spin, repeat — without ever committing the kitchen entry.
+    // Finish the active doorway before picking the next tour stop.
     if (pending_entry_goal_) {
       if (EntryProbeSatisfied()) {
         explorer_.RecordAttempt(*pending_entry_goal_, true, false);
@@ -929,26 +927,31 @@ class AutonomousExplorer final : public rclcpp::Node {
         entry_probe_attempts_ = 0;
       }
     }
-    // Rebuild only at a goal decision boundary, never during execution.
-    // Locking a multi-room tour across map growth skipped newly opened local
-    // mouths at junctions (drive far, then backtrack). Mouth collapse already
-    // prevents fragment chasing from decision-point rebuilds.
-    BuildTour();
-    // BuildTour can be empty while mouths still exist (pinched kitchen graph).
-    // Take only the nearest mouth — one commitment, not a reject ping-pong.
-    if (committed_tour_.empty() && explorer_.candidate_frontier_goals() > 0) {
-      auto mouths = explorer_.SelectGoals(
-          pose_->pose.position.x, pose_->pose.position.y);
-      if (!mouths.empty()) {
-        auto nearest = std::min_element(
-            mouths.begin(), mouths.end(), [&](const Goal& a, const Goal& b) {
-              const double da = std::hypot(a.x - pose_->pose.position.x,
-                                           a.y - pose_->pose.position.y);
-              const double db = std::hypot(b.x - pose_->pose.position.x,
-                                           b.y - pose_->pose.position.y);
-              return da < db;
-            });
-        committed_tour_.push_back(*nearest);
+    // Drop mouths the lidar already cleared; keep the remaining committed
+    // order. Rebuilding the tour on every SelectNextGoal reordered T1..Tn and
+    // made the robot U-turn between alcoves (triangular stutter in open space).
+    while (!committed_tour_.empty() &&
+           !explorer_.GoalRegionStillFrontier(committed_tour_.front())) {
+      committed_tour_.pop_front();
+    }
+    if (committed_tour_.empty()) {
+      BuildTour();
+      // BuildTour can be empty while mouths still exist (pinched kitchen graph).
+      // Take only the nearest mouth — one commitment, not a reject ping-pong.
+      if (committed_tour_.empty() && explorer_.candidate_frontier_goals() > 0) {
+        auto mouths = explorer_.SelectGoals(
+            pose_->pose.position.x, pose_->pose.position.y);
+        if (!mouths.empty()) {
+          auto nearest = std::min_element(
+              mouths.begin(), mouths.end(), [&](const Goal& a, const Goal& b) {
+                const double da = std::hypot(a.x - pose_->pose.position.x,
+                                             a.y - pose_->pose.position.y);
+                const double db = std::hypot(b.x - pose_->pose.position.x,
+                                             b.y - pose_->pose.position.y);
+                return da < db;
+              });
+          committed_tour_.push_back(*nearest);
+        }
       }
     }
     // A frontier extractor can emit many viewpoints around one wall.  Do not
@@ -1141,6 +1144,31 @@ class AutonomousExplorer final : public rclcpp::Node {
     const double goal_range = std::hypot(active_goal_.x - pose_->pose.position.x,
                                          active_goal_.y - pose_->pose.position.y);
     if (goal_range < 1.5) return false;
+    // Already rolling on the active route: only preempt for a nearer mouth
+    // that continues roughly forward. Side/behind mouths caused open-space
+    // U-turn stutter between T-labels.
+    if (best_goal_path_progress_m_ > .30) {
+      const double yaw = Yaw(pose_->pose.orientation);
+      const auto mouths = explorer_.SelectGoals(
+          pose_->pose.position.x, pose_->pose.position.y);
+      bool forward_nearer = false;
+      for (const auto& mouth : mouths) {
+        if (std::hypot(mouth.x - active_goal_.x, mouth.y - active_goal_.y) < .80 ||
+            std::hypot(mouth.frontier_x - active_goal_.frontier_x,
+                       mouth.frontier_y - active_goal_.frontier_y) < .80)
+          continue;
+        const double range = std::hypot(mouth.x - pose_->pose.position.x,
+                                        mouth.y - pose_->pose.position.y);
+        if (range + 1.0 >= goal_range) continue;
+        const double bearing = std::atan2(mouth.y - pose_->pose.position.y,
+                                          mouth.x - pose_->pose.position.x);
+        if (std::abs(NormalizeAngle(bearing - yaw)) < .85) {
+          forward_nearer = true;
+          break;
+        }
+      }
+      if (!forward_nearer) return false;
+    }
     const auto now_t = now();
     if (last_preempt_check_.nanoseconds() > 0 &&
         (now_t - last_preempt_check_).seconds() < 1.0 &&
