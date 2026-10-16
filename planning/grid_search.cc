@@ -45,20 +45,51 @@ std::optional<double> SegmentTraversalCost(const LayeredCostmap& costmap, int fr
   const Grid2d& grid = costmap.grid();
   const int x0 = from % grid.width(), y0 = from / grid.width();
   const int x1 = to % grid.width(), y1 = to / grid.width();
-  const double length_cells = std::hypot(x1 - x0, y1 - y0);
-  const int samples = std::max(1, static_cast<int>(std::ceil(length_cells * 2.)));
+  // Supercover Bresenham: visit every cell the chord touches. Uniform
+  // parametric sampling used to skip single-cell walls on long Theta*
+  // visibility edges, producing densified paths that cut through obstacles.
+  const int dx = std::abs(x1 - x0), dy = std::abs(y1 - y0);
+  const int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  int x = x0, y = y0;
+  int err = dx - dy;
   double accumulated = 0.;
-  for (int sample = 1; sample <= samples; ++sample) {
-    const double ratio = static_cast<double>(sample) / samples;
-    const int x = static_cast<int>(std::lround(x0 + ratio * (x1 - x0)));
-    const int y = static_cast<int>(std::lround(y0 + ratio * (y1 - y0)));
+  int visited = 0;
+  const int max_steps = dx + dy + 2;
+  for (int step = 0; step < max_steps; ++step) {
     const auto [wx, wy] = grid.CellCenter(x, y);
     // Unknown is not a wall, but a line of sight must not cross it.
     if (costmap.cost(x, y) == kUnknown || costmap.lethal(wx, wy, clearance))
       return std::nullopt;
-    accumulated += (length_cells / samples) * TraversalCellCost(costmap.cost(x, y));
+    accumulated += TraversalCellCost(costmap.cost(x, y));
+    ++visited;
+    if (x == x1 && y == y1) break;
+    const int e2 = 2 * err;
+    // When the ray crosses a grid corner, step through both adjacent cells so
+    // a diagonal cannot slip between two lethal cells that meet at a point.
+    if (e2 >= -dy && e2 <= dx && dx > 0 && dy > 0) {
+      const int cx = x + sx, cy = y + sy;
+      if (cx != x1 || cy != y1) {
+        const auto [cwx, cwy] = grid.CellCenter(cx, y);
+        if (costmap.cost(cx, y) == kUnknown || costmap.lethal(cwx, cwy, clearance))
+          return std::nullopt;
+        const auto [cwx2, cwy2] = grid.CellCenter(x, cy);
+        if (costmap.cost(x, cy) == kUnknown || costmap.lethal(cwx2, cwy2, clearance))
+          return std::nullopt;
+      }
+    }
+    if (e2 >= -dy) {
+      err -= dy;
+      x += sx;
+    }
+    if (e2 <= dx) {
+      err += dx;
+      y += sy;
+    }
   }
-  return accumulated;
+  if (x != x1 || y != y1) return std::nullopt;
+  const double length_cells = std::hypot(static_cast<double>(dx), static_cast<double>(dy));
+  if (visited <= 0) return std::nullopt;
+  return accumulated * (length_cells / static_cast<double>(visited));
 }
 
 Path GridSearch(const LayeredCostmap& costmap, const Pose2d& start,

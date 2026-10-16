@@ -42,7 +42,9 @@ bool Grid2d::occupied(int x, int y) const {
   const unsigned char value = cells_[static_cast<std::size_t>(y * width_ + x)];
   // 255 is unknown. It blocks entry, but it is not a wall.
   if (value == 255) return false;
-  return value >= 250;
+  // Accept both conventions: ROS occupancy (100) and navigation snapshots
+  // (254). Values below 100 are free / soft preference only.
+  return value >= 100;
 }
 
 bool Grid2d::unknown(int x, int y) const {

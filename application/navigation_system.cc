@@ -88,9 +88,23 @@ Path DensifyPath(const Path& sparse, double maximum_step) {
 }
 
 bool PathFootprintValid(const Path& path, const LayeredCostmap& costmap, double robot_radius) {
-  return !path.empty() && std::all_of(path.begin(), path.end(), [&](const Pose2d& pose) {
-    return !costmap.lethal(X(pose), Y(pose), robot_radius);
-  });
+  if (path.empty()) return false;
+  const double sample_step = std::max(.02, .5 * costmap.grid().resolution());
+  for (std::size_t index = 0; index < path.size(); ++index) {
+    if (costmap.lethal(X(path[index]), Y(path[index]), robot_radius)) return false;
+    if (index == 0) continue;
+    const Eigen::Vector2d start = path[index - 1].translation();
+    const Eigen::Vector2d segment = path[index].translation() - start;
+    const double length = segment.norm();
+    if (length <= 1e-9) continue;
+    const int samples = std::max(1, static_cast<int>(std::ceil(length / sample_step)));
+    for (int sample = 1; sample <= samples; ++sample) {
+      const Eigen::Vector2d point =
+          start + (static_cast<double>(sample) / samples) * segment;
+      if (costmap.lethal(point.x(), point.y(), robot_radius)) return false;
+    }
+  }
+  return true;
 }
 
 // GridSearch and the continuous controller must agree on the clearance of a
@@ -529,11 +543,23 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
     impl_->last_progress_time = timestamp;
     impl_->progress_initialized = true;
   }
-  // A global path is a route contract, not a high-rate control signal.  The
-  // local collision layer sees every scan; recomputing the same static global
-  // map path while the robot moves changes its grid anchor and makes the
-  // controller chase a discontinuous reference. Replan only when no route
-  // exists (initial planning or after recovery invalidated it).
+  // A global path is a route contract, not a high-rate control signal.  Do not
+  // replan every scan — that makes the controller chase a discontinuous
+  // reference. But once the live obstacle layer makes the committed chord
+  // footprint-illegal, drop it immediately so we never keep publishing a
+  // path that cuts through newly observed walls/specks.
+  if (!impl_->path.empty()) {
+    const double planning_radius = impl_->config.planner == "state_lattice"
+        ? impl_->config.robot_radius
+        : EffectivePlanningRadius(impl_->config, impl_->costmap);
+    if (!PathFootprintValid(impl_->path, impl_->costmap, planning_radius)) {
+      impl_->path.clear();
+      impl_->state.planning_failure_reason =
+          "active path collided with updated obstacles";
+      impl_->state.command = {};
+      impl_->next_replan_time = 0.;
+    }
+  }
   if (impl_->path.empty()) {
     impl_->Replan(pose); impl_->observation_changed = false;
     impl_->last_progress_time = timestamp;
