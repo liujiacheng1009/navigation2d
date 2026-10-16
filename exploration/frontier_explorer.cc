@@ -96,10 +96,14 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
   // fully seals a row/column, gap scanning never sees a throat. Clear occupied
   // cells that sit in a door-width corridor with free/unknown on both passage
   // sides and only a thin occupied thickness.
+  //
+  // Span must be measured on the occupied seal only. Including free/unknown in
+  // the run length skipped every short bar that shares a row with an open hall
+  // (span jumped to many metres and exceeded max_lat).
   {
     const int min_lat = static_cast<int>(std::ceil(kNarrowMinWidth / grid->resolution));
     const int max_lat = static_cast<int>(std::floor(kNarrowMaxWidth / grid->resolution));
-    const int max_thick = std::max(1, static_cast<int>(std::ceil(.16 / grid->resolution)));
+    const int max_thick = std::max(1, static_cast<int>(std::ceil(.20 / grid->resolution)));
     std::vector<std::uint8_t> clear(grid->cells.size(), 0);
     // lateral=(lx,ly) walks along the bar; passage is perpendicular.
     auto carve_axis = [&](int lx, int ly) {
@@ -113,46 +117,55 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
           auto cell = [&](int bb) {
             return lx != 0 ? std::pair<int, int>{bb, a} : std::pair<int, int>{a, bb};
           };
-          auto doorish = [&](int bb) {
+          auto seal_cell = [&](int bb) {
             const auto [c, r] = cell(bb);
-            if (passable(c, r)) return true;
             if (value_at(c, r) <= 0) return false;
-            return passable(c - px, r - py) && passable(c + px, r + py);
+            if (!passable(c - px, r - py) || !passable(c + px, r + py)) return false;
+            // Prefer free↔unknown seals (room mouth). Thin free↔free bars are
+            // also SLAM artifacts across observed corridors.
+            const std::int8_t neg = value_at(c - px, r - py);
+            const std::int8_t pos = value_at(c + px, r + py);
+            return (neg == 0 && pos == 0) || (neg == 0 && pos < 0) ||
+                   (neg < 0 && pos == 0) || (neg < 0 && pos < 0);
           };
-          if (!doorish(b)) { ++b; continue; }
+          if (!seal_cell(b)) { ++b; continue; }
           const int begin = b;
-          int occupied = 0;
           int thick_ok = 1;
-          while (b < major && doorish(b)) {
+          bool touches_unknown = false;
+          while (b < major && seal_cell(b)) {
             const auto [c, r] = cell(b);
-            if (value_at(c, r) > 0) {
-              ++occupied;
-              int thick = 1;
-              for (int s = 1; s <= max_thick; ++s) {
-                const int nc = c + s * px, nr = r + s * py;
-                if (nc < 0 || nr < 0 || nc >= width || nr >= height ||
-                    value_at(nc, nr) <= 0)
-                  break;
-                ++thick;
-              }
-              for (int s = 1; s <= max_thick; ++s) {
-                const int nc = c - s * px, nr = r - s * py;
-                if (nc < 0 || nr < 0 || nc >= width || nr >= height ||
-                    value_at(nc, nr) <= 0)
-                  break;
-                ++thick;
-              }
-              if (thick > max_thick) thick_ok = 0;
+            const std::int8_t neg = value_at(c - px, r - py);
+            const std::int8_t pos = value_at(c + px, r + py);
+            if (neg < 0 || pos < 0) touches_unknown = true;
+            int thick = 1;
+            for (int s = 1; s <= max_thick; ++s) {
+              const int nc = c + s * px, nr = r + s * py;
+              if (nc < 0 || nr < 0 || nc >= width || nr >= height ||
+                  value_at(nc, nr) <= 0)
+                break;
+              ++thick;
             }
+            for (int s = 1; s <= max_thick; ++s) {
+              const int nc = c - s * px, nr = r - s * py;
+              if (nc < 0 || nr < 0 || nc >= width || nr >= height ||
+                  value_at(nc, nr) <= 0)
+                break;
+              ++thick;
+            }
+            if (thick > max_thick) thick_ok = 0;
             ++b;
           }
           const int span = b - begin;
-          if (occupied > 0 && thick_ok && span >= min_lat && span <= max_lat) {
+          // Unknown-touching seals may be as narrow as a pinch; free↔free
+          // false walls keep the normal door width floor.
+          const int min_span = touches_unknown
+                                   ? static_cast<int>(std::ceil(kDoorPinchMinWidth /
+                                                                grid->resolution))
+                                   : min_lat;
+          if (thick_ok && span >= min_span && span <= max_lat) {
             for (int bb = begin; bb < b; ++bb) {
               const auto [c, r] = cell(bb);
-              if (value_at(c, r) > 0 && passable(c - px, r - py) &&
-                  passable(c + px, r + py))
-                clear[static_cast<std::size_t>(r) * width + c] = 1;
+              clear[static_cast<std::size_t>(r) * width + c] = 1;
             }
           }
         }
@@ -1532,6 +1545,11 @@ std::size_t FrontierExplorer::ReachableUnknownCells(double robot_x, double robot
       (robot_x - map_.origin_x) / map_.resolution));
   const int robot_row = static_cast<int>(std::floor(
       (robot_y - map_.origin_y) / map_.resolution));
+  // Traverse carved door noses with the narrow clearance, not full SafeViewpoint:
+  // a freshly opened 0.32–0.50 m throat often fails the soft footprint floor.
+  auto traversable = [&](int col, int row) {
+    return Free(col, row) && ClearAt(col, row, kNarrowClearance);
+  };
   const int search = static_cast<int>(std::ceil(1.0 / map_.resolution));
   int start = -1;
   double nearest = std::numeric_limits<double>::infinity();
@@ -1539,7 +1557,7 @@ std::size_t FrontierExplorer::ReachableUnknownCells(double robot_x, double robot
        row <= std::min(map_.height - 1, robot_row + search); ++row) {
     for (int col = std::max(0, robot_col - search);
          col <= std::min(map_.width - 1, robot_col + search); ++col) {
-      if (!SafeViewpoint(col, row)) continue;
+      if (!traversable(col, row)) continue;
       const double distance = std::hypot(col - robot_col, row - robot_row);
       if (distance < nearest) {
         nearest = distance;
@@ -1570,7 +1588,7 @@ std::size_t FrontierExplorer::ReachableUnknownCells(double robot_x, double robot
         continue;
       const int next = next_row * map_.width + next_col;
       if (visited[static_cast<std::size_t>(next)] ||
-          !SafeViewpoint(next_col, next_row))
+          !traversable(next_col, next_row))
         continue;
       visited[static_cast<std::size_t>(next)] = 1;
       queue.push_back(next);
