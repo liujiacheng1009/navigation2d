@@ -22,6 +22,7 @@
 #include "navigation2d/planning/planner_factory.h"
 #include "navigation2d/planning/collision_checker.h"
 #include "navigation2d/planning/astar_planner.h"
+#include "navigation2d/planning/path_smoother.h"
 
 namespace navigation2d {
 namespace {
@@ -327,6 +328,15 @@ class NavigationSystem::Impl {
         } else {
           throw std::runtime_error("failed first-segment replay");
         }
+      }
+      // Theta*/A* densified chords ride inflation edges.  Lattice already
+      // smooths inside Plan(); grid planners push toward open space here when
+      // the corridor is wider than the footprint (0.7 m kitchen doors still
+      // clear with smoother_min_clearance ≈ 0.28).
+      if (config.planner != "state_lattice" && config.smoother_enabled) {
+        Path smoothed = planning_internal::ConstrainedPathSmoother(config).Smooth(
+            path, costmap, config.robot_radius);
+        if (PathFootprintValid(smoothed, costmap, planning_radius)) path = std::move(smoothed);
       }
       // A replan is a new ordered route contract. Reset the controller's
       // internal projection state even when the new path has similar endpoints.

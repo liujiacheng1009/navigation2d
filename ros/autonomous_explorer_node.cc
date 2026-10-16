@@ -386,7 +386,12 @@ class AutonomousExplorer final : public rclcpp::Node {
     // collision projection into sparse unknown cells caused false stops in
     // visibly clear aisles; retain near-field collision checking only.
     config.collision_horizon = .50;
-    config.smoother_min_clearance = .22;
+    // Soft target above the 0.22 m footprint: pull paths off walls when the
+    // corridor is wide enough.  A 0.70 m doorway still has ~0.35 m half-width.
+    config.smoother_min_clearance = .28;
+    config.smoother_obstacle_weight = .55;
+    config.smoother_data_weight = .10;
+    config.smoother_max_deviation = .18;
     // Frontier goals are observation viewpoints, but home is a docking pose.
     // Keep their completion contracts separate: return must converge to the
     // recorded ground-truth start instead of stopping at the edge of the

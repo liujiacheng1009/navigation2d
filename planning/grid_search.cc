@@ -21,7 +21,10 @@ constexpr std::array<std::array<int, 2>, 8> kDirections{{
 // wide room is preferable to a shortest path that rides the inflated edge;
 // narrow passages remain usable because their only available cells retain the
 // same penalty and are still selected when no higher-clearance route exists.
-constexpr double kClearancePenaltyWeight = 18.0;
+// Prefer corridor center over wall-hugging shortest paths.  Narrow doors still
+// win when they are the only connection: every cell there carries a similar
+// penalty, so the relative ranking stays length-dominated.
+constexpr double kClearancePenaltyWeight = 32.0;
 
 double TraversalCellCost(std::uint8_t cost) {
   if (cost == kFree) return 1.;

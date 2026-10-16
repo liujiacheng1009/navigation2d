@@ -14,6 +14,7 @@
 #include "navigation2d/planning/obstacle_heuristic.h"
 #include "navigation2d/planning/path_smoother.h"
 #include "navigation2d/planning/state_lattice_planner.h"
+#include "navigation2d/planning/theta_star_planner.h"
 
 int main() {
   using navigation2d::planning_internal::BestFirstSearch;
@@ -233,4 +234,56 @@ int main() {
     goal_rejected = std::string(error.what()).find("goal occupied") != std::string::npos;
   }
   assert(goal_rejected);
+
+  // Wide corridor: a wall-scraping densified chord must be lifted off the
+  // south wall toward open space (soft 0.28 m target, not footprint scrape).
+  const char* corridor_path = "/tmp/navigation2d_corridor_clearance_test.json";
+  {
+    std::ofstream corridor_output(corridor_path);
+    constexpr int kW = 60, kH = 40;
+    corridor_output << R"({"width":60,"height":40,"resolution":0.05,"cells":[)";
+    for (int i = 0; i < kW * kH; ++i) {
+      const int col = i % kW, row = i / kW;
+      const bool wall = row == 0 || row == kH - 1 || col == 0 || col == kW - 1;
+      corridor_output << (i ? "," : "") << (wall ? 100 : 0);
+    }
+    corridor_output << "]}";
+  }
+  navigation2d::NavigationConfig corridor_config;
+  corridor_config.robot_radius = .22;
+  corridor_config.inflation_radius = .30;
+  corridor_config.smoother_min_clearance = .28;
+  corridor_config.smoother_obstacle_weight = .55;
+  corridor_config.smoother_data_weight = .10;
+  corridor_config.smoother_max_deviation = .18;
+  navigation2d::LayeredCostmap corridor_map(
+      navigation2d::Grid2d::Load(corridor_path), corridor_config);
+  navigation2d::Path hugging{
+      navigation2d::MakePose2d(.50, .26, 0.),
+      navigation2d::MakePose2d(1.00, .26, 0.),
+      navigation2d::MakePose2d(1.50, .26, 0.),
+      navigation2d::MakePose2d(2.00, .26, 0.),
+      navigation2d::MakePose2d(2.50, .26, 0.)};
+  const auto lifted = navigation2d::planning_internal::ConstrainedPathSmoother(corridor_config)
+                          .Smooth(hugging, corridor_map, .22);
+  assert(navigation2d::Y(lifted[2]) > navigation2d::Y(hugging[2]) + .02);
+  const navigation2d::planning_internal::DistanceField corridor_field(corridor_map);
+  assert(corridor_field.distance(navigation2d::X(lifted[2]), navigation2d::Y(lifted[2])) >=
+         .275);
+
+  // Clearance-aware traversal: equal-length segment farther from the wall is
+  // cheaper, so Theta* prefers the open lane over the inflated edge.
+  navigation2d::ThetaStarPlanner theta(.22);
+  const auto open_lane = theta.Plan(corridor_map,
+                                    navigation2d::MakePose2d(.40, 1.00, 0.),
+                                    navigation2d::MakePose2d(2.60, 1.00, 0.));
+  double mid_y_sum = 0.;
+  int mid_count = 0;
+  for (const auto& sample : open_lane) {
+    if (navigation2d::X(sample) < .80 || navigation2d::X(sample) > 2.20) continue;
+    mid_y_sum += navigation2d::Y(sample);
+    ++mid_count;
+  }
+  assert(mid_count > 0);
+  assert(std::abs(mid_y_sum / mid_count - 1.00) < .25);
 }

@@ -49,6 +49,9 @@ Path ConstrainedPathSmoother::Smooth(const Path& path, const LayeredCostmap& cos
       if (anchors[index]) continue;
       Eigen::Vector2d update = config_.smoother_data_weight * (original[index] - points[index]) +
           config_.smoother_smooth_weight * (points[index - 1] + points[index + 1] - 2. * points[index]);
+      // Soft push off obstacles whenever clearance is below the configured
+      // target — not only at the hard footprint edge — so smoothed Theta*
+      // paths leave wall-hugging densified chords when the corridor is wide.
       const double clearance = distance_field.distance(points[index].x(), points[index].y());
       if (clearance < config_.smoother_min_clearance) {
         const Eigen::Vector2d gradient = distance_field.gradient(points[index].x(), points[index].y());
