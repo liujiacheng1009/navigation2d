@@ -431,12 +431,17 @@ class AutonomousExplorer final : public rclcpp::Node {
       // correctly emit one zero command before tracking starts. Executability
       // is a temporal property owned by NavigationSystem's progress and
       // bounded-rotation state machines, not a one-frame threshold.
-      // RPP deliberately slows in curves and near occupied space. A fixed
-      // 55 s watchdog therefore turns otherwise healthy long paths into fake
-      // "blocked" failures. Budget travel from the planned path at a
-      // conservative 0.10 m/s, plus time for initial alignment and final
-      // approach; NavigationSystem still owns genuine progress recovery.
-      goal_timeout_s_ = std::max(55., initial_state.global_path_length_m / .10 + 20.);
+      // RPP slows in curves and near occupied space. Exploration goals get a
+      // tighter budget so a mid-doorway crawl cannot burn 2+ minutes; return
+      // home keeps the longer travel allowance.
+      if (returning) {
+        goal_timeout_s_ = std::max(55., initial_state.global_path_length_m / .10 + 20.);
+      } else {
+        goal_timeout_s_ = std::min(
+            75., std::max(40., initial_state.global_path_length_m / .12 + 15.));
+      }
+      best_goal_path_progress_m_ = 0.;
+      last_goal_path_progress_time_ = now();
       PublishStatus(returning ? "RETURNING" :
                         (goal.leftover_approach ? "COMPLETING" : "NAVIGATING"),
                     returning ? "returning to exploration start" :
@@ -1269,6 +1274,10 @@ class AutonomousExplorer final : public rclcpp::Node {
     const auto state = navigation_->ComputeCommand(local_pose, measured_velocity,
                                                     tick_time.seconds());
     CaptureNavTelemetry(state, measured_velocity);
+    if (state.path_progress_m >= best_goal_path_progress_m_ + .08) {
+      best_goal_path_progress_m_ = state.path_progress_m;
+      last_goal_path_progress_time_ = now();
+    }
     if (phase_ == MissionPhase::kExploring && !returning_) {
       const double path_remaining =
           std::max(0., state.global_path_length_m - state.path_progress_m);
@@ -1383,7 +1392,25 @@ class AutonomousExplorer final : public rclcpp::Node {
                // can back out and select a different viewpoint.
                (state.path_progress_m < .05 && state.requested_command.linear < .01 &&
                 SectorMinRange(0., .45) > 0. && SectorMinRange(0., .45) < .30 &&
-                (now() - goal_started_).seconds() > 8.0)) {
+                (now() - goal_started_).seconds() > 8.0) ||
+               // Mid-route pinch crawl: progress already left the first 5 cm,
+               // but the robot sits in a doorway spinning/creeping without
+               // meaningful advance. First-segment watches never fire here and
+               // the full goal timeout left the robot stuck for minutes.
+               (state.path_progress_m >= .05 &&
+                last_goal_path_progress_time_.nanoseconds() > 0 &&
+                (now() - last_goal_path_progress_time_).seconds() > 10.0 &&
+                (SectorMinRange(0., .50) < .45 || state.recoveries >= 2 ||
+                 (state.requested_command.linear < .05 &&
+                  std::abs(state.requested_command.angular) > .15))) ||
+               // Mid-route safety latch near an obstacle.
+               (state.path_progress_m >= .05 &&
+                state.collision_monitor_action ==
+                    navigation2d::CollisionMonitorAction::kStop &&
+                state.requested_command.linear > .01 &&
+                state.minimum_ttc_s < .15 &&
+                last_goal_path_progress_time_.nanoseconds() > 0 &&
+                (now() - last_goal_path_progress_time_).seconds() > 2.0)) {
       RCLCPP_WARN(get_logger(),
                   "Navigation2D frontier failed: status=%s phase=%d elapsed=%.1f replans=%d path=%.2f requested=(%.3f,%.3f) published=(%.3f,%.3f) controller_maneuver=%d intentional_stop=%s monitor_action=%d ttc=%.3f path_signature=%llu planner_error=%s",
                   state.status == navigation2d::NavigationStatus::kBlocked ? "blocked" : "timeout",
@@ -1398,8 +1425,13 @@ class AutonomousExplorer final : public rclcpp::Node {
                   state.planning_failure_reason.empty() ? "none" :
                       state.planning_failure_reason.c_str());
       const bool first_segment_stall = state.path_progress_m < .05;
-      if (first_segment_stall) {
-        const bool force_return = NoteFirstSegmentFailure(state);
+      const bool mid_path_pinch =
+          state.path_progress_m >= .05 &&
+          last_goal_path_progress_time_.nanoseconds() > 0 &&
+          (now() - last_goal_path_progress_time_).seconds() > 10.0;
+      if (first_segment_stall || mid_path_pinch) {
+        const bool force_return =
+            first_segment_stall ? NoteFirstSegmentFailure(state) : false;
         if (phase_ != MissionPhase::kReturning && !returning_)
           explorer_.RecordAttempt(active_goal_, false);
         // Returning already owns the home path.  A short clearance jiggle
@@ -1420,7 +1452,7 @@ class AutonomousExplorer final : public rclcpp::Node {
           return;
         }
       }
-      if (ReplanActiveGoalOnLatestMap(
+      if (!mid_path_pinch && ReplanActiveGoalOnLatestMap(
               state.status == navigation2d::NavigationStatus::kBlocked ?
                   "controller could not execute validated route" : "goal execution timed out"))
         return;
@@ -1431,14 +1463,16 @@ class AutonomousExplorer final : public rclcpp::Node {
         partial_return_ = true;
         Finish(true, "exploration ended; return path blocked on online map");
       } else if (phase_ == MissionPhase::kCompleting) {
-        if (!first_segment_stall) explorer_.RecordAttempt(active_goal_, false);
+        if (!first_segment_stall && !mid_path_pinch)
+          explorer_.RecordAttempt(active_goal_, false);
         FinishCompleting();
       } else {
         if (!committed_tour_.empty()) committed_tour_.pop_front();
         next_selection_ = now();
         PublishStatus("SELECTING", first_segment_stall ?
             "first-segment failed; skipping cooled viewpoint" :
-            "frontier failed; continuing committed tour");
+            (mid_path_pinch ? "mid-path pinch stall; skipping viewpoint" :
+                              "frontier failed; continuing committed tour"));
       }
     }
   }
@@ -1524,6 +1558,8 @@ class AutonomousExplorer final : public rclcpp::Node {
   std::uint64_t entry_probe_initial_map_revision_ = 0;
   rclcpp::Time last_preempt_check_{0, 0, RCL_ROS_TIME};
   std::uint64_t last_preempt_map_revision_ = 0;
+  double best_goal_path_progress_m_ = 0.;
+  rclcpp::Time last_goal_path_progress_time_{0, 0, RCL_ROS_TIME};
   std::deque<Goal> committed_tour_;
   rclcpp::Time started_{0, 0, RCL_ROS_TIME};
   rclcpp::Time goal_started_{0, 0, RCL_ROS_TIME};
