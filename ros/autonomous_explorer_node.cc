@@ -340,6 +340,35 @@ class AutonomousExplorer final : public rclcpp::Node {
         }
       }
     }
+    driven_corridor_.clear();
+    if (paint_driven_corridor_ && map_->info.resolution > 0. && trajectory_.size() >= 2) {
+      // The chassis already drove this corridor. A later scan can pinch the
+      // costmap below the planning radius and trap the robot; reopen only the
+      // recent trail for this one plan so search can leave the pinch.
+      paint_driven_corridor_ = false;
+      const int radius = static_cast<int>(std::ceil(.16 / map_->info.resolution));
+      double walked = 0.;
+      for (std::size_t i = trajectory_.size(); i-- > 0;) {
+        if (i + 1 < trajectory_.size())
+          walked += std::hypot(trajectory_[i].first - trajectory_[i + 1].first,
+                                trajectory_[i].second - trajectory_[i + 1].second);
+        if (walked > 2.0) break;
+        const int trail_col = static_cast<int>(std::floor(
+            (trajectory_[i].first - navigation_origin_x_) / map_->info.resolution));
+        const int trail_row = static_cast<int>(std::floor(
+            (trajectory_[i].second - navigation_origin_y_) / map_->info.resolution));
+        for (int dy = -radius; dy <= radius; ++dy) {
+          for (int dx = -radius; dx <= radius; ++dx) {
+            if (dx * dx + dy * dy > radius * radius) continue;
+            const int x = trail_col + dx, y = trail_row + dy;
+            if (x < 0 || y < 0 || x >= static_cast<int>(map_->info.width) ||
+                y >= static_cast<int>(map_->info.height))
+              continue;
+            driven_corridor_.insert(static_cast<std::size_t>(y) * map_->info.width + x);
+          }
+        }
+      }
+    }
     for (std::size_t index = 0; index < map_->data.size(); ++index) {
       if (index) output << ',';
       // Free is 0. A real obstacle is 254 and inflates. Unknown is 255:
@@ -353,11 +382,14 @@ class AutonomousExplorer final : public rclcpp::Node {
       // confidence threshold can otherwise leave isolated unknown cells below
       // the base and make every first plan fail its start-collision check.
       const bool lidar_evidence = map_->data[index] < 0 && near_field_free.count(index) > 0;
-      const bool forced_free = map_->data[index] == 0 || under_robot || lidar_evidence;
+      const bool driven = driven_corridor_.count(index) > 0;
+      const bool forced_free =
+          map_->data[index] == 0 || under_robot || lidar_evidence || driven;
       output << (forced_free ? 0 : (map_->data[index] < 0 ? 255 : 254));
     }
     output << "]}";
     output.close();
+    driven_corridor_.clear();
     PublishPlanningDebugMap(returning);
     navigation2d::NavigationConfig config;
     config.map_resolution = map_->info.resolution;
@@ -450,9 +482,10 @@ class AutonomousExplorer final : public rclcpp::Node {
       PublishStatus(returning ? "RETURNING" :
                         (goal.leftover_approach ? "COMPLETING" : "NAVIGATING"),
                     returning ? "returning to exploration start" :
+                        (retreat_goal_ ? "leaving a pinched corridor along the driven trail" :
                         (goal.leftover_approach
                              ? "one leftover approach after exploring tour emptied"
-                             : "navigating to frontier"));
+                             : "navigating to frontier")));
       RCLCPP_INFO(get_logger(),
                   "Navigation2D goal: pose=(%.2f, %.2f) goal=(%.2f, %.2f) frontier_cells=%d path_signature=%llu",
                   pose_->pose.position.x, pose_->pose.position.y, goal.x, goal.y,
@@ -706,6 +739,41 @@ class AutonomousExplorer final : public rclcpp::Node {
     BeginReturn();
   }
 
+  bool StartRetreat() {
+    if (trajectory_.size() < 4 || !pose_) return false;
+    const auto cell = PoseCell();
+    if (retreat_attempted_ && retreat_cell_x_ == cell.first && retreat_cell_y_ == cell.second)
+      return false;
+    double arc = 0.;
+    std::size_t index = trajectory_.size() - 1;
+    while (index > 0 && arc < 1.2) {
+      arc += std::hypot(trajectory_[index].first - trajectory_[index - 1].first,
+                         trajectory_[index].second - trajectory_[index - 1].second);
+      --index;
+    }
+    if (arc < .6) return false;
+    const double goal_x = trajectory_[index].first;
+    const double goal_y = trajectory_[index].second;
+    if (std::hypot(goal_x - pose_->pose.position.x, goal_y - pose_->pose.position.y) < .4)
+      return false;
+    Goal retreat;
+    retreat.x = goal_x;
+    retreat.y = goal_y;
+    retreat.yaw = std::atan2(goal_y - pose_->pose.position.y, goal_x - pose_->pose.position.x);
+    // Exit path out of a pinch may already be cooled from first-segment
+    // stalls; clear so the driven trail can be planned again.
+    cooled_signatures_.clear();
+    retreat_attempted_ = true;
+    retreat_cell_x_ = cell.first;
+    retreat_cell_y_ = cell.second;
+    paint_driven_corridor_ = true;
+    retreat_goal_ = true;
+    if (StartNavigation(retreat, false)) return true;
+    retreat_goal_ = false;
+    paint_driven_corridor_ = false;
+    return false;
+  }
+
   void SelectNextGoal() {
     if (phase_ == MissionPhase::kReturning || returning_) {
       BeginReturn(partial_return_);
@@ -735,6 +803,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         empty_frontier_cycles_ = 0;
         frontier_probe_until_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
         frontier_probe_count_ = 0;
+        reject_streak_ = 0;
         phase_ = MissionPhase::kExploring;
         completing_probe_used_ = false;
         return;
@@ -749,6 +818,22 @@ class AutonomousExplorer final : public rclcpp::Node {
       entry_probe_initial_map_revision_ = map_revision_;
       if (StartEntryProbe()) return;
       pending_entry_goal_.reset();
+      const auto cell = PoseCell();
+      if (!reject_pose_valid_ || cell.first != reject_cell_x_ || cell.second != reject_cell_y_) {
+        reject_pose_valid_ = true;
+        reject_cell_x_ = cell.first;
+        reject_cell_y_ = cell.second;
+        reject_streak_ = 0;
+      }
+      ++reject_streak_;
+    }
+    // Same pose keeps rejecting every queued frontier (often cooled first-
+    // segment signatures while pinched in an alcove). Retreat along the
+    // driven trail before spinning on identical rejections until PARTIAL.
+    if (reject_streak_ >= 2 && StartRetreat()) return;
+    if (reject_streak_ >= 2 && TryStartEscape()) {
+      cooled_signatures_.clear();
+      return;
     }
     geometry_msgs::msg::Twist stop;
     command_publisher_->publish(stop);
@@ -1333,6 +1418,12 @@ class AutonomousExplorer final : public rclcpp::Node {
       } else if (phase_ == MissionPhase::kCompleting) {
         explorer_.RecordAttempt(active_goal_, true);
         FinishCompleting();
+      } else if (retreat_goal_) {
+        retreat_goal_ = false;
+        reject_streak_ = 0;
+        committed_tour_.clear();
+        next_selection_ = now();
+        PublishStatus("SELECTING", "left the pinched corridor");
       } else if (pending_entry_goal_) {
         if (EntryProbeSatisfied()) {
           explorer_.RecordAttempt(*pending_entry_goal_, true, false);
@@ -1509,6 +1600,16 @@ class AutonomousExplorer final : public rclcpp::Node {
   MissionPhase phase_ = MissionPhase::kExploring;
   bool completing_probe_used_ = false;
   std::unordered_set<std::uint64_t> cooled_signatures_;
+  int reject_streak_ = 0;
+  bool reject_pose_valid_ = false;
+  int reject_cell_x_ = 0;
+  int reject_cell_y_ = 0;
+  bool retreat_goal_ = false;
+  bool retreat_attempted_ = false;
+  int retreat_cell_x_ = 0;
+  int retreat_cell_y_ = 0;
+  bool paint_driven_corridor_ = false;
+  std::unordered_set<std::size_t> driven_corridor_;
   bool escape_then_return_ = false;
   geometry_msgs::msg::Twist escape_command_;
   rclcpp::Time escape_until_{0, 0, RCL_ROS_TIME};
