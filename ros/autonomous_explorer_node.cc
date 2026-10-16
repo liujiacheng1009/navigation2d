@@ -125,6 +125,38 @@ geometry_msgs::msg::Pose PoseFromXyYaw(double x, double y, double yaw) {
   return pose;
 }
 
+// Per-goal recovery budget. Counters survive resume/replan of the same
+// viewpoint so side-speck peel cannot reset itself into an infinite loop.
+struct GoalRecoverySession {
+  double goal_x = 0.;
+  double goal_y = 0.;
+  int side_peels = 0;
+  int open_replans = 0;
+  bool resume_after_escape = false;
+  bool active = false;
+
+  bool SameGoal(double x, double y, double tol = 0.5) const {
+    return active && std::hypot(x - goal_x, y - goal_y) <= tol;
+  }
+
+  void Begin(double x, double y) {
+    if (SameGoal(x, y)) return;
+    goal_x = x;
+    goal_y = y;
+    side_peels = 0;
+    open_replans = 0;
+    resume_after_escape = false;
+    active = true;
+  }
+
+  void Clear() {
+    active = false;
+    side_peels = 0;
+    open_replans = 0;
+    resume_after_escape = false;
+  }
+};
+
 class AutonomousExplorer final : public rclcpp::Node {
  public:
   AutonomousExplorer() : Node("sweepnav_autonomous_explorer"), explorer_(ExplorerConfig()) {
@@ -468,8 +500,9 @@ class AutonomousExplorer final : public rclcpp::Node {
           goal.x - navigation_origin_x_, goal.y - navigation_origin_y_, goal.yaw));
       active_goal_ = goal;
       returning_ = returning;
-      side_peel_count_ = 0;
-      escape_then_resume_goal_ = false;
+      // Resume / latest-map replan of the same viewpoint must keep peel and
+      // open-replan counters; only a materially new goal opens a session.
+      recovery_.Begin(goal.x, goal.y);
       goal_started_ = now();
       if (scan_) FeedScan();
       const auto initial_time = now();
@@ -793,15 +826,16 @@ class AutonomousExplorer final : public rclcpp::Node {
       BeginReturn(true);
       return true;
     }
-    // Side-speck peel: resume the same goal on an open approach instead of
-    // cooling it and thrashing between T-labels.
-    if (escape_then_resume_goal_) {
-      escape_then_resume_goal_ = false;
+    // Session-owned peel exit: resume without clearing side_peels/open_replans.
+    if (recovery_.resume_after_escape) {
+      recovery_.resume_after_escape = false;
       if (phase_ == MissionPhase::kExploring && !returning_ &&
           StartNavigation(active_goal_, false)) {
         PublishStatus("NAVIGATING", "resumed goal after open-space peel");
         return true;
       }
+      DemoteActiveGoal("resume after peel failed; demoting viewpoint");
+      return true;
     }
     if (phase_ == MissionPhase::kCompleting) {
       FinishCompleting();
@@ -991,6 +1025,13 @@ class AutonomousExplorer final : public rclcpp::Node {
         committed_tour_.pop_front();
         continue;
       }
+      if (RecentlyDemoted(goal)) {
+        RCLCPP_INFO(get_logger(),
+                    "Skipping recently demoted viewpoint (%.2f, %.2f)", goal.x,
+                    goal.y);
+        committed_tour_.pop_front();
+        continue;
+      }
       if (StartNavigation(goal, false)) {
         empty_frontier_cycles_ = 0;
         frontier_probe_until_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
@@ -1176,6 +1217,12 @@ class AutonomousExplorer final : public rclcpp::Node {
   bool MaybePreemptForNearerMouth(double path_remaining_m) {
     if (phase_ != MissionPhase::kExploring || returning_ || !navigation_ ||
         !pose_ || pending_entry_goal_) return false;
+    // Do not preempt while a goal recovery session is spending peel/replan
+    // budget; that raced with side-speck resume and rebuilt the tour.
+    if (recovery_.active &&
+        (recovery_.side_peels > 0 || recovery_.open_replans > 0 ||
+         recovery_.resume_after_escape))
+      return false;
     // Already on a short doorway approach — do not yank the robot away to a
     // different mouth (that abandoned the kitchen threshold mid-crossing).
     if (path_remaining_m > 0. && path_remaining_m < 5.0) return false;
@@ -1298,6 +1345,31 @@ class AutonomousExplorer final : public rclcpp::Node {
                 reason, returning_ ? "return" : "frontier", latest_map_replans_,
                 kMaximumLatestMapReplans);
     return StartNavigation(active_goal_, returning_, true);
+  }
+
+  void DemoteActiveGoal(const char* reason) {
+    if (phase_ != MissionPhase::kReturning && !returning_) {
+      explorer_.RecordAttempt(pending_entry_goal_.value_or(active_goal_), false);
+      recently_demoted_ = pending_entry_goal_.value_or(active_goal_);
+      recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(8.0);
+    }
+    pending_entry_goal_.reset();
+    entry_probe_attempts_ = 0;
+    navigation_.reset();
+    recovery_.Clear();
+    if (!committed_tour_.empty()) committed_tour_.pop_front();
+    next_selection_ = now();
+    PublishStatus("SELECTING", reason);
+  }
+
+  bool RecentlyDemoted(const Goal& goal) {
+    if (!recently_demoted_ || recently_demoted_until_.nanoseconds() == 0)
+      return false;
+    if (now() >= recently_demoted_until_) return false;
+    return std::hypot(goal.x - recently_demoted_->x,
+                      goal.y - recently_demoted_->y) < 0.5 ||
+           std::hypot(goal.frontier_x - recently_demoted_->frontier_x,
+                      goal.frontier_y - recently_demoted_->frontier_y) < 0.5;
   }
 
   void Finish(bool success, const std::string& message) {
@@ -1863,26 +1935,61 @@ class AutonomousExplorer final : public rclcpp::Node {
                 SectorMinRange(0., .50) < .28 &&
                 last_goal_path_progress_time_.nanoseconds() > 0 &&
                 (now() - last_goal_path_progress_time_).seconds() > 2.0)) {
-      // Open room, forward clear, only a side speck latched STOP: peel into
-      // free space and resume the same goal. Treating this as a mouth failure
-      // cooled the viewpoint and rebuilt the tour every few seconds.
-      const bool forward_open = SectorMinRange(0., .50) >= .45;
-      const bool side_only_stop =
-          phase_ == MissionPhase::kExploring && !returning_ &&
+      const bool monitor_stop =
           state.status == navigation2d::NavigationStatus::kBlocked &&
           state.collision_monitor_action ==
-              navigation2d::CollisionMonitorAction::kStop &&
-          forward_open && side_range < .35;
-      if (side_only_stop && side_peel_count_ < 2 && TryStartEscape()) {
-        ++side_peel_count_;
-        navigation_.reset();
-        escape_then_resume_goal_ = true;
-        PublishStatus("RECOVERING", "open-space peel after side clearance stop");
+              navigation2d::CollisionMonitorAction::kStop;
+      const double forward_clearance = SectorMinRange(0., .50);
+      const bool forward_open = forward_clearance >= .45;
+      const bool forward_blocked_close =
+          forward_clearance > 0. && forward_clearance < .28;
+      const bool exploring_drive =
+          phase_ == MissionPhase::kExploring && !returning_;
+
+      // SideSpeckStall: open forward, only a side speck latched STOP.
+      // Budget is owned by GoalRecoverySession (2 peels + 1 replan) so resume
+      // cannot zero the counters and loop forever on the same viewpoint.
+      if (exploring_drive && monitor_stop && forward_open && side_range < .35) {
+        if (recovery_.side_peels < 2 && TryStartEscape()) {
+          ++recovery_.side_peels;
+          navigation_.reset();
+          recovery_.resume_after_escape = true;
+          PublishStatus("RECOVERING",
+                        "open-space peel after side clearance stop");
+          return;
+        }
+        if (recovery_.open_replans < 1) {
+          ++recovery_.open_replans;
+          if (ReplanActiveGoalOnLatestMap(
+                  "side speck stall; open path replan"))
+            return;
+        }
+        DemoteActiveGoal("side speck stall; demoting viewpoint");
         return;
       }
-      if (side_only_stop &&
-          ReplanActiveGoalOnLatestMap("side clearance stop; open path replan"))
+
+      // ForwardBlocked: do not resume the same path signature after peel.
+      if (exploring_drive && monitor_stop && forward_blocked_close) {
+        explorer_.RecordAttempt(pending_entry_goal_.value_or(active_goal_),
+                                false);
+        pending_entry_goal_.reset();
+        entry_probe_attempts_ = 0;
+        recently_demoted_ = active_goal_;
+        recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(8.0);
+        if (!committed_tour_.empty()) committed_tour_.pop_front();
+        recovery_.Clear();
+        if (TryStartEscape()) {
+          navigation_.reset();
+          PublishStatus("RECOVERING",
+                        "forward blocked; escape then advance tour");
+          return;
+        }
+        navigation_.reset();
+        next_selection_ = now();
+        PublishStatus("SELECTING", "forward blocked; skipping viewpoint");
         return;
+      }
+
       RCLCPP_WARN(get_logger(),
                   "Navigation2D frontier failed: status=%s phase=%d elapsed=%.1f replans=%d path=%.2f requested=(%.3f,%.3f) published=(%.3f,%.3f) controller_maneuver=%d intentional_stop=%s monitor_action=%d ttc=%.3f path_signature=%llu planner_error=%s",
                   state.status == navigation2d::NavigationStatus::kBlocked ? "blocked" : "timeout",
@@ -1904,6 +2011,16 @@ class AutonomousExplorer final : public rclcpp::Node {
               (((front_range > 0. && front_range < .45) || side_range < .40)
                    ? 5.0
                    : 10.0);
+      const bool timed_out =
+          (now() - goal_started_).seconds() > goal_timeout_s_;
+
+      // Timeout: demote without peeling back onto the same goal.
+      if (exploring_drive && timed_out && !first_segment_stall &&
+          !mid_path_pinch) {
+        DemoteActiveGoal("goal timeout; demoting viewpoint");
+        return;
+      }
+
       if (first_segment_stall || mid_path_pinch) {
         const bool force_return =
             first_segment_stall ? NoteFirstSegmentFailure(state) : false;
@@ -1912,8 +2029,12 @@ class AutonomousExplorer final : public rclcpp::Node {
           // do not soft-cool and immediately reselect the same doorway.
           explorer_.RecordAttempt(
               pending_entry_goal_.value_or(active_goal_), false);
+          recently_demoted_ = pending_entry_goal_.value_or(active_goal_);
+          recently_demoted_until_ =
+              now() + rclcpp::Duration::from_seconds(8.0);
           pending_entry_goal_.reset();
           entry_probe_attempts_ = 0;
+          recovery_.Clear();
         }
         // Returning already owns the home path.  A short clearance jiggle
         // here only changes the start cell, so the next plan looks new and
@@ -1923,6 +2044,8 @@ class AutonomousExplorer final : public rclcpp::Node {
           if (force_return) {
             committed_tour_.clear();
             escape_then_return_ = true;
+          } else if (!committed_tour_.empty()) {
+            committed_tour_.pop_front();
           }
           return;
         }
@@ -1938,6 +2061,7 @@ class AutonomousExplorer final : public rclcpp::Node {
                   "controller could not execute validated route" : "goal execution timed out"))
         return;
       navigation_.reset();
+      recovery_.Clear();
       if (phase_ == MissionPhase::kReturning || returning_) {
         // Exploration itself may have covered useful space; a blocked home
         // path is a partial mission, not a hard algorithm failure for debug UI.
@@ -2051,8 +2175,9 @@ class AutonomousExplorer final : public rclcpp::Node {
   std::uint64_t entry_probe_initial_map_revision_ = 0;
   rclcpp::Time last_preempt_check_{0, 0, RCL_ROS_TIME};
   rclcpp::Time last_preempt_exec_{0, 0, RCL_ROS_TIME};
-  bool escape_then_resume_goal_ = false;
-  int side_peel_count_ = 0;
+  GoalRecoverySession recovery_;
+  std::optional<Goal> recently_demoted_;
+  rclcpp::Time recently_demoted_until_{0, 0, RCL_ROS_TIME};
   double best_goal_path_progress_m_ = 0.;
   rclcpp::Time last_goal_path_progress_time_{0, 0, RCL_ROS_TIME};
   std::deque<Goal> committed_tour_;
