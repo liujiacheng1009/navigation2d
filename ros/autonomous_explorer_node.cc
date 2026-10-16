@@ -643,6 +643,9 @@ class AutonomousExplorer final : public rclcpp::Node {
   bool EntryProbeSatisfied() const {
     if (!pending_entry_goal_) return false;
     const double depth = EntryProbeDepth();
+    // Deep past the mouth: treat as entered even if a speck of frontier
+    // remains — otherwise bathroom tips loop "incomplete at depth 0.8+".
+    if (depth >= .50) return true;
     const bool crossed = depth >= .20;
     const bool fresh_map = map_revision_ > entry_probe_initial_map_revision_;
     const bool boundary_resolved =
@@ -925,7 +928,9 @@ class AutonomousExplorer final : public rclcpp::Node {
       // Do not convert a transient maze doorway disagreement into completion.
       // Only give up after a substantially longer *stagnant* window; the
       // result is marked partial so callers cannot mistake it for exhaustion.
-      if (no_executable_frontier_cycles_ >= 30) BeginReturn(true);
+      // 30 cycles left the robot spinning on cooled bathroom/kitchen mouths
+      // for minutes after every tip was already blacklisted.
+      if (no_executable_frontier_cycles_ >= 12) BeginReturn(true);
       return;
     }
     ++empty_frontier_cycles_;

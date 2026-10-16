@@ -88,6 +88,81 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
     if (col < 0 || row < 0 || col >= width || row >= height) return;
     grid->cells[static_cast<std::size_t>(row) * width + col] = 0;
   };
+  auto passable = [&](int col, int row) {
+    if (col < 0 || row < 0 || col >= width || row >= height) return false;
+    return value_at(col, row) <= 0;
+  };
+  // SLAM often draws a 1–3 cell "door bar" across a real opening. When the bar
+  // fully seals a row/column, gap scanning never sees a throat. Clear occupied
+  // cells that sit in a door-width corridor with free/unknown on both passage
+  // sides and only a thin occupied thickness.
+  {
+    const int min_lat = static_cast<int>(std::ceil(kNarrowMinWidth / grid->resolution));
+    const int max_lat = static_cast<int>(std::floor(kNarrowMaxWidth / grid->resolution));
+    const int max_thick = std::max(1, static_cast<int>(std::ceil(.16 / grid->resolution)));
+    std::vector<std::uint8_t> clear(grid->cells.size(), 0);
+    // lateral=(lx,ly) walks along the bar; passage is perpendicular.
+    auto carve_axis = [&](int lx, int ly) {
+      const int px = ly;
+      const int py = lx;
+      const int major = (lx != 0) ? width : height;
+      const int minor = (lx != 0) ? height : width;
+      for (int a = 1; a < minor - 1; ++a) {
+        int b = 0;
+        while (b < major) {
+          auto cell = [&](int bb) {
+            return lx != 0 ? std::pair<int, int>{bb, a} : std::pair<int, int>{a, bb};
+          };
+          auto doorish = [&](int bb) {
+            const auto [c, r] = cell(bb);
+            if (passable(c, r)) return true;
+            if (value_at(c, r) <= 0) return false;
+            return passable(c - px, r - py) && passable(c + px, r + py);
+          };
+          if (!doorish(b)) { ++b; continue; }
+          const int begin = b;
+          int occupied = 0;
+          int thick_ok = 1;
+          while (b < major && doorish(b)) {
+            const auto [c, r] = cell(b);
+            if (value_at(c, r) > 0) {
+              ++occupied;
+              int thick = 1;
+              for (int s = 1; s <= max_thick; ++s) {
+                const int nc = c + s * px, nr = r + s * py;
+                if (nc < 0 || nr < 0 || nc >= width || nr >= height ||
+                    value_at(nc, nr) <= 0)
+                  break;
+                ++thick;
+              }
+              for (int s = 1; s <= max_thick; ++s) {
+                const int nc = c - s * px, nr = r - s * py;
+                if (nc < 0 || nr < 0 || nc >= width || nr >= height ||
+                    value_at(nc, nr) <= 0)
+                  break;
+                ++thick;
+              }
+              if (thick > max_thick) thick_ok = 0;
+            }
+            ++b;
+          }
+          const int span = b - begin;
+          if (occupied > 0 && thick_ok && span >= min_lat && span <= max_lat) {
+            for (int bb = begin; bb < b; ++bb) {
+              const auto [c, r] = cell(bb);
+              if (value_at(c, r) > 0 && passable(c - px, r - py) &&
+                  passable(c + px, r + py))
+                clear[static_cast<std::size_t>(r) * width + c] = 1;
+            }
+          }
+        }
+      }
+    };
+    carve_axis(1, 0);  // horizontal bars
+    carve_axis(0, 1);  // vertical bars
+    for (std::size_t index = 0; index < clear.size(); ++index)
+      if (clear[index]) grid->cells[index] = 0;
+  }
   // Unknown just past a pinched SLAM door (perpendicular to the gap).
   auto unknown_beyond = [&](bool horizontal, int fixed, int begin, int end) {
     const int mid = (begin + end) / 2;
@@ -1270,11 +1345,11 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
   if (approach_length < .05) return std::nullopt;
   const double direction_x = approach_x / approach_length;
   const double direction_y = approach_y / approach_length;
-  // Doorway entry after SLAM thickening: BFS may use the narrow-passage
-  // clearance to cross a carved ~0.50 m throat. The chosen probe pose itself
-  // must still clear ~robot_radius or Navigation2D rejects it as occupied.
+  // Traverse can be slightly tighter than the goal pose. Goal clearance must
+  // stay above robot_radius so Navigation2D does not reject with
+  // "goal occupied, nearest 0.18 m" after raster rounding.
   constexpr double kEntryTraverseClearance = .18;
-  constexpr double kEntryGoalClearance = .20;
+  constexpr double kEntryGoalClearance = .24;
   const auto entry_traverse = [&](int col, int row) {
     return Free(col, row) && ClearAt(col, row, kEntryTraverseClearance);
   };
@@ -1420,10 +1495,13 @@ void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded
     // well; fresh map growth can still make it eligible again.
     const double pose_radius = std::max(map_.resolution,
                                         config_.footprint_clearance);
-    blacklist_.push_back({goal.x, goal.y, pose_radius, known, 600u, false});
-    blacklist_.push_back({goal.frontier_x, goal.frontier_y,
-                          std::max(.45, config_.footprint_clearance),
-                          known, 1500u, false});
+    // Failed bathroom/kitchen mouths were re-queued within a few map updates
+    // (600/1500 known-cell cools), so the robot spent minutes retrying the
+    // same tip. Cool longer and wider so the tour moves on.
+    blacklist_.push_back({goal.x, goal.y, std::max(.55, pose_radius), known,
+                          2500u, false});
+    blacklist_.push_back({goal.frontier_x, goal.frontier_y, 1.10, known, 4000u,
+                          false});
     ++failed_goals_;
   }
 }

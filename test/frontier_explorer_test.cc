@@ -507,4 +507,23 @@ int main() {
   assert(free_in_throat >= 10);
   assert(pinched.cells[20 * pinched.width + 40] == 0);
 
+  // Horizontal SLAM door bar across a 0.70 m kitchen mouth.
+  navigation2d::ExplorationGrid barred;
+  barred.width = 60;
+  barred.height = 40;
+  barred.resolution = .05;
+  barred.cells.assign(static_cast<std::size_t>(barred.width * barred.height), 100);
+  const auto bpaint = [&](int col0, int col1, int row0, int row1, std::int8_t value) {
+    for (int row = row0; row < row1; ++row)
+      for (int col = col0; col < col1; ++col)
+        barred.cells[static_cast<std::size_t>(row * barred.width + col)] = value;
+  };
+  bpaint(2, 58, 4, 18, 0);     // south hall free
+  bpaint(2, 58, 22, 36, -1);   // north kitchen unknown
+  bpaint(20, 34, 18, 22, 0);   // 0.70 m mouth
+  bpaint(20, 34, 20, 21, 100); // 1-cell occupied bar sealing the mouth
+  navigation2d::OpenPassableOpenings(&barred);
+  assert(barred.cells[20 * barred.width + 27] == 0);
+  assert(barred.cells[24 * barred.width + 27] == 0);
+
 }
