@@ -477,12 +477,12 @@ int main() {
         tip.cells[static_cast<std::size_t>(row * tip.width + col)] = value;
   };
   tpaint(8, 42, 4, 30, 0);           // open hall
-  tpaint(20, 28, 30, 48, 0);         // 0.40 m north alcove
-  tpaint(20, 28, 48, 56, -1);        // unfinished tip unknown
-  // Thicken the tip free cells with near walls so ClearAt(.18) fails on the
+  tpaint(19, 29, 30, 48, 0);         // 0.50 m north alcove (planning radius .22)
+  tpaint(19, 29, 48, 56, -1);        // unfinished tip unknown
+  // Thicken the tip free cells with near walls so ClearAt(.22) fails on the
   // frontier row itself but the approach row still clears.
-  tpaint(20, 21, 46, 48, 100);
-  tpaint(27, 28, 46, 48, 100);
+  tpaint(19, 20, 46, 48, 100);
+  tpaint(28, 29, 46, 48, 100);
   navigation2d::FrontierExplorerConfig tip_config = tour_config;
   tip_config.footprint_clearance = .30;
   tip_config.required_frontier_observations = 1;
@@ -508,7 +508,7 @@ int main() {
         vestibule.cells[static_cast<std::size_t>(row * vestibule.width + col)] = value;
   };
   vpaint(4, 28, 14, 26, 0);          // hall
-  vpaint(28, 40, 16, 24, 0);         // 0.40 m × 0.40 m vestibule (both-narrow)
+  vpaint(28, 40, 15, 25, 0);         // 0.60 m × 0.50 m vestibule (both-narrow)
   vpaint(40, 56, 10, 30, -1);        // room unknown
   navigation2d::OpenPassableOpenings(&vestibule);
   navigation2d::FrontierExplorerConfig vestibule_config = tour_config;

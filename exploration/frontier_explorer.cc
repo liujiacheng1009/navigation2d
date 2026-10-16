@@ -10,14 +10,14 @@
 
 namespace {
 
-// Chassis half-width is 0.147 m. After SLAM thickens jambs, a physical
-// ~0.70 m kitchen door often shrinks to ~0.30–0.40 m of free cells. Keep
-// the narrow-passage floor just above the chassis so those throats still
-// join the planning graph; OpenPassableOpenings then erodes bleed and
-// floods a free nose into the room.
+// Chassis half-width is 0.147 m; CAD max footprint radius ~0.207 m. Planning
+// uses robot_radius 0.22 m for goal acceptance (GridSearch goal_clearance).
+// Nominated viewpoints must meet that same radius — a looser 0.18 m floor
+// produced candidates the planner rejected as "goal occupied, nearest 0.18 m".
 constexpr double kNarrowMinWidth = .32;
 constexpr double kNarrowMaxWidth = 1.40;
-constexpr double kNarrowClearance = .18;
+constexpr double kPlanningRadius = .22;
+constexpr double kNarrowClearance = kPlanningRadius;
 // Door seals thinner than this (free span) are treated as SLAM jamb bleed
 // when unknown lies beyond: erode the posts so the 0.22 m footprint fits.
 constexpr double kDoorCarveTargetWidth = .56;
@@ -401,14 +401,26 @@ std::size_t FrontierExplorer::CountRawFrontierCells() const {
 }
 
 bool FrontierExplorer::ClearAt(int col, int row, double clearance) const {
-  const int radius = static_cast<int>(std::ceil(clearance / map_.resolution));
-  for (int dy = -radius; dy <= radius; ++dy) for (int dx = -radius; dx <= radius; ++dx) {
-    if (dx * dx + dy * dy > radius * radius) continue;
-    const int x = col + dx, y = row + dy;
-    if (x < 0 || y < 0 || x >= map_.width || y >= map_.height) return false;
-    // Unknown is unobserved space, not a jamb. It does not push a viewpoint
-    // back from the opening; the viewpoint itself still has to be free.
-    if (map_.cells[static_cast<std::size_t>(y) * map_.width + x] > 0) return false;
+  // Match LayeredCostmap::lethal: continuous distance to occupied cells with
+  // a half-cell box margin. The old discrete disk accepted poses the planner
+  // then rejected (and vice versa) because GridSearch uses this geometry.
+  if (col < 0 || row < 0 || col >= map_.width || row >= map_.height) return false;
+  if (map_.cells[static_cast<std::size_t>(row) * map_.width + col] != 0) return false;
+  const auto [wx, wy] = CellCenter(col, row);
+  const double half = .5 * map_.resolution;
+  const int cells = static_cast<int>(std::ceil(
+      (std::max(0., clearance) + std::sqrt(.5) * map_.resolution) / map_.resolution));
+  for (int dy = -cells; dy <= cells; ++dy) {
+    for (int dx = -cells; dx <= cells; ++dx) {
+      const int x = col + dx, y = row + dy;
+      if (x < 0 || y < 0 || x >= map_.width || y >= map_.height) return false;
+      // Unknown is unobserved space, not a jamb — same as costmap lethal().
+      if (map_.cells[static_cast<std::size_t>(y) * map_.width + x] <= 0) continue;
+      const auto [ox, oy] = CellCenter(x, y);
+      const double nearest_x = std::max(std::abs(wx - ox) - half, 0.);
+      const double nearest_y = std::max(std::abs(wy - oy) - half, 0.);
+      if (std::hypot(nearest_x, nearest_y) <= clearance) return false;
+    }
   }
   return true;
 }
@@ -441,7 +453,6 @@ bool FrontierExplorer::SafeViewpoint(int col, int row) const {
   // Corridor / doorway cells must use the planning radius (.22): requiring
   // .30 m half-width rejects a physical 0.70 m kitchen door after SLAM
   // thickens the jambs, so entry probes never reach the room side.
-  constexpr double kPlanningRadius = .22;
   const double corridor_clearance =
       std::max(kNarrowClearance, std::min(config_.footprint_clearance, kPlanningRadius));
   return corridor && ClearAt(col, row, corridor_clearance);
@@ -555,11 +566,11 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
   std::vector<unsigned char> discovery_safe(map_.cells.size(), 0);
   for (int row = 0; row < map_.height; ++row) for (int col = 0; col < map_.width; ++col)
     safe[static_cast<std::size_t>(row) * map_.width + col] = SafeViewpoint(col, row);
-  // Frontier discovery is deliberately less conservative than execution.
-  // It may nominate a viewpoint near a doorway; StartNavigation still checks
-  // the full inflated planning graph before any velocity is sent.
+  // Discovery graph only finds room boundaries. Executable viewpoints still
+  // require SafeViewpoint (== planning radius); nominating discovery-only
+  // poses produced candidates the planner rejected as goal-occupied.
   const double discovery_clearance = std::clamp(
-      config_.footprint_clearance - .12, .14, .22);
+      config_.footprint_clearance - .12, .14, kPlanningRadius);
   for (int row = 0; row < map_.height; ++row) for (int col = 0; col < map_.width; ++col) {
     const std::size_t index = static_cast<std::size_t>(row) * map_.width + col;
     discovery_safe[index] = Free(col, row) && ClearAt(col, row, discovery_clearance);
@@ -844,8 +855,9 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
       for (int col = std::max(0, static_cast<int>(mean_col) - search);
            col <= std::min(map_.width - 1, static_cast<int>(mean_col) + search); ++col) {
         const int viewpoint_index = row * map_.width + col;
-        if ((!safe[viewpoint_index] && !discovery_safe[viewpoint_index]) ||
-            travel_cells[viewpoint_index] < 0) continue;
+        // Only planning-radius viewpoints. Discovery-safe cells find the
+        // frontier but must not become Navigation2D goals.
+        if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0) continue;
         const auto [x, y] = CellCenter(col, row);
         if (Blacklisted(x, y)) continue;
         const double standoff = std::hypot(x - frontier_x, y - frontier_y);
@@ -862,10 +874,6 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
                                   frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                   information_gain,
                                   ViewpointScore(information_gain, travel, standoff, 2.)};
-        // A relaxed doorway viewpoint is discovery-only. Prefer a full
-        // footprint-safe viewpoint whenever one exists; the planner must not
-        // repeatedly reject a relaxed candidate before trying the safe one.
-        if (!safe[viewpoint_index]) candidate.score -= 1000.;
         if (!best || candidate.score > best->score) best = candidate;
       }
     }
@@ -879,8 +887,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
         for (int col = std::max(0, static_cast<int>(mean_col) - search);
              col <= std::min(map_.width - 1, static_cast<int>(mean_col) + search); ++col) {
           const int viewpoint_index = row * map_.width + col;
-          if ((!safe[viewpoint_index] && !discovery_safe[viewpoint_index]) ||
-              travel_cells[viewpoint_index] < 0) continue;
+          if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0) continue;
           const auto [x, y] = CellCenter(col, row);
           if (Blacklisted(x, y)) continue;
           const double standoff = std::hypot(x - frontier_x, y - frontier_y);
@@ -899,7 +906,6 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
                                     frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                     information_gain,
                                     ViewpointScore(information_gain, travel, standoff, 1.5)};
-          if (!safe[viewpoint_index]) candidate.score -= 1000.;
           if (!best || candidate.score > best->score) best = candidate;
         }
       }
@@ -915,8 +921,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
         for (int col = std::max(0, static_cast<int>(mean_col) - search * 2);
              col <= std::min(map_.width - 1, static_cast<int>(mean_col) + search * 2); ++col) {
           const int viewpoint_index = row * map_.width + col;
-          if ((!safe[viewpoint_index] && !discovery_safe[viewpoint_index]) ||
-              travel_cells[viewpoint_index] < 0 ||
+          if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0 ||
               !narrow_viewpoint(col, row)) continue;
           const auto [x, y] = CellCenter(col, row);
           if (Blacklisted(x, y)) continue;
@@ -930,16 +935,14 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
                                     frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                     information_gain,
                                     ViewpointScore(information_gain, travel, standoff, 1.)};
-          if (!safe[viewpoint_index]) candidate.score -= 1000.;
           if (!best || candidate.score > best->score) best = candidate;
         }
       }
     }
     if (!best) {
-      // Last-resort approach pose in already-observed open space: choose a
-      // reachable cell on the discovery graph (door throats included), then
-      // acquire the missing LOS after arrival. Requiring full SafeViewpoint
-      // here left pinched alcove frontiers as raw_cells with zero candidates.
+      // Last-resort approach in open space on the planning-radius graph.
+      // Still require SafeViewpoint so StartNavigation does not bounce the
+      // same unplannable T-labels until PARTIAL.
       constexpr double kApproachRadius = 2.5;
       const int approach_search = static_cast<int>(std::ceil(kApproachRadius / map_.resolution));
       for (const int frontier_cell : cluster) {
@@ -950,8 +953,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
           for (int col = std::max(0, target_col - approach_search);
                col <= std::min(map_.width - 1, target_col + approach_search); ++col) {
             const int viewpoint_index = row * map_.width + col;
-            if ((!safe[viewpoint_index] && !discovery_safe[viewpoint_index]) ||
-                travel_cells[viewpoint_index] < 0) continue;
+            if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0) continue;
             const auto [x, y] = CellCenter(col, row);
             if (Blacklisted(x, y)) continue;
             const auto [target_x, target_y] = CellCenter(target_col, target_row);
@@ -965,7 +967,6 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
                                       frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                       information_gain,
                                       ViewpointScore(information_gain, travel, standoff, .8)};
-            if (!safe[viewpoint_index]) candidate.score -= 1000.;
             if (!best || candidate.score > best->score) best = candidate;
           }
         }
@@ -991,14 +992,12 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectLeftoverApproach(
       map_.cells.size() != static_cast<std::size_t>(map_.width * map_.height))
     return std::nullopt;
   std::vector<unsigned char> frontier(map_.cells.size(), 0);
-  // Same graph as BuildTour: full SafeViewpoint or narrow-throat ClearAt.
-  // Safe-only left completing probes on the wrong side of kitchen/alcove
-  // mouths, so StartNavigation failed and the mission returned PARTIAL.
+  // Same planning-radius graph as SelectGoals / StartNavigation. A looser
+  // ClearAt(.18) leftover was rejected as goal-occupied before execution.
   std::vector<unsigned char> safe(map_.cells.size(), 0);
   for (int row = 0; row < map_.height; ++row) for (int col = 0; col < map_.width; ++col) {
     const std::size_t index = static_cast<std::size_t>(row) * map_.width + col;
-    safe[index] = SafeViewpoint(col, row) ||
-                  (Free(col, row) && ClearAt(col, row, kNarrowClearance));
+    safe[index] = SafeViewpoint(col, row);
   }
   const int robot_col = static_cast<int>(std::floor((robot_x - map_.origin_x) / map_.resolution));
   const int robot_row = static_cast<int>(std::floor((robot_y - map_.origin_y) / map_.resolution));
@@ -1254,15 +1253,13 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
   auto remaining = SelectGoals(robot_x, robot_y);
   if (remaining.empty()) return {};
 
-  // Tour ordering must walk kitchen/bathroom throats. Full SafeViewpoint can
-  // still reject a pinched cell that ClearAt(narrow) accepts; using only the
-  // soft footprint graph left candidates>0 with an empty tour and early PARTIAL.
+  // Tour ordering walks the same planning-radius graph the goals use. A
+  // looser ClearAt bridge ordered through cells Navigation2D cannot enter.
   std::vector<unsigned char> tour_cell(map_.cells.size(), 0);
   for (int row = 0; row < map_.height; ++row) {
     for (int col = 0; col < map_.width; ++col) {
       const std::size_t index = static_cast<std::size_t>(row) * map_.width + col;
-      tour_cell[index] = SafeViewpoint(col, row) ||
-                         (Free(col, row) && ClearAt(col, row, kNarrowClearance));
+      tour_cell[index] = SafeViewpoint(col, row);
     }
   }
   const auto nearest_safe = [&](double x, double y) -> int {
@@ -1449,11 +1446,10 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
   if (approach_length < .05) return std::nullopt;
   const double direction_x = approach_x / approach_length;
   const double direction_y = approach_y / approach_length;
-  // Traverse can be slightly tighter than the goal pose. Goal clearance tracks
-  // robot_radius (.22): requiring .24 rejected kitchen noses after SLAM
-  // thickened jambs ("goal occupied, nearest 0.15–0.18 m").
-  constexpr double kEntryTraverseClearance = .18;
-  constexpr double kEntryGoalClearance = .20;
+  // Entry poses must clear the same robot_radius the planner uses for goals.
+  // Traverse may be a hair tighter so the BFS can step the carved throat.
+  constexpr double kEntryTraverseClearance = .20;
+  constexpr double kEntryGoalClearance = kPlanningRadius;
   const auto entry_traverse = [&](int col, int row) {
     return Free(col, row) && ClearAt(col, row, kEntryTraverseClearance);
   };
