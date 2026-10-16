@@ -1113,8 +1113,12 @@ std::vector<ExplorationGoal> FrontierExplorer::OneGoalPerMouth(
       ++vertical;
     const int narrow_min = static_cast<int>(std::ceil(kNarrowMinWidth / map_.resolution));
     const int narrow_max = static_cast<int>(std::floor(kNarrowMaxWidth / map_.resolution));
-    return (horizontal >= narrow_min && horizontal <= narrow_max) !=
-           (vertical >= narrow_min && vertical <= narrow_max);
+    const bool narrow_h = horizontal >= narrow_min && horizontal <= narrow_max;
+    const bool narrow_v = vertical >= narrow_min && vertical <= narrow_max;
+    const int smaller = std::min(horizontal, vertical);
+    // Match SafeViewpoint: both-narrow kitchen vestibules are still doors.
+    return narrow_h || narrow_v ||
+           (smaller >= narrow_min && smaller <= narrow_max);
   };
   const auto snap_to_door_centerline = [&](ExplorationGoal& goal) {
     const double to_fx = goal.frontier_x - robot_x;
@@ -1155,19 +1159,21 @@ std::vector<ExplorationGoal> FrontierExplorer::OneGoalPerMouth(
   };
   for (auto& goal : mouths) {
     const double current_depth = depth_past_frontier(goal, goal.x, goal.y);
-    if (current_depth >= .15) continue;
+    if (current_depth >= .20) continue;
     bool advanced = false;
-    if (auto probe = SelectEntryProbe(goal, robot_x, robot_y, .28, .90)) {
-      if (depth_past_frontier(goal, probe->x, probe->y) > current_depth + .05) {
+    // Shallower first probe: 0.28 m often sits past SLAM speckles and fails,
+    // leaving a hallway standoff that makes the robot spin at the jamb.
+    if (auto probe = SelectEntryProbe(goal, robot_x, robot_y, .16, .70)) {
+      if (depth_past_frontier(goal, probe->x, probe->y) > current_depth + .04) {
         goal.x = probe->x;
         goal.y = probe->y;
         goal.yaw = probe->yaw;
         advanced = true;
       }
     }
-    // Corridor mouths must not remain as far hallway standoffs when the
-    // planning graph already opened the gap: snap to the door centerline.
-    if (!advanced && corridor_mouth(goal)) snap_to_door_centerline(goal);
+    // Corridor / vestibule mouths must not remain as far hallway standoffs.
+    if (!advanced) snap_to_door_centerline(goal);
+    else if (corridor_mouth(goal)) snap_to_door_centerline(goal);
   }
   return mouths;
 }
