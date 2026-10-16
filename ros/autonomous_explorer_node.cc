@@ -511,6 +511,20 @@ class AutonomousExplorer final : public rclcpp::Node {
 
   void PublishPlanningDebugMap(bool returning) {
     if (!map_ || !pose_) return;
+    (void)returning;
+    // Match the planner snapshot: unknown is not a wall, and passable
+    // openings are opened before any inflation. The old debug path painted
+    // every non-free cell as 100 then inflated 0.30 m — that turned unknown
+    // kitchen interior into obstacles and sealed ~0.75 m doors in the UI.
+    navigation2d::ExplorationGrid planning_grid;
+    planning_grid.width = static_cast<int>(map_->info.width);
+    planning_grid.height = static_cast<int>(map_->info.height);
+    planning_grid.resolution = map_->info.resolution;
+    planning_grid.origin_x = map_->info.origin.position.x;
+    planning_grid.origin_y = map_->info.origin.position.y;
+    planning_grid.cells.assign(map_->data.begin(), map_->data.end());
+    navigation2d::OpenPassableOpenings(&planning_grid);
+
     nav_msgs::msg::OccupancyGrid input = *map_;
     input.header.stamp = now();
     input.header.frame_id = "map";
@@ -518,32 +532,41 @@ class AutonomousExplorer final : public rclcpp::Node {
         (pose_->pose.position.x - navigation_origin_x_) / map_->info.resolution));
     const int robot_row = static_cast<int>(std::floor(
         (pose_->pose.position.y - navigation_origin_y_) / map_->info.resolution));
-    const double evidence_clearance = .30;
-    const int evidence_cells = static_cast<int>(std::ceil(evidence_clearance / map_->info.resolution));
-    input.data.assign(map_->data.size(), 100);
+    const int evidence_cells = static_cast<int>(std::ceil(.30 / map_->info.resolution));
+    input.data.resize(map_->data.size());
     for (std::size_t index = 0; index < map_->data.size(); ++index) {
       const int row = static_cast<int>(index / map_->info.width);
       const int col = static_cast<int>(index % map_->info.width);
       const bool under_robot = (col - robot_col) * (col - robot_col) +
           (row - robot_row) * (row - robot_row) <= evidence_cells * evidence_cells;
-      if (map_->data[index] == 0 || under_robot) input.data[index] = 0;
+      const auto cell = planning_grid.cells[index];
+      if (cell == 0 || under_robot) input.data[index] = 0;
+      else if (cell < 0) input.data[index] = -1;
+      else input.data[index] = 100;
     }
     planning_input_publisher_->publish(input);
 
+    // Hard inflation = footprint radius only. Soft 0.30 m preference belongs
+    // in the cost gradient, not as lethal paint that closes kitchen doors.
     nav_msgs::msg::OccupancyGrid inflated = input;
-    constexpr double kInflationRadius = .30;
-    const int inflation_cells = static_cast<int>(std::ceil(kInflationRadius / map_->info.resolution));
+    constexpr double kHardInflationRadius = .22;
+    const int inflation_cells =
+        static_cast<int>(std::ceil(kHardInflationRadius / map_->info.resolution));
     for (int row = 0; row < static_cast<int>(map_->info.height); ++row) {
       for (int col = 0; col < static_cast<int>(map_->info.width); ++col) {
-        if (input.data[static_cast<std::size_t>(row) * map_->info.width + col] == 0) continue;
+        if (input.data[static_cast<std::size_t>(row) * map_->info.width + col] != 100)
+          continue;
         for (int dy = -inflation_cells; dy <= inflation_cells; ++dy) {
           for (int dx = -inflation_cells; dx <= inflation_cells; ++dx) {
             const int x = col + dx, y = row + dy;
             if (x < 0 || y < 0 || x >= static_cast<int>(map_->info.width) ||
                 y >= static_cast<int>(map_->info.height) ||
-                std::hypot(dx, dy) * map_->info.resolution > kInflationRadius)
+                std::hypot(dx, dy) * map_->info.resolution > kHardInflationRadius)
               continue;
-            inflated.data[static_cast<std::size_t>(y) * map_->info.width + x] = 100;
+            const std::size_t index =
+                static_cast<std::size_t>(y) * map_->info.width + static_cast<std::size_t>(x);
+            // Never paint unknown or opened free cells as lethal.
+            if (input.data[index] != 0) inflated.data[index] = 100;
           }
         }
       }
