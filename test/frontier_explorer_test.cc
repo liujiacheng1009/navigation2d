@@ -456,12 +456,12 @@ int main() {
   far_active.frontier_y = (35 + .5) * junction.resolution;
   far_active.frontier_cells = 20;
   far_active.information_gain = 10.;
-  assert(junction_explorer.ShouldPreemptForNearerMouth(jx, jy, far_active, 4.0));
+  assert(junction_explorer.ShouldPreemptForNearerMouth(jx, jy, far_active, 6.0));
   jpaint(6, 25, 28, 42, 0);
   jpaint(36, 48, 62, 68, 0);
   jpaint(36, 48, 2, 8, 0);
   junction_explorer.UpdateMap(junction);
-  assert(!junction_explorer.ShouldPreemptForNearerMouth(jx, jy, far_active, 4.0));
+  assert(!junction_explorer.ShouldPreemptForNearerMouth(jx, jy, far_active, 6.0));
 
   // Pinched alcove tip: frontier cells fail ClearAt while a centerline pose
   // behind them is still on the discovery graph. Those tips must become

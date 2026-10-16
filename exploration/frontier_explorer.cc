@@ -1357,10 +1357,15 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
 bool FrontierExplorer::ShouldPreemptForNearerMouth(
     double robot_x, double robot_y, const ExplorationGoal& active_goal,
     double path_remaining_m) {
-  constexpr double kLocalPocketM = 3.0;
-  constexpr double kFarSlackM = 1.0;
-  constexpr double kFarRatio = 2.0;
+  // Mid-drive preempt is only for a clearly nearer local mouth while still
+  // far from the active goal. Loose thresholds rebuilt the tour every scan
+  // and re-selected the same far T-label (open-space stutter).
+  constexpr double kLocalPocketM = 2.5;
+  constexpr double kFarSlackM = 1.5;
+  constexpr double kFarRatio = 2.5;
   constexpr double kSameMouthM = .80;
+  constexpr double kMinFarRemainingM = 5.0;
+  if (path_remaining_m > 0. && path_remaining_m < kMinFarRemainingM) return false;
   if (map_.width <= 2 || map_.height <= 2 || map_.resolution <= 0. ||
       map_.cells.size() != static_cast<std::size_t>(map_.width * map_.height))
     return false;

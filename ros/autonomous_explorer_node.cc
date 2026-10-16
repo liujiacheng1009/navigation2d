@@ -468,6 +468,8 @@ class AutonomousExplorer final : public rclcpp::Node {
           goal.x - navigation_origin_x_, goal.y - navigation_origin_y_, goal.yaw));
       active_goal_ = goal;
       returning_ = returning;
+      side_peel_count_ = 0;
+      escape_then_resume_goal_ = false;
       goal_started_ = now();
       if (scan_) FeedScan();
       const auto initial_time = now();
@@ -790,6 +792,16 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (resume_return) {
       BeginReturn(true);
       return true;
+    }
+    // Side-speck peel: resume the same goal on an open approach instead of
+    // cooling it and thrashing between T-labels.
+    if (escape_then_resume_goal_) {
+      escape_then_resume_goal_ = false;
+      if (phase_ == MissionPhase::kExploring && !returning_ &&
+          StartNavigation(active_goal_, false)) {
+        PublishStatus("NAVIGATING", "resumed goal after open-space peel");
+        return true;
+      }
     }
     if (phase_ == MissionPhase::kCompleting) {
       FinishCompleting();
@@ -1166,55 +1178,73 @@ class AutonomousExplorer final : public rclcpp::Node {
         !pose_ || pending_entry_goal_) return false;
     // Already on a short doorway approach — do not yank the robot away to a
     // different mouth (that abandoned the kitchen threshold mid-crossing).
-    if (path_remaining_m > 0. && path_remaining_m < 2.5) return false;
+    if (path_remaining_m > 0. && path_remaining_m < 5.0) return false;
     const double goal_range = std::hypot(active_goal_.x - pose_->pose.position.x,
                                          active_goal_.y - pose_->pose.position.y);
-    if (goal_range < 1.5) return false;
-    // Already rolling on the active route: only preempt for a nearer mouth
-    // that continues roughly forward. Side/behind mouths caused open-space
-    // U-turn stutter between T-labels.
-    if (best_goal_path_progress_m_ > .30) {
-      const double yaw = Yaw(pose_->pose.orientation);
-      const auto mouths = explorer_.SelectGoals(
-          pose_->pose.position.x, pose_->pose.position.y);
-      bool forward_nearer = false;
-      for (const auto& mouth : mouths) {
-        if (std::hypot(mouth.x - active_goal_.x, mouth.y - active_goal_.y) < .80 ||
-            std::hypot(mouth.frontier_x - active_goal_.frontier_x,
-                       mouth.frontier_y - active_goal_.frontier_y) < .80)
-          continue;
-        const double range = std::hypot(mouth.x - pose_->pose.position.x,
-                                        mouth.y - pose_->pose.position.y);
-        if (range + 1.0 >= goal_range) continue;
-        const double bearing = std::atan2(mouth.y - pose_->pose.position.y,
-                                          mouth.x - pose_->pose.position.x);
-        if (std::abs(NormalizeAngle(bearing - yaw)) < .85) {
-          forward_nearer = true;
-          break;
-        }
-      }
-      if (!forward_nearer) return false;
-    }
+    if (goal_range < 2.5) return false;
     const auto now_t = now();
+    // Absolute cooldown. Map revision used to reset every scan and re-fire
+    // preempt on the same far goal (tour rebuild → same T-label → stutter).
+    if (last_preempt_exec_.nanoseconds() > 0 &&
+        (now_t - last_preempt_exec_).seconds() < 8.0)
+      return false;
     if (last_preempt_check_.nanoseconds() > 0 &&
-        (now_t - last_preempt_check_).seconds() < 1.0 &&
-        map_revision_ == last_preempt_map_revision_)
+        (now_t - last_preempt_check_).seconds() < 3.0)
       return false;
     last_preempt_check_ = now_t;
-    last_preempt_map_revision_ = map_revision_;
     if (!explorer_.ShouldPreemptForNearerMouth(
             pose_->pose.position.x, pose_->pose.position.y, active_goal_,
             path_remaining_m))
       return false;
+    // Commit to a concrete nearer mouth ahead of the robot. Rebuilding the
+    // whole tour often re-picked the same far active goal and just restarted
+    // Navigation2D (visible as goal flicker / open-space stutter).
+    const double yaw = Yaw(pose_->pose.orientation);
+    const auto mouths = explorer_.SelectGoals(
+        pose_->pose.position.x, pose_->pose.position.y);
+    std::optional<Goal> nearer;
+    double nearer_range = std::numeric_limits<double>::infinity();
+    for (const auto& mouth : mouths) {
+      if (std::hypot(mouth.x - active_goal_.x, mouth.y - active_goal_.y) < .80 ||
+          std::hypot(mouth.frontier_x - active_goal_.frontier_x,
+                     mouth.frontier_y - active_goal_.frontier_y) < .80)
+        continue;
+      const double range = std::hypot(mouth.x - pose_->pose.position.x,
+                                      mouth.y - pose_->pose.position.y);
+      if (range + 1.5 >= goal_range || range > 2.5) continue;
+      const double bearing = std::atan2(mouth.y - pose_->pose.position.y,
+                                        mouth.x - pose_->pose.position.x);
+      if (std::abs(NormalizeAngle(bearing - yaw)) > .70) continue;
+      if (range < nearer_range) {
+        nearer_range = range;
+        nearer = mouth;
+      }
+    }
+    if (!nearer) return false;
+    auto previous = std::move(navigation_);
+    const Goal previous_goal = active_goal_;
+    if (!StartNavigation(*nearer, false)) {
+      navigation_ = std::move(previous);
+      active_goal_ = previous_goal;
+      return false;
+    }
+    last_preempt_exec_ = now_t;
+    // Keep the committed tour; just move the adopted mouth to the front.
+    committed_tour_.erase(
+        std::remove_if(committed_tour_.begin(), committed_tour_.end(),
+                       [&](const Goal& goal) {
+                         return std::hypot(goal.x - nearer->x, goal.y - nearer->y) < .80 ||
+                                std::hypot(goal.frontier_x - nearer->frontier_x,
+                                           goal.frontier_y - nearer->frontier_y) < .80;
+                       }),
+        committed_tour_.end());
+    committed_tour_.push_front(*nearer);
     RCLCPP_WARN(get_logger(),
-                "Preempting far transit for nearer mouth: active=(%.2f,%.2f) "
-                "path_remaining=%.2f",
-                active_goal_.x, active_goal_.y, path_remaining_m);
-    navigation_.reset();
-    committed_tour_.clear();
-    next_selection_ = now_t;
-    PublishStatus("SELECTING", "nearer mouth opened; rebuilding local pocket tour");
-    SelectNextGoal();
+                "Preempting far transit for nearer mouth: active=(%.2f,%.2f)->"
+                "(%.2f,%.2f) path_remaining=%.2f",
+                previous_goal.x, previous_goal.y, nearer->x, nearer->y,
+                path_remaining_m);
+    PublishStatus("NAVIGATING", "nearer forward mouth; continuing without tour rebuild");
     return true;
   }
 
@@ -1833,6 +1863,26 @@ class AutonomousExplorer final : public rclcpp::Node {
                 SectorMinRange(0., .50) < .28 &&
                 last_goal_path_progress_time_.nanoseconds() > 0 &&
                 (now() - last_goal_path_progress_time_).seconds() > 2.0)) {
+      // Open room, forward clear, only a side speck latched STOP: peel into
+      // free space and resume the same goal. Treating this as a mouth failure
+      // cooled the viewpoint and rebuilt the tour every few seconds.
+      const bool forward_open = SectorMinRange(0., .50) >= .45;
+      const bool side_only_stop =
+          phase_ == MissionPhase::kExploring && !returning_ &&
+          state.status == navigation2d::NavigationStatus::kBlocked &&
+          state.collision_monitor_action ==
+              navigation2d::CollisionMonitorAction::kStop &&
+          forward_open && side_range < .35;
+      if (side_only_stop && side_peel_count_ < 2 && TryStartEscape()) {
+        ++side_peel_count_;
+        navigation_.reset();
+        escape_then_resume_goal_ = true;
+        PublishStatus("RECOVERING", "open-space peel after side clearance stop");
+        return;
+      }
+      if (side_only_stop &&
+          ReplanActiveGoalOnLatestMap("side clearance stop; open path replan"))
+        return;
       RCLCPP_WARN(get_logger(),
                   "Navigation2D frontier failed: status=%s phase=%d elapsed=%.1f replans=%d path=%.2f requested=(%.3f,%.3f) published=(%.3f,%.3f) controller_maneuver=%d intentional_stop=%s monitor_action=%d ttc=%.3f path_signature=%llu planner_error=%s",
                   state.status == navigation2d::NavigationStatus::kBlocked ? "blocked" : "timeout",
@@ -2000,7 +2050,9 @@ class AutonomousExplorer final : public rclcpp::Node {
   std::size_t entry_probe_initial_known_cells_ = 0;
   std::uint64_t entry_probe_initial_map_revision_ = 0;
   rclcpp::Time last_preempt_check_{0, 0, RCL_ROS_TIME};
-  std::uint64_t last_preempt_map_revision_ = 0;
+  rclcpp::Time last_preempt_exec_{0, 0, RCL_ROS_TIME};
+  bool escape_then_resume_goal_ = false;
+  int side_peel_count_ = 0;
   double best_goal_path_progress_m_ = 0.;
   rclcpp::Time last_goal_path_progress_time_{0, 0, RCL_ROS_TIME};
   std::deque<Goal> committed_tour_;
