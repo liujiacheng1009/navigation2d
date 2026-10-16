@@ -307,9 +307,9 @@ class AutonomousExplorer final : public rclcpp::Node {
     // a valid current pose is not rejected as "start occupied" on a replan
     // after a tight-corner approach.  This only clears the measured current
     // footprint; all cells ahead remain lethal unless observed free.
-    // Slightly wider than planning radius so the measured pose is never
-    // rejected as "start occupied" after a tight corner approach.
-    const double snapshot_clearance = .30;
+    // Match production: clear under the measured pose past inflation so a
+    // wall-corner approach is not rejected as "start occupied" every tick.
+    const double snapshot_clearance = .40;
     const int robot_clearance = static_cast<int>(
         std::ceil(snapshot_clearance / map_->info.resolution));
     // Near-field lidar is fresher than the online occupancy grid. Preserve
@@ -341,6 +341,12 @@ class AutonomousExplorer final : public rclcpp::Node {
       }
     }
     driven_corridor_.clear();
+    if (clear_start_pinch_) {
+      // Robot sits inside inflation at a wall corner: reopen the driven trail
+      // so the next plan can leave instead of reject-looping every frontier.
+      paint_driven_corridor_ = true;
+      clear_start_pinch_ = false;
+    }
     if (paint_driven_corridor_ && map_->info.resolution > 0. && trajectory_.size() >= 2) {
       // The chassis already drove this corridor. A later scan can pinch the
       // costmap below the planning radius and trap the robot; reopen only the
@@ -467,10 +473,12 @@ class AutonomousExplorer final : public rclcpp::Node {
           goal.x - pose_->pose.position.x, goal.y - pose_->pose.position.y);
       if (goal_distance > config.goal_xy_tolerance &&
           initial_state.global_path_length_m <= 0.) {
+        last_planning_failure_ = initial_state.planning_failure_reason.empty()
+                                     ? "no route"
+                                     : initial_state.planning_failure_reason;
         RCLCPP_WARN(get_logger(),
                     "Navigation2D rejected goal before execution: %s",
-                    initial_state.planning_failure_reason.empty() ? "no route" :
-                        initial_state.planning_failure_reason.c_str());
+                    last_planning_failure_.c_str());
         navigation_.reset();
         return false;
       }
@@ -505,6 +513,7 @@ class AutonomousExplorer final : public rclcpp::Node {
                   static_cast<unsigned long long>(initial_state.path_signature));
       return true;
     } catch (const std::exception& error) {
+      last_planning_failure_ = error.what();
       RCLCPP_WARN(get_logger(), "Navigation2D rejected goal: %s", error.what());
       navigation_.reset();
       return false;
@@ -966,10 +975,28 @@ class AutonomousExplorer final : public rclcpp::Node {
         completing_probe_used_ = false;
         return;
       }
-      // Pre-execution rejection at a doorway: try the bounded room-side entry
-      // probe instead of stuffing more hallway standoffs into the tour.
       committed_tour_.pop_front();
       ++attempted;
+      // Start pinched in wall-corner inflation: every other goal fails the same
+      // start check. Do not entry-probe / rebuild-tour — leave the pinch first.
+      const bool start_pinched =
+          last_planning_failure_.find("start occupied") != std::string::npos;
+      if (start_pinched) {
+        ++reject_streak_;
+        clear_start_pinch_ = true;
+        paint_driven_corridor_ = true;
+        RCLCPP_WARN(get_logger(),
+                    "Start pinched (%s); retreating instead of reject-looping frontiers",
+                    last_planning_failure_.c_str());
+        if (StartRetreat()) return;
+        if (TryStartEscape()) {
+          cooled_signatures_.clear();
+          return;
+        }
+        break;
+      }
+      // Pre-execution rejection at a doorway: try the bounded room-side entry
+      // probe instead of stuffing more hallway standoffs into the tour.
       pending_entry_goal_ = goal;
       entry_probe_attempts_ = 0;
       entry_probe_initial_known_cells_ = KnownCells();
@@ -1863,6 +1890,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   int retreat_cell_x_ = 0;
   int retreat_cell_y_ = 0;
   bool paint_driven_corridor_ = false;
+  bool clear_start_pinch_ = false;
   std::unordered_set<std::size_t> driven_corridor_;
   bool escape_then_return_ = false;
   int return_escape_attempts_ = 0;
