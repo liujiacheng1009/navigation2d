@@ -512,10 +512,10 @@ class AutonomousExplorer final : public rclcpp::Node {
   void PublishPlanningDebugMap(bool returning) {
     if (!map_ || !pose_) return;
     (void)returning;
-    // Match the planner snapshot: unknown is not a wall, and passable
-    // openings are opened before any inflation. The old debug path painted
-    // every non-free cell as 100 then inflated 0.30 m — that turned unknown
-    // kitchen interior into obstacles and sealed ~0.75 m doors in the UI.
+    // Mirror LayeredCostmap::Reinflate for the UI: unknown is not a wall and
+    // must not be painted by inflation (max keeps 255 over inscribed). Only
+    // free cells receive inscribed/soft cost. The previous debug path dilated
+    // into unknown and sealed passable doors in the overlay.
     navigation2d::ExplorationGrid planning_grid;
     planning_grid.width = static_cast<int>(map_->info.width);
     planning_grid.height = static_cast<int>(map_->info.height);
@@ -546,12 +546,12 @@ class AutonomousExplorer final : public rclcpp::Node {
     }
     planning_input_publisher_->publish(input);
 
-    // Hard inflation = footprint radius only. Soft 0.30 m preference belongs
-    // in the cost gradient, not as lethal paint that closes kitchen doors.
     nav_msgs::msg::OccupancyGrid inflated = input;
-    constexpr double kHardInflationRadius = .22;
+    constexpr double kRobotRadius = .22;
+    constexpr double kInflationRadius = .30;
+    constexpr double kInflationCostScaling = 8.;
     const int inflation_cells =
-        static_cast<int>(std::ceil(kHardInflationRadius / map_->info.resolution));
+        static_cast<int>(std::ceil(kInflationRadius / map_->info.resolution));
     for (int row = 0; row < static_cast<int>(map_->info.height); ++row) {
       for (int col = 0; col < static_cast<int>(map_->info.width); ++col) {
         if (input.data[static_cast<std::size_t>(row) * map_->info.width + col] != 100)
@@ -560,13 +560,22 @@ class AutonomousExplorer final : public rclcpp::Node {
           for (int dx = -inflation_cells; dx <= inflation_cells; ++dx) {
             const int x = col + dx, y = row + dy;
             if (x < 0 || y < 0 || x >= static_cast<int>(map_->info.width) ||
-                y >= static_cast<int>(map_->info.height) ||
-                std::hypot(dx, dy) * map_->info.resolution > kHardInflationRadius)
+                y >= static_cast<int>(map_->info.height))
               continue;
+            const double distance = std::hypot(dx, dy) * map_->info.resolution;
+            if (distance > kInflationRadius || distance == 0.) continue;
             const std::size_t index =
                 static_cast<std::size_t>(y) * map_->info.width + static_cast<std::size_t>(x);
-            // Never paint unknown or opened free cells as lethal.
-            if (input.data[index] != 0) inflated.data[index] = 100;
+            // Match Reinflate: unknown stays unknown; only free is painted.
+            if (input.data[index] != 0) continue;
+            const int8_t value = distance <= kRobotRadius
+                ? static_cast<int8_t>(99)
+                : static_cast<int8_t>(std::clamp(
+                      static_cast<int>(std::lround(
+                          98. * std::exp(-kInflationCostScaling *
+                                         (distance - kRobotRadius)))),
+                      1, 98));
+            inflated.data[index] = std::max(inflated.data[index], value);
           }
         }
       }
