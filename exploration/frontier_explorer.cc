@@ -20,9 +20,9 @@ constexpr double kNarrowMaxWidth = 1.40;
 constexpr double kNarrowClearance = .18;
 // Door seals thinner than this (free span) are treated as SLAM jamb bleed
 // when unknown lies beyond: erode the posts so the 0.22 m footprint fits.
-constexpr double kDoorCarveTargetWidth = .52;
+constexpr double kDoorCarveTargetWidth = .56;
 constexpr double kDoorPinchMinWidth = .18;
-constexpr int kDoorJambErodeMaxCells = 3;
+constexpr int kDoorJambErodeMaxCells = 4;
 // The frontier cell is already the last free cell beside unknown. A 0.22 m
 // floor left the goal in the corridor, and the 0.18 m arrival tolerance
 // stopped the robot before a 0.50 m kitchen door. SafeViewpoint still keeps
@@ -395,8 +395,14 @@ bool FrontierExplorer::SafeViewpoint(int col, int row) const {
   for (int y = row + 1; y < map_.height && y <= row + probe && Free(col, y); ++y) ++vertical;
   const int narrow_min = static_cast<int>(std::ceil(kNarrowMinWidth / map_.resolution));
   const int narrow_max = static_cast<int>(std::floor(kNarrowMaxWidth / map_.resolution));
-  const bool corridor = (horizontal >= narrow_min && horizontal <= narrow_max) !=
-                        (vertical >= narrow_min && vertical <= narrow_max);
+  const bool narrow_h = horizontal >= narrow_min && horizontal <= narrow_max;
+  const bool narrow_v = vertical >= narrow_min && vertical <= narrow_max;
+  // A kitchen mouth often has BOTH axes in the door band (short vestibule).
+  // The old XOR treated that as open space and demanded footprint_clearance
+  // (.30), which sealed 0.50–0.60 m free throats after SLAM thickened jambs.
+  const int smaller = std::min(horizontal, vertical);
+  const bool corridor = narrow_h || narrow_v ||
+                        (smaller >= narrow_min && smaller <= narrow_max);
   // Wide open space keeps footprint_clearance (typically .30 with inflation).
   // Corridor / doorway cells must use the planning radius (.22): requiring
   // .30 m half-width rejects a physical 0.70 m kitchen door after SLAM
@@ -1173,10 +1179,15 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
   auto remaining = SelectGoals(robot_x, robot_y);
   if (remaining.empty()) return {};
 
-  std::vector<unsigned char> safe(map_.cells.size(), 0);
+  // Tour ordering must walk kitchen/bathroom throats. Full SafeViewpoint can
+  // still reject a pinched cell that ClearAt(narrow) accepts; using only the
+  // soft footprint graph left candidates>0 with an empty tour and early PARTIAL.
+  std::vector<unsigned char> tour_cell(map_.cells.size(), 0);
   for (int row = 0; row < map_.height; ++row) {
     for (int col = 0; col < map_.width; ++col) {
-      safe[static_cast<std::size_t>(row) * map_.width + col] = SafeViewpoint(col, row);
+      const std::size_t index = static_cast<std::size_t>(row) * map_.width + col;
+      tour_cell[index] = SafeViewpoint(col, row) ||
+                         (Free(col, row) && ClearAt(col, row, kNarrowClearance));
     }
   }
   const auto nearest_safe = [&](double x, double y) -> int {
@@ -1190,7 +1201,7 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
       for (int col = std::max(0, center_col - radius);
            col <= std::min(map_.width - 1, center_col + radius); ++col) {
         const int index = row * map_.width + col;
-        if (!safe[index]) continue;
+        if (!tour_cell[static_cast<std::size_t>(index)]) continue;
         const double distance = std::hypot(col - center_col, row - center_row);
         if (distance < best_distance) { best_distance = distance; best = index; }
       }
@@ -1211,7 +1222,7 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
         const int x = col + dx[direction], y = row + dy[direction];
         if (x < 0 || y < 0 || x >= map_.width || y >= map_.height) continue;
         const int next = y * map_.width + x;
-        if (!safe[next] || distance[next] >= 0) continue;
+        if (!tour_cell[static_cast<std::size_t>(next)] || distance[next] >= 0) continue;
         distance[next] = distance[current] + 1;
         queue.push_back(next);
       }
@@ -1358,11 +1369,11 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
   if (approach_length < .05) return std::nullopt;
   const double direction_x = approach_x / approach_length;
   const double direction_y = approach_y / approach_length;
-  // Traverse can be slightly tighter than the goal pose. Goal clearance must
-  // stay above robot_radius so Navigation2D does not reject with
-  // "goal occupied, nearest 0.18 m" after raster rounding.
+  // Traverse can be slightly tighter than the goal pose. Goal clearance tracks
+  // robot_radius (.22): requiring .24 rejected kitchen noses after SLAM
+  // thickened jambs ("goal occupied, nearest 0.15–0.18 m").
   constexpr double kEntryTraverseClearance = .18;
-  constexpr double kEntryGoalClearance = .24;
+  constexpr double kEntryGoalClearance = .20;
   const auto entry_traverse = [&](int col, int row) {
     return Free(col, row) && ClearAt(col, row, kEntryTraverseClearance);
   };

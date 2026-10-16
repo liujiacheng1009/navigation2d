@@ -57,7 +57,7 @@ navigation2d::FrontierExplorerConfig ExplorerConfig() {
   // Keep frontier generation consistent with the navigation costmap: a goal
   // must leave room for the physical footprint and its obstacle buffer, not
   // merely be free in the raw occupancy image. CAD max footprint radius is
-  // ~0.207 m; planning uses 0.22 m + inflation 0.30 m (same as production).
+  // ~0.207 m; planning uses 0.22 m + soft inflation 0.26 m (same as production).
   config.footprint_clearance = .30;
   config.minimum_standoff = .10;
   config.maximum_standoff = 1.10;
@@ -422,8 +422,10 @@ class AutonomousExplorer final : public rclcpp::Node {
     config.robot_radius = .22;
     config.footprint = {{-.145, -.147}, {.115, -.147}, {.145, -.132},
                         {.145, .132}, {.115, .147}, {-.145, .147}};
-    // Derived: footprint ~0.207 + loc 0.03 + raster/track 0.06 ≈ 0.30 m.
-    config.inflation_radius = .30;
+    // Soft preference only — inscribed lethal stays at robot_radius (.22).
+    // 0.30 m inflation painted kitchen mouths shut in the cost field and made
+    // RPP crawl-to-stop on doors that still had ~0.55 m free.
+    config.inflation_radius = .26;
     // The global plan already enforces the footprint buffer.  A long local
     // collision projection into sparse unknown cells caused false stops in
     // visibly clear aisles; retain near-field collision checking only.
@@ -846,6 +848,14 @@ class AutonomousExplorer final : public rclcpp::Node {
     // mouths at junctions (drive far, then backtrack). Mouth collapse already
     // prevents fragment chasing from decision-point rebuilds.
     BuildTour();
+    // BuildTour can be empty while mouths still exist (pinched kitchen graph).
+    // Fall back to the raw mouth list so entry probes still run instead of
+    // burning no-executable cycles until PARTIAL.
+    if (committed_tour_.empty() && explorer_.candidate_frontier_goals() > 0) {
+      const auto mouths = explorer_.SelectGoals(
+          pose_->pose.position.x, pose_->pose.position.y);
+      for (const auto& mouth : mouths) committed_tour_.push_back(mouth);
+    }
     // A frontier extractor can emit many viewpoints around one wall.  Do not
     // synchronously exhaust that list when the local controller rejects a
     // viewpoint: that turns one transient costmap disagreement into hundreds
@@ -933,18 +943,25 @@ class AutonomousExplorer final : public rclcpp::Node {
         BeginReturn(reachable_unknown > 0);
         return;
       }
+      if (explorer_.candidate_frontier_goals() > 0) {
+        // Mouths still exist — planner rejection is not exhaustion. Reset the
+        // empty-tour budget so a kitchen pinch cannot PARTIAL-return in ~12s
+        // with candidates still listed (matches production navigation2d_node).
+        no_executable_frontier_cycles_ = 0;
+        next_selection_ = now() + rclcpp::Duration::from_seconds(.5);
+        PublishStatus("SELECTING", "candidate rejected; trying another viewpoint");
+        return;
+      }
       PublishStatus("SELECTING",
                     "frontiers locally blocked; waiting for map update");
       // Do not convert a transient maze doorway disagreement into completion.
-      // Only give up after a substantially longer *stagnant* window; the
-      // result is marked partial so callers cannot mistake it for exhaustion.
-      // 30 cycles left the robot spinning on cooled bathroom/kitchen mouths
-      // for minutes after every tip was already blacklisted. Keep waiting while
-      // carved seals still expose reachable unknown.
-      if (no_executable_frontier_cycles_ >= 12) {
-        if (reachable_unknown > 0 && no_executable_frontier_cycles_ < 24) return;
-        BeginReturn(true);
-      }
+      // Keep working while openable unknown remains; only give up after a long
+      // stagnant window once mouths are gone.
+      const int give_up_cycles = (reachable_unknown > 0 ||
+                                  explorer_.completed_goals() == 0)
+                                     ? 36
+                                     : 12;
+      if (no_executable_frontier_cycles_ >= give_up_cycles) BeginReturn(true);
       return;
     }
     ++empty_frontier_cycles_;
@@ -1567,7 +1584,9 @@ class AutonomousExplorer final : public rclcpp::Node {
                       "depth=%.2f; keeping unresolved",
                       pending_entry_goal_->frontier_x, pending_entry_goal_->frontier_y,
                       entry_probe_attempts_, EntryProbeDepth());
-          explorer_.RecordAttempt(*pending_entry_goal_, false);
+          // Pose-only cool — do not blacklist the kitchen mouth after a shallow
+          // crawl; OpenPassable + a later map update often opens it.
+          explorer_.CoolRegion(active_goal_.x, active_goal_.y, .50, 900u);
           pending_entry_goal_.reset();
           entry_probe_attempts_ = 0;
           committed_tour_.clear();
@@ -1668,8 +1687,17 @@ class AutonomousExplorer final : public rclcpp::Node {
       if (first_segment_stall || mid_path_pinch) {
         const bool force_return =
             first_segment_stall ? NoteFirstSegmentFailure(state) : false;
-        if (phase_ != MissionPhase::kReturning && !returning_)
-          explorer_.RecordAttempt(active_goal_, false);
+        // Entry-probe pinch at a kitchen mouth is not evidence the whole door
+        // is impossible — only that this depth/pose failed. A full mouth cool
+        // (1.10 m / 4000 cells) left candidates stranded and triggered early
+        // PARTIAL. Cool the probe pose briefly; keep the frontier eligible.
+        if (phase_ != MissionPhase::kReturning && !returning_) {
+          if (pending_entry_goal_) {
+            explorer_.CoolRegion(active_goal_.x, active_goal_.y, .45, 800u);
+          } else {
+            explorer_.RecordAttempt(active_goal_, false);
+          }
+        }
         // Returning already owns the home path.  A short clearance jiggle
         // here only changes the start cell, so the next plan looks new and
         // the same first-segment stall repeats until the mission times out.
