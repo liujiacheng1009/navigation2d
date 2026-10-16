@@ -790,7 +790,14 @@ class AutonomousExplorer final : public rclcpp::Node {
       RCLCPP_WARN(get_logger(),
                   "Completing probe found no leftover approach: raw_cells=%zu",
                   explorer_.raw_frontier_cells());
-      BeginReturn();
+      phase_ = MissionPhase::kExploring;
+      if (explorer_.raw_frontier_cells() > 0 &&
+          no_executable_frontier_cycles_ < 24) {
+        PublishStatus("SELECTING",
+                      "unresolved boundary; waiting for map before return");
+        return;
+      }
+      BeginReturn(explorer_.raw_frontier_cells() > 0);
       return;
     }
     // Leftover goals inside the same doorway cell just bounce the robot on
@@ -801,15 +808,46 @@ class AutonomousExplorer final : public rclcpp::Node {
                   "Completing leftover is on the current doorway cell (%.2f, %.2f); skipping",
                   leftover->x, leftover->y);
       explorer_.RecordAttempt(*leftover, false);
-      BeginReturn();
+      phase_ = MissionPhase::kExploring;
+      if (explorer_.raw_frontier_cells() > 0 &&
+          no_executable_frontier_cycles_ < 24) {
+        PublishStatus("SELECTING",
+                      "doorway leftover skipped; waiting for map update");
+        return;
+      }
+      BeginReturn(true);
       return;
     }
     if (StartNavigation(*leftover, false)) return;
+    // Doorway leftovers often need a room-side entry pose; hallway standoffs
+    // fail StartNavigation while the mouth is still openable.
+    pending_entry_goal_ = *leftover;
+    entry_probe_attempts_ = 0;
+    entry_probe_initial_known_cells_ = KnownCells();
+    entry_probe_initial_map_revision_ = map_revision_;
+    if (StartEntryProbe()) {
+      RCLCPP_WARN(get_logger(),
+                  "Completing leftover unplannable at (%.2f, %.2f); trying entry probe",
+                  leftover->x, leftover->y);
+      return;
+    }
     RCLCPP_WARN(get_logger(),
                 "Completing leftover approach is unplannable at (%.2f, %.2f)",
                 leftover->x, leftover->y);
     explorer_.RecordAttempt(*leftover, false);
-    BeginReturn();
+    pending_entry_goal_.reset();
+    // Keep exploring while raw frontiers remain — one failed leftover must
+    // not abandon unfinished alcoves/rooms.
+    phase_ = MissionPhase::kExploring;
+    if (explorer_.raw_frontier_cells() > 0 &&
+        no_executable_frontier_cycles_ < 24) {
+      PublishStatus("SELECTING",
+                    "leftover blocked; waiting for map update before return");
+      return;
+    }
+    BeginReturn(explorer_.raw_frontier_cells() > 0 ||
+                explorer_.ReachableUnknownCells(pose_->pose.position.x,
+                                                pose_->pose.position.y) > 0);
   }
 
   void FinishCompleting() {

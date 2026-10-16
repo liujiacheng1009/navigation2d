@@ -804,6 +804,9 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
     if (Blacklisted(frontier_x, frontier_y, true)) continue;
   const int search = static_cast<int>(std::ceil(config_.maximum_standoff / map_.resolution));
     const auto narrow_viewpoint = [&](int col, int row) {
+      // Match SafeViewpoint / CorridorMouthAt: kitchen vestibules are often
+      // narrow on BOTH axes. XOR here dropped every both-narrow mouth so
+      // alcove/room frontiers stayed raw_cells>0 with candidates=0.
       const int probe = static_cast<int>(std::ceil(1.4 / map_.resolution));
       int horizontal = 0, vertical = 0;
       for (int x = col; x >= 0 && x > col - probe && Free(x, row); --x) ++horizontal;
@@ -812,8 +815,11 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
       for (int y = row + 1; y < map_.height && y <= row + probe && Free(col, y); ++y) ++vertical;
       const int narrow_min = static_cast<int>(std::ceil(kNarrowMinWidth / map_.resolution));
       const int narrow_max = static_cast<int>(std::floor(kNarrowMaxWidth / map_.resolution));
-      return (horizontal >= narrow_min && horizontal <= narrow_max) !=
-             (vertical >= narrow_min && vertical <= narrow_max);
+      const bool narrow_h = horizontal >= narrow_min && horizontal <= narrow_max;
+      const bool narrow_v = vertical >= narrow_min && vertical <= narrow_max;
+      const int smaller = std::min(horizontal, vertical);
+      return narrow_h || narrow_v ||
+             (smaller >= narrow_min && smaller <= narrow_max);
     };
     std::optional<ExplorationGoal> best;
     for (int row = std::max(0, static_cast<int>(mean_row) - search);
@@ -914,8 +920,9 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
     }
     if (!best) {
       // Last-resort approach pose in already-observed open space: choose a
-      // 0.40 m-clear cell the robot can reach by the ordinary free-space
-      // graph (wide aisle / gap), then acquire the missing LOS after arrival.
+      // reachable cell on the discovery graph (door throats included), then
+      // acquire the missing LOS after arrival. Requiring full SafeViewpoint
+      // here left pinched alcove frontiers as raw_cells with zero candidates.
       constexpr double kApproachRadius = 2.5;
       const int approach_search = static_cast<int>(std::ceil(kApproachRadius / map_.resolution));
       for (const int frontier_cell : cluster) {
@@ -926,7 +933,8 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
           for (int col = std::max(0, target_col - approach_search);
                col <= std::min(map_.width - 1, target_col + approach_search); ++col) {
             const int viewpoint_index = row * map_.width + col;
-            if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0) continue;
+            if ((!safe[viewpoint_index] && !discovery_safe[viewpoint_index]) ||
+                travel_cells[viewpoint_index] < 0) continue;
             const auto [x, y] = CellCenter(col, row);
             if (Blacklisted(x, y)) continue;
             const auto [target_x, target_y] = CellCenter(target_col, target_row);
@@ -940,6 +948,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
                                       frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                       information_gain,
                                       ViewpointScore(information_gain, travel, standoff, .8)};
+            if (!safe[viewpoint_index]) candidate.score -= 1000.;
             if (!best || candidate.score > best->score) best = candidate;
           }
         }
@@ -965,9 +974,15 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectLeftoverApproach(
       map_.cells.size() != static_cast<std::size_t>(map_.width * map_.height))
     return std::nullopt;
   std::vector<unsigned char> frontier(map_.cells.size(), 0);
+  // Same graph as BuildTour: full SafeViewpoint or narrow-throat ClearAt.
+  // Safe-only left completing probes on the wrong side of kitchen/alcove
+  // mouths, so StartNavigation failed and the mission returned PARTIAL.
   std::vector<unsigned char> safe(map_.cells.size(), 0);
-  for (int row = 0; row < map_.height; ++row) for (int col = 0; col < map_.width; ++col)
-    safe[static_cast<std::size_t>(row) * map_.width + col] = SafeViewpoint(col, row);
+  for (int row = 0; row < map_.height; ++row) for (int col = 0; col < map_.width; ++col) {
+    const std::size_t index = static_cast<std::size_t>(row) * map_.width + col;
+    safe[index] = SafeViewpoint(col, row) ||
+                  (Free(col, row) && ClearAt(col, row, kNarrowClearance));
+  }
   const int robot_col = static_cast<int>(std::floor((robot_x - map_.origin_x) / map_.resolution));
   const int robot_row = static_cast<int>(std::floor((robot_y - map_.origin_y) / map_.resolution));
   int start = -1;
