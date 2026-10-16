@@ -915,12 +915,22 @@ class AutonomousExplorer final : public rclcpp::Node {
       }
       NoteKnownProgress(known_now);
       ++no_executable_frontier_cycles_;
+      const std::size_t reachable_unknown = explorer_.ReachableUnknownCells(
+          pose_->pose.position.x, pose_->pose.position.y);
       if (explorer_.raw_frontier_cells() > 0 && explorer_.candidate_frontier_goals() == 0) {
         if (!completing_probe_used_) {
           StartCompletingProbe();
           return;
         }
-        BeginReturn();
+        // Completing probe can fail while OpenPassable still opens sealed
+        // mouths into unknown rooms. Returning here left kitchen/side rooms
+        // unexplored with PARTIAL and unresolved frontiers.
+        if (reachable_unknown > 0 && no_executable_frontier_cycles_ < 24) {
+          PublishStatus("SELECTING",
+                        "openable unknown remains; waiting for map update");
+          return;
+        }
+        BeginReturn(reachable_unknown > 0);
         return;
       }
       PublishStatus("SELECTING",
@@ -929,8 +939,12 @@ class AutonomousExplorer final : public rclcpp::Node {
       // Only give up after a substantially longer *stagnant* window; the
       // result is marked partial so callers cannot mistake it for exhaustion.
       // 30 cycles left the robot spinning on cooled bathroom/kitchen mouths
-      // for minutes after every tip was already blacklisted.
-      if (no_executable_frontier_cycles_ >= 12) BeginReturn(true);
+      // for minutes after every tip was already blacklisted. Keep waiting while
+      // carved seals still expose reachable unknown.
+      if (no_executable_frontier_cycles_ >= 12) {
+        if (reachable_unknown > 0 && no_executable_frontier_cycles_ < 24) return;
+        BeginReturn(true);
+      }
       return;
     }
     ++empty_frontier_cycles_;
