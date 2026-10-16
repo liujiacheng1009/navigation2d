@@ -369,7 +369,18 @@ class AutonomousExplorer final : public rclcpp::Node {
         }
       }
     }
-    for (std::size_t index = 0; index < map_->data.size(); ++index) {
+    // Same opening the explorer uses for the viewpoint. Without this, a
+    // doorway goal that ClearAt(0.22) accepted sits next to unknown jambs on
+    // the raw SLAM grid and Navigation2D rejects it as "goal occupied".
+    navigation2d::ExplorationGrid planning_grid;
+    planning_grid.width = static_cast<int>(map_->info.width);
+    planning_grid.height = static_cast<int>(map_->info.height);
+    planning_grid.resolution = map_->info.resolution;
+    planning_grid.origin_x = map_->info.origin.position.x;
+    planning_grid.origin_y = map_->info.origin.position.y;
+    planning_grid.cells = map_->data;
+    navigation2d::OpenPassableOpenings(&planning_grid);
+    for (std::size_t index = 0; index < planning_grid.cells.size(); ++index) {
       if (index) output << ',';
       // Free is 0. A real obstacle is 254 and inflates. Unknown is 255:
       // search may not enter it, and it is not a wall, so a frontier
@@ -381,11 +392,11 @@ class AutonomousExplorer final : public rclcpp::Node {
       // The robot's current footprint is physically known to be free. SLAM's
       // confidence threshold can otherwise leave isolated unknown cells below
       // the base and make every first plan fail its start-collision check.
-      const bool lidar_evidence = map_->data[index] < 0 && near_field_free.count(index) > 0;
+      const auto cell = planning_grid.cells[index];
+      const bool lidar_evidence = cell < 0 && near_field_free.count(index) > 0;
       const bool driven = driven_corridor_.count(index) > 0;
-      const bool forced_free =
-          map_->data[index] == 0 || under_robot || lidar_evidence || driven;
-      output << (forced_free ? 0 : (map_->data[index] < 0 ? 255 : 254));
+      const bool forced_free = cell == 0 || under_robot || lidar_evidence || driven;
+      output << (forced_free ? 0 : (cell < 0 ? 255 : 254));
     }
     output << "]}";
     output.close();
