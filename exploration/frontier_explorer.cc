@@ -308,11 +308,16 @@ bool FrontierExplorer::InSameReachableRegion(double anchor_x, double anchor_y,
 bool FrontierExplorer::Blacklisted(double x, double y, bool boundary) const {
   const std::size_t known = KnownCells();
   return std::any_of(blacklist_.begin(), blacklist_.end(), [&](const auto& entry) {
-    // A failed frontier becomes eligible again after the map has materially
-    // expanded, since a new approach through a doorway may now be visible.
-    return (!boundary || entry.persistent) &&
-        (entry.persistent || known < entry.known_cells + entry.required_growth) &&
-        std::hypot(x - entry.x, y - entry.y) < entry.radius;
+    // Eligible again after the map has materially expanded (or forever when
+    // persistent). Temporary mouth/pocket cools must also apply to frontier
+    // queries: the old `boundary ⇒ persistent-only` gate ignored every failed
+    // doorway cool, so nearest-first kept re-queuing the same alcove crumbs.
+    if (!(entry.persistent || known < entry.known_cells + entry.required_growth))
+      return false;
+    // Tiny pose-only cools stay viewpoint-local; mouth/pocket radii (>=.40)
+    // suppress the frontier component as well.
+    if (boundary && !entry.persistent && entry.radius < .40) return false;
+    return std::hypot(x - entry.x, y - entry.y) < entry.radius;
   });
 }
 
@@ -1192,12 +1197,17 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
   if (approach_length < .05) return std::nullopt;
   const double direction_x = approach_x / approach_length;
   const double direction_y = approach_y / approach_length;
-  // Doorway entry after SLAM thickening: use the narrow-passage clearance so
-  // the BFS can cross a ~0.46 m free throat. Full SafeViewpoint (.30) refuses
-  // the jambs and reports "no safe entry probe" while standing in the mouth.
-  constexpr double kEntryClearance = .20;
-  const auto entry_cell = [&](int col, int row) {
-    return Free(col, row) && ClearAt(col, row, kEntryClearance);
+  // Doorway entry after SLAM thickening: BFS may use the narrow-passage
+  // clearance to cross a ~0.46 m throat. The chosen probe pose itself must
+  // still clear robot_radius (.22) or Navigation2D rejects it as
+  // "goal occupied, nearest obstacle 0.18 m".
+  constexpr double kEntryTraverseClearance = .20;
+  constexpr double kEntryGoalClearance = .22;
+  const auto entry_traverse = [&](int col, int row) {
+    return Free(col, row) && ClearAt(col, row, kEntryTraverseClearance);
+  };
+  const auto entry_goal = [&](int col, int row) {
+    return Free(col, row) && ClearAt(col, row, kEntryGoalClearance);
   };
   const int robot_col = static_cast<int>(std::floor(
       (robot_x - map_.origin_x) / map_.resolution));
@@ -1210,7 +1220,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
        row <= std::min(map_.height - 1, robot_row + start_search); ++row) {
     for (int col = std::max(0, robot_col - start_search);
          col <= std::min(map_.width - 1, robot_col + start_search); ++col) {
-      if (!entry_cell(col, row)) continue;
+      if (!entry_traverse(col, row)) continue;
       const double distance = std::hypot(col - robot_col, row - robot_row);
       if (distance < start_distance) {
         start_distance = distance;
@@ -1240,7 +1250,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
           next_row >= map_.height)
         continue;
       const int next = next_row * map_.width + next_col;
-      if (distance[next] >= 0 || !entry_cell(next_col, next_row)) continue;
+      if (distance[next] >= 0 || !entry_traverse(next_col, next_row)) continue;
       distance[next] = distance[current] + 1;
       queue.push_back(next);
     }
@@ -1259,7 +1269,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
     for (int col = std::max(0, frontier_col - search);
          col <= std::min(map_.width - 1, frontier_col + search); ++col) {
       const int index = row * map_.width + col;
-      if (distance[index] < 0 || !entry_cell(col, row)) continue;
+      if (distance[index] < 0 || !entry_goal(col, row)) continue;
       const auto [x, y] = CellCenter(col, row);
       const double relative_x = x - frontier_goal.frontier_x;
       const double relative_y = y - frontier_goal.frontier_y;
@@ -1348,6 +1358,13 @@ void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded
 
 void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded) {
   RecordAttempt(goal, succeeded, true);
+}
+
+void FrontierExplorer::CoolRegion(double x, double y, double radius_m,
+                                  std::size_t required_known_growth) {
+  if (!(radius_m > 0.) || !std::isfinite(x) || !std::isfinite(y)) return;
+  blacklist_.push_back(
+      {x, y, radius_m, KnownCells(), required_known_growth, false});
 }
 
 std::size_t FrontierExplorer::KnownCells() const {

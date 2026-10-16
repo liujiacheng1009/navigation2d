@@ -111,6 +111,10 @@ class FrontierExplorer {
   void RecordAttempt(const ExplorationGoal& goal, bool succeeded,
                      bool region_complete);
   void RecordAttempt(const ExplorationGoal& goal, bool succeeded);
+  // Temporary cool-down of a local pocket (dead-end alcove crumbs) so
+  // nearest-first touring cannot re-queue the same room immediately.
+  void CoolRegion(double x, double y, double radius_m,
+                  std::size_t required_known_growth = 2500u);
   void ClearBlacklist() { blacklist_.clear(); }
   bool CompletionEligible(std::size_t initial_known_cells) const;
   // Unknown cells that are reachable through the planner's safe graph,

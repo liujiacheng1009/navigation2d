@@ -844,6 +844,9 @@ class AutonomousExplorer final : public rclcpp::Node {
       entry_probe_initial_known_cells_ = KnownCells();
       entry_probe_initial_map_revision_ = map_revision_;
       if (StartEntryProbe()) return;
+      // Hallway reject + failed entry must cool the mouth; otherwise the
+      // same kitchen/alcove frontier is rebuilt into every tour.
+      explorer_.RecordAttempt(goal, false);
       pending_entry_goal_.reset();
       const auto cell = PoseCell();
       if (!reject_pose_valid_ || cell.first != reject_cell_x_ || cell.second != reject_cell_y_) {
@@ -1467,16 +1470,19 @@ class AutonomousExplorer final : public rclcpp::Node {
                   (now() - goal_started_).seconds());
       navigation_.reset();
       explorer_.RecordAttempt(active_goal_, true);
+      // Cool the whole tip pocket. Retreat-then-nearest-first used to walk
+      // out and immediately re-queue the next crumb in the same alcove.
+      explorer_.CoolRegion(active_goal_.x, active_goal_.y, 1.80, 3000u);
+      explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 1.80, 3000u);
       pending_entry_goal_.reset();
       entry_probe_attempts_ = 0;
-      if (!committed_tour_.empty()) committed_tour_.pop_front();
-      if (StartRetreat()) {
-        PublishStatus("RECOVERING", "alcove tip; turning back along driven trail");
-        return;
-      }
+      committed_tour_.clear();
+      cooled_signatures_.clear();
+      // Brief reverse/turn out of the tip; do not StartRetreat — that path
+      // endpoint sits just outside the pocket and nearest-first walks back in.
       if (TryStartEscape()) return;
       next_selection_ = now();
-      PublishStatus("SELECTING", "alcove tip left; selecting next viewpoint");
+      PublishStatus("SELECTING", "alcove tip left; pocket cooled, picking a farther goal");
       return;
     }
     if (state.status == navigation2d::NavigationStatus::kSucceeded) {
