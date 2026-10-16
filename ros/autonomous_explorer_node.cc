@@ -1038,12 +1038,21 @@ class AutonomousExplorer final : public rclcpp::Node {
         no_executable_frontier_cycles_ = 0;
         last_no_executable_known_cells_ = known_now;
         frontier_probe_count_ = 0;
+        // New map evidence may open a tip the previous leftover missed.
+        completing_probe_used_ = false;
       }
       NoteKnownProgress(known_now);
       ++no_executable_frontier_cycles_;
       const std::size_t reachable_unknown = explorer_.ReachableUnknownCells(
           pose_->pose.position.x, pose_->pose.position.y);
-      if (explorer_.raw_frontier_cells() > 0 && explorer_.candidate_frontier_goals() == 0) {
+      // Nominated mouths that all fail StartNavigation are not executable
+      // either. Requiring candidates==0 skipped leftover completion and
+      // returned PARTIAL while the same 3 unplannable T-labels looped.
+      const bool tour_unplannable =
+          committed_tour_.empty() && attempted > 0;
+      const bool no_executable_mouths =
+          explorer_.candidate_frontier_goals() == 0 || tour_unplannable;
+      if (explorer_.raw_frontier_cells() > 0 && no_executable_mouths) {
         if (!completing_probe_used_) {
           StartCompletingProbe();
           return;
@@ -1051,19 +1060,26 @@ class AutonomousExplorer final : public rclcpp::Node {
         // Completing probe can fail while OpenPassable still opens sealed
         // mouths into unknown rooms. Returning here left kitchen/side rooms
         // unexplored with PARTIAL and unresolved frontiers.
-        if (reachable_unknown > 0 && no_executable_frontier_cycles_ < 24) {
+        if ((reachable_unknown > 0 || explorer_.raw_frontier_cells() > 0) &&
+            no_executable_frontier_cycles_ < 24) {
           PublishStatus("SELECTING",
                         "openable unknown remains; waiting for map update");
           return;
         }
-        BeginReturn(reachable_unknown > 0);
+        BeginReturn(reachable_unknown > 0 || explorer_.raw_frontier_cells() > 0);
         return;
       }
       // Failed mouths were already RecordAttempt'd. Wait for the next map
       // tick instead of a busy reject/rebuild loop (that was the hesitation).
       PublishStatus("SELECTING",
                     "frontiers locally blocked; waiting for map update");
-      if (no_executable_frontier_cycles_ >= 12) BeginReturn(true);
+      if (no_executable_frontier_cycles_ >= 12) {
+        if (!completing_probe_used_ && explorer_.raw_frontier_cells() > 0) {
+          StartCompletingProbe();
+          return;
+        }
+        BeginReturn(true);
+      }
       return;
     }
     ++empty_frontier_cycles_;
