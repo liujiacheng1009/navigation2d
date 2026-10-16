@@ -482,4 +482,29 @@ int main() {
   assert(kitchen_probe.has_value());
   assert(kitchen_probe->x > kg.frontier_x - .05);
 
+  // SLAM-pinched kitchen: free throat shrinks to 0.20 m with unknown beyond.
+  // OpenPassableOpenings must erode jamb bleed and open a plannable nose.
+  navigation2d::ExplorationGrid pinched;
+  pinched.width = 60;
+  pinched.height = 40;
+  pinched.resolution = .05;
+  pinched.cells.assign(static_cast<std::size_t>(pinched.width * pinched.height), 100);
+  const auto ppaint = [&](int col0, int col1, int row0, int row1, std::int8_t value) {
+    for (int row = row0; row < row1; ++row)
+      for (int col = col0; col < col1; ++col)
+        pinched.cells[static_cast<std::size_t>(row * pinched.width + col)] = value;
+  };
+  ppaint(2, 28, 4, 36, 0);           // hall
+  ppaint(28, 48, 18, 22, -1);        // 0.20 m unknown throat (4 cells)
+  ppaint(28, 30, 18, 20, 0);         // observed free speck in throat
+  ppaint(48, 58, 4, 36, -1);         // kitchen unknown
+  navigation2d::OpenPassableOpenings(&pinched);
+  int free_in_throat = 0;
+  for (int row = 15; row < 25; ++row)
+    for (int col = 28; col < 48; ++col)
+      if (pinched.cells[static_cast<std::size_t>(row * pinched.width + col)] == 0)
+        ++free_in_throat;
+  assert(free_in_throat >= 10);
+  assert(pinched.cells[20 * pinched.width + 40] == 0);
+
 }

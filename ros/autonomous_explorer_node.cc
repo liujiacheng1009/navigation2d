@@ -597,13 +597,13 @@ class AutonomousExplorer final : public rclcpp::Node {
 
   bool StartEntryProbe() {
     if (!pending_entry_goal_ || !pose_) return false;
-    // First attempt just past the jambs; deeper retries if the shallow cell
-    // is still blocked. Requiring 0.22 m on attempt 0 often asked for a cell
-    // still outside the OpenPassable nose into the kitchen.
-    const double minimum_depth = .12 + .12 * entry_probe_attempts_;
+    // First attempt past the jambs; deeper retries into the OpenPassable nose.
+    // Kitchen doors need ~0.30 m past the frontier or the robot stops in the
+    // hallway and never observes the room.
+    const double minimum_depth = .20 + .16 * entry_probe_attempts_;
     const auto probe = explorer_.SelectEntryProbe(
         *pending_entry_goal_, pose_->pose.position.x, pose_->pose.position.y,
-        minimum_depth, .80);
+        minimum_depth, 1.00);
     if (!probe) {
       RCLCPP_WARN(get_logger(),
                   "Entry probe unavailable: frontier=(%.2f,%.2f) attempts=%d",
