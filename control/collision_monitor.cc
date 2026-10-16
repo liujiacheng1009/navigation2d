@@ -372,11 +372,11 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
       if (in_stop_corridor && closing && along_track_gap > -0.02 &&
           along_track_gap <= config_.collision_monitor_stop_distance)
         emergency_stop = true;
-      // Footprint clearing: a static obstacle cannot physically occupy the
-      // robot's current solid body. Returns already inside the footprint are
-      // self/noise/contact discretization and must not permanently latch the
-      // base. The monitor guards newly swept space only.
-      if (!sample.depth && in_travel_corridor && initial_distance > collision_radius &&
+      // Footprint clearing must use the STOP corridor, not the wider travel
+      // corridor. Door jambs sit in the travel band beside a 0.55–0.70 m mouth;
+      // treating them as predicted_contact latched STOP (ttc≈one cycle) and
+      // left the robot parked on the threshold despite a clear centerline.
+      if (!sample.depth && in_stop_corridor && initial_distance > collision_radius &&
           projected_footprint_collision)
         predicted_contact = true;
     }

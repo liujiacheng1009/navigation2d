@@ -793,6 +793,17 @@ class AutonomousExplorer final : public rclcpp::Node {
       BeginReturn();
       return;
     }
+    // Leftover goals inside the same doorway cell just bounce the robot on
+    // the threshold (frontier_cells=0 goals at ~0.5 m). Skip those.
+    if (std::hypot(leftover->x - pose_->pose.position.x,
+                    leftover->y - pose_->pose.position.y) < .60) {
+      RCLCPP_WARN(get_logger(),
+                  "Completing leftover is on the current doorway cell (%.2f, %.2f); skipping",
+                  leftover->x, leftover->y);
+      explorer_.RecordAttempt(*leftover, false);
+      BeginReturn();
+      return;
+    }
     if (StartNavigation(*leftover, false)) return;
     RCLCPP_WARN(get_logger(),
                 "Completing leftover approach is unplannable at (%.2f, %.2f)",
@@ -1059,6 +1070,12 @@ class AutonomousExplorer final : public rclcpp::Node {
   bool MaybePreemptForNearerMouth(double path_remaining_m) {
     if (phase_ != MissionPhase::kExploring || returning_ || !navigation_ ||
         !pose_ || pending_entry_goal_) return false;
+    // Already on a short doorway approach — do not yank the robot away to a
+    // different mouth (that abandoned the kitchen threshold mid-crossing).
+    if (path_remaining_m > 0. && path_remaining_m < 2.5) return false;
+    const double goal_range = std::hypot(active_goal_.x - pose_->pose.position.x,
+                                         active_goal_.y - pose_->pose.position.y);
+    if (goal_range < 1.5) return false;
     const auto now_t = now();
     if (last_preempt_check_.nanoseconds() > 0 &&
         (now_t - last_preempt_check_).seconds() < 1.0 &&

@@ -143,6 +143,22 @@ int main() {
   assert(result.action != navigation2d::CollisionMonitorAction::kBlindZoneStop);
   assert(result.command.linear >= .08 - 1e-9);
 
+  // Kitchen doorway: jambs sit in the travel band (~0.20 m lateral, 0.30 m
+  // ahead) while the centerline is free. Predicted footprint contact used to
+  // latch STOP on those side returns and park the robot on the threshold.
+  navigation2d::CollisionMonitor door_monitor(corner_stop_config);
+  navigation2d::LaserScan door_scan;
+  door_scan.angle_min = -std::atan2(.20, .30);
+  door_scan.angle_increment = 2. * std::atan2(.20, .30);
+  door_scan.range_min = .02;
+  door_scan.range_max = 8.;
+  door_scan.ranges = {std::hypot(.30, .20), std::hypot(.30, .20)};
+  door_monitor.UpdateLaserScan(origin, door_scan);
+  result = door_monitor.Filter(origin, {.20, 0.}, 6.05);
+  assert(result.action != navigation2d::CollisionMonitorAction::kStop);
+  assert(result.action != navigation2d::CollisionMonitorAction::kBlindZoneStop);
+  assert(result.command.linear > 0.);
+
   // The same chassis still stops for a return 0.09 m in front of the bumper.
   navigation2d::CollisionMonitor bumper_monitor(corner_stop_config);
   navigation2d::LaserScan bumper_scan = corner_scan;
