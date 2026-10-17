@@ -32,10 +32,10 @@ void OpenPassableOpenings(ExplorationGrid* grid);
 // wrap at an end) are not seals.
 bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row);
 
-// True when a free cell sits in a concave wall corner (occupied mass within
-// `reach_m` on two perpendicular sides). Tour/entry goals must not land here.
-bool IsWallCornerCell(const ExplorationGrid& map, int col, int row,
-                      double reach_m = .35);
+// Visible unknown area (m²) from (col, row) excluding exterior void: unknown
+// 4-connected components that touch the map border. Sealed interior pockets
+// still count; open-wall fringe into exterior does not.
+double UsefulVisibleUnknownGain(const ExplorationGrid& map, int col, int row);
 
 // True when a world-frame polyline puts the body on a cell that remains
 // occupied after OpenPassableOpenings. Matches the planner so kitchen free-gap
@@ -144,8 +144,6 @@ class FrontierExplorer {
   // Open-wall frontier expansion is NOT a mouth — MouthGapWidth alone can
   // read 1.6 m+ in an open room and must not trigger entry.
   bool IsCorridorMouth(double frontier_x, double frontier_y) const;
-  // True when a world pose sits in a concave wall corner on the planning map.
-  bool GoalInWallCorner(double x, double y, double reach_m = .35) const;
   // How far Free space continues past the frontier along the into-room axis.
   double MouthFreeDepth(const ExplorationGoal& frontier_goal, double robot_x,
                         double robot_y) const;

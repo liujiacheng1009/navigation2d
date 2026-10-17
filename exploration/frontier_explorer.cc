@@ -188,36 +188,103 @@ int OpeningCells(const ExplorationGrid& grid, int col, int row, int step_col, in
 
 }  // namespace
 
-bool IsWallCornerCell(const ExplorationGrid& map, int col, int row,
-                      double reach_m) {
-  // Concave room corner: occupied wall mass within reach on two perpendicular
-  // cardinal sides. Straight wall feet and mid-gap door cells are not corners —
-  // driving GOAL into these L-tips is pure thrash (UI: path into wall vertex).
-  if (map.resolution <= 0. || col < 0 || row < 0 || col >= map.width ||
-      row >= map.height)
-    return false;
-  if (map.cells[static_cast<std::size_t>(row) * map.width + col] != 0)
-    return false;
-  const int limit =
-      std::max(1, static_cast<int>(std::ceil(reach_m / map.resolution)));
-  auto occupied_along = [&](int step_c, int step_r) {
-    for (int step = 1; step <= limit; ++step) {
-      const int c = col + step * step_c;
-      const int r = row + step * step_r;
-      if (c < 0 || r < 0 || c >= map.width || r >= map.height) return true;
-      const std::int8_t value =
-          map.cells[static_cast<std::size_t>(r) * map.width + c];
-      if (value > 0) return true;
-      if (value < 0) return false;  // unknown breaks the wall ray
+namespace {
+
+// Unknown cells in exterior void (4-connected CC that touches the map border).
+// Interior sealed pockets stay clear so NBV can score finishable rooms.
+// "Largest CC" alone is not used: equal-sized sealed rooms and large unfinished
+// wings would be mislabeled as exterior and scored to zero.
+std::vector<unsigned char> ExteriorUnknownMask(const ExplorationGrid& map) {
+  const int width = map.width;
+  const int height = map.height;
+  const int n = width * height;
+  std::vector<unsigned char> exterior(
+      static_cast<std::size_t>(std::max(0, n)), 0);
+  if (n <= 0 || map.cells.size() != static_cast<std::size_t>(n) ||
+      map.resolution <= 0.)
+    return exterior;
+  std::vector<int> label(static_cast<std::size_t>(n), -1);
+  std::vector<unsigned char> touches_border;
+  constexpr int dx[] = {-1, 1, 0, 0};
+  constexpr int dy[] = {0, 0, -1, 1};
+  int next_label = 0;
+  for (int row = 0; row < height; ++row) {
+    for (int col = 0; col < width; ++col) {
+      const int seed = row * width + col;
+      if (map.cells[static_cast<std::size_t>(seed)] >= 0 ||
+          label[static_cast<std::size_t>(seed)] >= 0)
+        continue;
+      std::deque<int> queue{seed};
+      label[static_cast<std::size_t>(seed)] = next_label;
+      bool border = false;
+      while (!queue.empty()) {
+        const int current = queue.front();
+        queue.pop_front();
+        const int r = current / width;
+        const int c = current % width;
+        if (c == 0 || r == 0 || c == width - 1 || r == height - 1) border = true;
+        for (int direction = 0; direction < 4; ++direction) {
+          const int nc = c + dx[direction];
+          const int nr = r + dy[direction];
+          if (nc < 0 || nr < 0 || nc >= width || nr >= height) continue;
+          const int next = nr * width + nc;
+          if (map.cells[static_cast<std::size_t>(next)] >= 0 ||
+              label[static_cast<std::size_t>(next)] >= 0)
+            continue;
+          label[static_cast<std::size_t>(next)] = next_label;
+          queue.push_back(next);
+        }
+      }
+      touches_border.push_back(border ? 1 : 0);
+      ++next_label;
     }
-    return false;
-  };
-  const bool north = occupied_along(0, 1);
-  const bool south = occupied_along(0, -1);
-  const bool east = occupied_along(1, 0);
-  const bool west = occupied_along(-1, 0);
-  return (north && east) || (north && west) || (south && east) ||
-         (south && west);
+  }
+  if (touches_border.empty()) return exterior;
+  for (int i = 0; i < n; ++i) {
+    const int id = label[static_cast<std::size_t>(i)];
+    if (id < 0) continue;
+    if (touches_border[static_cast<std::size_t>(id)])
+      exterior[static_cast<std::size_t>(i)] = 1;
+  }
+  return exterior;
+}
+
+double VisibleUnknownGainMasked(const ExplorationGrid& map, int col, int row,
+                                const std::vector<unsigned char>* exterior) {
+  if (map.resolution <= 0. || col < 0 || row < 0 || col >= map.width ||
+      row >= map.height ||
+      map.cells.size() !=
+          static_cast<std::size_t>(map.width) * map.height)
+    return 0.;
+  std::vector<unsigned char> seen(map.cells.size(), 0);
+  const int max_range = static_cast<int>(std::ceil(3.0 / map.resolution));
+  for (int ray = 0; ray < 144; ++ray) {
+    const double angle =
+        2.0 * std::acos(-1.0) * static_cast<double>(ray) / 144.0;
+    for (int step = 1; step <= max_range; ++step) {
+      const int x = col + static_cast<int>(std::lround(step * std::cos(angle)));
+      const int y = row + static_cast<int>(std::lround(step * std::sin(angle)));
+      if (x < 0 || y < 0 || x >= map.width || y >= map.height) break;
+      const int index = y * map.width + x;
+      if (map.cells[static_cast<std::size_t>(index)] > 50) break;
+      if (map.cells[static_cast<std::size_t>(index)] < 0) {
+        if (exterior != nullptr &&
+            index < static_cast<int>(exterior->size()) &&
+            (*exterior)[static_cast<std::size_t>(index)])
+          continue;
+        seen[static_cast<std::size_t>(index)] = 1;
+      }
+    }
+  }
+  return static_cast<double>(std::count(seen.begin(), seen.end(), 1)) *
+         map.resolution * map.resolution;
+}
+
+}  // namespace
+
+double UsefulVisibleUnknownGain(const ExplorationGrid& map, int col, int row) {
+  const auto exterior = ExteriorUnknownMask(map);
+  return VisibleUnknownGainMasked(map, col, row, &exterior);
 }
 
 bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row) {
@@ -1015,26 +1082,39 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
       }
     }
   }
-  // Approximate the lidar field of view from a candidate and count unique
-  // unknown cells before the first occupied cell on each ray. This is the
-  // actual NBV gain, rather than the size of the frontier component alone.
-  const auto visible_unknown_gain = [&](int col, int row) {
-    std::vector<unsigned char> seen(observation_map_.cells.size(), 0);
-    const int max_range = static_cast<int>(std::ceil(3.0 / map_.resolution));
-    for (int ray = 0; ray < 144; ++ray) {
-      const double angle = 2.0 * std::acos(-1.0) * static_cast<double>(ray) / 144.0;
-      for (int step = 1; step <= max_range; ++step) {
-        const int x = col + static_cast<int>(std::lround(step * std::cos(angle)));
-        const int y = row + static_cast<int>(std::lround(step * std::sin(angle)));
-        if (x < 0 || y < 0 || x >= observation_map_.width ||
-            y >= observation_map_.height) break;
-        const int index = y * observation_map_.width + x;
-        if (observation_map_.cells[index] > 50) break;
-        if (observation_map_.cells[index] < 0) seen[index] = 1;
-      }
+  // NBV gain: unique unknown cells before the first occupied hit on each ray.
+  // Exterior void (border-touching unknown CC) is not finishable — score only
+  // sealed interior unknown. Early expansion (no interior unknown yet) falls
+  // back to raw visible unknown so the map can still grow.
+  const auto exterior_unknown = ExteriorUnknownMask(observation_map_);
+  bool has_interior_unknown = false;
+  for (std::size_t i = 0; i < observation_map_.cells.size(); ++i) {
+    if (observation_map_.cells[i] < 0 &&
+        (i >= exterior_unknown.size() || !exterior_unknown[i])) {
+      has_interior_unknown = true;
+      break;
     }
-    return static_cast<double>(std::count(seen.begin(), seen.end(), 1)) *
-           observation_map_.resolution * observation_map_.resolution;
+  }
+  const bool mature_map = KnownCells() >= 10000;
+  const bool use_useful_gain = mature_map || has_interior_unknown;
+  // Below the live exterior-fringe false gain (~3 m²) but above sensor noise;
+  // tiny sealed throats (~0.15 m²) must still nominate.
+  constexpr double kMinUsefulGain = .15;
+  const auto visible_unknown_gain = [&](int col, int row) {
+    if (use_useful_gain)
+      return VisibleUnknownGainMasked(observation_map_, col, row,
+                                      &exterior_unknown);
+    return VisibleUnknownGainMasked(observation_map_, col, row, nullptr);
+  };
+  const auto useful_enough = [&](double gain, double frontier_x,
+                                 double frontier_y) {
+    if (!use_useful_gain || gain >= kMinUsefulGain) return true;
+    const int fcol = static_cast<int>(
+        std::floor((frontier_x - map_.origin_x) / map_.resolution));
+    const int frow = static_cast<int>(
+        std::floor((frontier_y - map_.origin_y) / map_.resolution));
+    return CorridorMouthAt(map_, frontier_x, frontier_y) &&
+           UnknownRoomBeyond(map_, fcol, frow);
   };
   // Actionable frontier: raw free↔unknown boundary that is on the travel
   // graph, OR a pinched tip cell adjacent to a travel cell. Narrow alcove
@@ -1178,14 +1258,14 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
                                 representative / map_.width)) continue;
         // Door/alcove standoffs that clear only 0.14 m sit on the jamb and
         // stall at the threshold — require a usable mid-gap clearance.
-        // Never nominate a concave wall corner (UI: GOAL jammed in L-tip).
-        if (IsWallCornerCell(map_, col, row)) continue;
         const double clearance = OccupiedClearanceAt(map_, col, row);
-        if (clearance < (narrow_viewpoint(col, row) ? .16 : .22)) continue;
+        if (narrow_viewpoint(col, row) && clearance < .16) continue;
         const double travel = travel_cells[viewpoint_index] * map_.resolution;
-        const double information_gain = std::max(
-            visible_unknown_gain(col, row),
-            static_cast<double>(cluster.size()) * map_.resolution * map_.resolution);
+        const double information_gain = visible_unknown_gain(col, row);
+        // Near-zero useful gain must not win via clearance bonus (outer-wall
+        // tips that only see exterior void). Sealed doorway mouths may sit
+        // slightly under the floor while the pocket is still opening.
+        if (!useful_enough(information_gain, frontier_x, frontier_y)) continue;
         ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
                                   frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                   information_gain,
@@ -1217,13 +1297,11 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
             return HasFreeLineOfSight(col, row, cell % map_.width, cell / map_.width);
           });
           if (!sees_component) continue;
-          if (IsWallCornerCell(map_, col, row)) continue;
           const double clearance = OccupiedClearanceAt(map_, col, row);
-          if (clearance < (narrow_viewpoint(col, row) ? .16 : .22)) continue;
+          if (narrow_viewpoint(col, row) && clearance < .16) continue;
           const double travel = travel_cells[viewpoint_index] * map_.resolution;
-          const double information_gain = std::max(
-              visible_unknown_gain(col, row),
-              static_cast<double>(cluster.size()) * map_.resolution * map_.resolution);
+          const double information_gain = visible_unknown_gain(col, row);
+          if (!useful_enough(information_gain, frontier_x, frontier_y)) continue;
           ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
                                     frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                     information_gain,
@@ -1251,13 +1329,11 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
           if (Blacklisted(x, y)) continue;
           const double standoff = std::hypot(x - frontier_x, y - frontier_y);
           if (standoff < kCloseStandoff || standoff > 1.5) continue;
-          if (IsWallCornerCell(map_, col, row)) continue;
           const double clearance = OccupiedClearanceAt(map_, col, row);
-          if (clearance < .16) continue;
+          if (clearance < .14) continue;
           const double travel = travel_cells[viewpoint_index] * map_.resolution;
-          const double information_gain = std::max(
-              visible_unknown_gain(col, row),
-              static_cast<double>(cluster.size()) * map_.resolution * map_.resolution);
+          const double information_gain = visible_unknown_gain(col, row);
+          if (!useful_enough(information_gain, frontier_x, frontier_y)) continue;
           ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
                                     frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                     information_gain,
@@ -1289,15 +1365,10 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
             const auto [target_x, target_y] = CellCenter(target_col, target_row);
             const double standoff = std::hypot(x - target_x, y - target_y);
             if (standoff < kCloseStandoff || standoff > kApproachRadius) continue;
-            // Last-resort used to accept corner tips with no clearance floor
-            // (live: purple path into L-vertex, GOAL on the wall).
-            if (IsWallCornerCell(map_, col, row)) continue;
             const double clearance = OccupiedClearanceAt(map_, col, row);
-            if (clearance < .22) continue;
             const double travel = travel_cells[viewpoint_index] * map_.resolution;
-            const double information_gain = std::max(
-                visible_unknown_gain(col, row),
-                static_cast<double>(cluster.size()) * map_.resolution * map_.resolution);
+            const double information_gain = visible_unknown_gain(col, row);
+            if (!useful_enough(information_gain, frontier_x, frontier_y)) continue;
             ExplorationGoal candidate{x, y, std::atan2(target_y - y, target_x - x),
                                       frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                       information_gain,
@@ -1310,21 +1381,22 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
     }
     if (best) goals.push_back(*best);
   }
-  // Mature maps: open-space residual fragments (furniture legs, already-seen
-  // wall tips) still form >=minimum_frontier_cells clusters with tiny visible
-  // unknown. Those viewpoints land in blue explored junctions and starve
-  // unfinished alcoves. Keep corridor mouths and meaningful unknown pockets.
-  if (KnownCells() >= 10000) {
-    constexpr double kMinOpenResidualGain = 1.5;
-    constexpr int kMinOpenResidualCells = 18;
+  // Drop viewpoints that only see exterior / residual fringe. Keep real sealed
+  // doorway mouths even when useful NBV is still small (pocket just opening).
+  if (use_useful_gain) {
     goals.erase(std::remove_if(goals.begin(), goals.end(),
                                [&](const ExplorationGoal& goal) {
+                                 if (goal.information_gain >= kMinUsefulGain)
+                                   return false;
+                                 const int fcol = static_cast<int>(std::floor(
+                                     (goal.frontier_x - map_.origin_x) /
+                                     map_.resolution));
+                                 const int frow = static_cast<int>(std::floor(
+                                     (goal.frontier_y - map_.origin_y) /
+                                     map_.resolution));
                                  if (CorridorMouthAt(map_, goal.frontier_x,
-                                                     goal.frontier_y))
-                                   return false;
-                                 if (goal.information_gain >= kMinOpenResidualGain)
-                                   return false;
-                                 if (goal.frontier_cells >= kMinOpenResidualCells)
+                                                     goal.frontier_y) &&
+                                     UnknownRoomBeyond(map_, fcol, frow))
                                    return false;
                                  return true;
                                }),
@@ -1402,6 +1474,17 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectLeftoverApproaches(
   unresolved_frontier_cells_ = CountRawFrontierCells();
   raw_frontier_cells_ = unresolved_frontier_cells_;
   if (raw_frontier_cells_ == 0) return leftovers;
+  const auto exterior_unknown = ExteriorUnknownMask(observation_map_);
+  bool has_interior_unknown = false;
+  for (std::size_t i = 0; i < observation_map_.cells.size(); ++i) {
+    if (observation_map_.cells[i] < 0 &&
+        (i >= exterior_unknown.size() || !exterior_unknown[i])) {
+      has_interior_unknown = true;
+      break;
+    }
+  }
+  const bool use_useful_gain = KnownCells() >= 10000 || has_interior_unknown;
+  constexpr double kMinUsefulGain = .15;
   // Leftover free/unknown specks are often smaller than
   // minimum_frontier_cells, so the exploring tour drops them.  The pocket
   // they belong to is usually still reachable through ordinary open space.
@@ -1461,13 +1544,19 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectLeftoverApproaches(
         if (leftover_suppressed(x, y)) continue;
         const double standoff = std::hypot(x - frontier_x, y - frontier_y);
         if (standoff < kCloseStandoff || standoff > kLeftoverRadius) continue;
-        if (IsWallCornerCell(map_, col, row)) continue;
-        const double clearance = OccupiedClearanceAt(map_, col, row);
-        if (clearance < .20) continue;
         const double travel = travel_cells[viewpoint_index] * map_.resolution;
+        const double information_gain =
+            use_useful_gain
+                ? VisibleUnknownGainMasked(observation_map_, col, row,
+                                           &exterior_unknown)
+                : VisibleUnknownGainMasked(observation_map_, col, row, nullptr);
+        if (use_useful_gain && information_gain < kMinUsefulGain &&
+            !(room_mouth && UnknownRoomBeyond(map_, target_col, target_row)))
+          continue;
+        const double clearance = OccupiedClearanceAt(map_, col, row);
         ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
-                                  frontier_x, frontier_y, 1, map_.resolution,
-                                  ViewpointScore(map_.resolution, travel, standoff, .8,
+                                  frontier_x, frontier_y, 1, information_gain,
+                                  ViewpointScore(information_gain, travel, standoff, .8,
                                                  clearance),
                                   true};
         if (!best_for_tip || candidate.score > best_for_tip->score)
@@ -1834,16 +1923,6 @@ bool FrontierExplorer::IsCorridorMouth(double frontier_x,
   return CorridorMouthAt(map_, frontier_x, frontier_y);
 }
 
-bool FrontierExplorer::GoalInWallCorner(double x, double y,
-                                        double reach_m) const {
-  if (map_.resolution <= 0. || map_.width <= 0 || map_.height <= 0) return false;
-  const int col =
-      static_cast<int>(std::floor((x - map_.origin_x) / map_.resolution));
-  const int row =
-      static_cast<int>(std::floor((y - map_.origin_y) / map_.resolution));
-  return IsWallCornerCell(map_, col, row, reach_m);
-}
-
 double FrontierExplorer::MouthFreeDepth(const ExplorationGoal& frontier_goal,
                                         double robot_x, double robot_y) const {
   if (map_.resolution <= 0. || map_.width <= 2 || map_.height <= 2) return 0.;
@@ -2037,7 +2116,6 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
       // Do not select a pose that is merely on the approach side of the
       // frontier or an unrelated free cell behind a nearby wall.
       if (std::hypot(relative_x, relative_y) > maximum_depth_m + .20) continue;
-      if (IsWallCornerCell(map_, col, row)) continue;
       const double clearance = OccupiedClearanceAt(map_, col, row);
       if (clearance < .14) continue;
       // Clearance dominates: mid-gap beats a deeper jamb-hugging cell.

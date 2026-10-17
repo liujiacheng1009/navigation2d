@@ -1275,38 +1275,81 @@ int main() {
     assert(navigation2d::PathCutsLiveOccupied(island, through, x0, y0, .22));
   }
 
-  // Concave L-corner must not become a tour GOAL (UI: path into wall vertex).
+  // Useful NBV ignores exterior void: outer-wall fringe must lose to a mouth
+  // that sees a sealed interior unknown pocket.
   {
-    navigation2d::ExplorationGrid corner;
-    corner.width = 40;
-    corner.height = 40;
-    corner.resolution = .05;
-    corner.cells.assign(static_cast<std::size_t>(corner.width * corner.height),
-                        100);
-    for (int row = 8; row < 32; ++row)
-      for (int col = 8; col < 32; ++col)
-        corner.cells[static_cast<std::size_t>(row * corner.width + col)] = 0;
-    // NW corner tip cell at (9, 30) — walls immediately north and west.
-    assert(navigation2d::IsWallCornerCell(corner, 9, 30));
-    // Mid-room open cell is not a corner.
-    assert(!navigation2d::IsWallCornerCell(corner, 20, 20));
-    // Mid-wall (south side only) is not a corner.
-    assert(!navigation2d::IsWallCornerCell(corner, 20, 9));
-    // Unknown fringe along the north edge of free space.
-    for (int col = 8; col < 32; ++col)
-      corner.cells[static_cast<std::size_t>(31 * corner.width + col)] = -1;
-    navigation2d::FrontierExplorerConfig ccfg;
-    ccfg.footprint_clearance = .22;
-    ccfg.minimum_frontier_cells = 4;
-    ccfg.minimum_standoff = .10;
-    ccfg.maximum_standoff = 1.20;
-    ccfg.required_frontier_observations = 1;
-    navigation2d::FrontierExplorer cex(ccfg);
-    cex.UpdateMap(corner);
-    const auto goals = cex.SelectGoals(1.0, 1.0);
+    navigation2d::ExplorationGrid gain_map;
+    gain_map.width = 60;
+    gain_map.height = 50;
+    gain_map.resolution = .05;
+    gain_map.cells.assign(
+        static_cast<std::size_t>(gain_map.width * gain_map.height), 100);
+    // Large exterior unknown touching the map border (north + west margins).
+    for (int row = 0; row < gain_map.height; ++row)
+      for (int col = 0; col < 5; ++col)
+        gain_map.cells[static_cast<std::size_t>(row * gain_map.width + col)] =
+            -1;
+    for (int row = 0; row < 5; ++row)
+      for (int col = 0; col < gain_map.width; ++col)
+        gain_map.cells[static_cast<std::size_t>(row * gain_map.width + col)] =
+            -1;
+    for (int row = gain_map.height - 5; row < gain_map.height; ++row)
+      for (int col = 0; col < gain_map.width; ++col)
+        gain_map.cells[static_cast<std::size_t>(row * gain_map.width + col)] =
+            -1;
+    // Explored room (free), open on the north into exterior unknown.
+    for (int row = 8; row < 36; ++row)
+      for (int col = 8; col < 38; ++col)
+        gain_map.cells[static_cast<std::size_t>(row * gain_map.width + col)] =
+            0;
+    // Connect north fringe to the border-touching exterior CC.
+    for (int row = 36; row < gain_map.height; ++row)
+      for (int col = 8; col < 38; ++col)
+        gain_map.cells[static_cast<std::size_t>(row * gain_map.width + col)] =
+            -1;
+    // Sealed interior pocket east of the room (does not touch map border).
+    for (int row = 14; row < 26; ++row)
+      for (int col = 44; col < 54; ++col)
+        gain_map.cells[static_cast<std::size_t>(row * gain_map.width + col)] =
+            -1;
+    // Door throat: free opening into the sealed pocket.
+    for (int row = 18; row < 22; ++row)
+      for (int col = 38; col < 44; ++col)
+        gain_map.cells[static_cast<std::size_t>(row * gain_map.width + col)] =
+            0;
+    // Outer-wall tip near the NW free/exterior fringe.
+    const int outer_col = 10;
+    const int outer_row = 34;
+    // Mouth facing the sealed pocket.
+    const int mouth_col = 40;
+    const int mouth_row = 20;
+    const double outer_gain =
+        navigation2d::UsefulVisibleUnknownGain(gain_map, outer_col, outer_row);
+    const double mouth_gain =
+        navigation2d::UsefulVisibleUnknownGain(gain_map, mouth_col, mouth_row);
+    assert(outer_gain < .05);
+    assert(mouth_gain > .12);
+    navigation2d::FrontierExplorerConfig gcfg;
+    gcfg.footprint_clearance = .22;
+    gcfg.minimum_frontier_cells = 4;
+    gcfg.minimum_standoff = .10;
+    gcfg.maximum_standoff = 1.20;
+    gcfg.required_frontier_observations = 1;
+    navigation2d::FrontierExplorer gex(gcfg);
+    gex.UpdateMap(gain_map);
+    const double robot_x = (22 + .5) * gain_map.resolution;
+    const double robot_y = (20 + .5) * gain_map.resolution;
+    const auto goals = gex.SelectGoals(robot_x, robot_y);
+    assert(!goals.empty());
+    // Best goal must be the sealed-room mouth, not the outer-wall fringe.
+    bool found_sealed = false;
     for (const auto& g : goals) {
-      assert(!cex.GoalInWallCorner(g.x, g.y));
+      assert(g.information_gain >= .12 ||
+             gex.IsCorridorMouth(g.frontier_x, g.frontier_y));
+      if (g.frontier_x > 1.8) found_sealed = true;
     }
+    assert(found_sealed);
+    assert(goals.front().frontier_x > 1.8);
   }
 
   // Open-wall frontier expansion is not a corridor mouth even when the free

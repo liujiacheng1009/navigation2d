@@ -688,20 +688,6 @@ class AutonomousExplorer final : public rclcpp::Node {
       mapped_obstacle_rejects_ = 0;
       last_path_signature_ = initial_state.path_signature;
       last_path_min_clearance_m_ = initial_state.global_planning.path_min_clearance_m;
-      // Never drive a tour/completing GOAL into a concave wall corner — the
-      // planner can still emit a path that ends on the L-vertex (UI red box).
-      if (!entry_drive && !returning && !retreat_goal_ &&
-          explorer_.GoalInWallCorner(goal.x, goal.y)) {
-        if (initial_state.path_signature != 0)
-          cooled_signatures_.insert(initial_state.path_signature);
-        last_planning_failure_ = "goal in wall corner";
-        RCLCPP_WARN(get_logger(),
-                    "Navigation2D rejected goal before execution: %s "
-                    "pose=(%.2f,%.2f)",
-                    last_planning_failure_.c_str(), goal.x, goal.y);
-        navigation_.reset();
-        return false;
-      }
       // Open-tier wall-foot chords: refuse and fall through to pinch.
       // Open-tier paths that graze partition tips (~0.18–0.21 m) still park
       // CARROT on the corner; require a clearer aisle before accepting.
