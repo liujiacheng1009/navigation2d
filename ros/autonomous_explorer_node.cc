@@ -937,10 +937,18 @@ class AutonomousExplorer final : public rclcpp::Node {
     // Session-owned peel exit: resume without clearing side_peels/open_replans.
     if (recovery_.resume_after_escape) {
       recovery_.resume_after_escape = false;
-      if (phase_ == MissionPhase::kExploring && !returning_ &&
-          StartNavigation(active_goal_, false)) {
-        PublishStatus("NAVIGATING", "resumed goal after open-space peel");
-        return true;
+      if (phase_ == MissionPhase::kExploring && !returning_) {
+        if (locked_entry_mouth_ || pending_entry_goal_) {
+          if (!pending_entry_goal_) pending_entry_goal_ = locked_entry_mouth_;
+          if (entry_probe_attempts_ < 4 && StartEntryProbe()) {
+            PublishStatus("COMPLETING", "resumed locked mouth after peel");
+            return true;
+          }
+        }
+        if (StartNavigation(active_goal_, false)) {
+          PublishStatus("NAVIGATING", "resumed goal after open-space peel");
+          return true;
+        }
       }
       DemoteActiveGoal("resume after peel failed; demoting viewpoint");
       return true;
@@ -1590,8 +1598,41 @@ class AutonomousExplorer final : public rclcpp::Node {
     navigation_.reset();
     recovery_.Clear();
     if (!committed_tour_.empty()) committed_tour_.pop_front();
-    next_selection_ = now();
+    // Dwell before hopping mouths — immediate BuildTour caused junction thrash.
+    next_selection_ = now() + rclcpp::Duration::from_seconds(1.5);
     PublishStatus("SELECTING", reason);
+  }
+
+  bool HandlePathCutsWhileExploring(const navigation2d::NavigationState& state) {
+    NoteMappedObstacleReject(active_goal_);
+    if (state.path_signature != 0) cooled_signatures_.insert(state.path_signature);
+    navigation_.reset();
+    // Locked mouth owns the junction: ban the illegal chord and retry the SAME
+    // entry. Demoting here was the hesitation loop (probe A → cut → mouth B → …).
+    if (locked_entry_mouth_ || pending_entry_goal_) {
+      if (!pending_entry_goal_) pending_entry_goal_ = locked_entry_mouth_;
+      if (entry_probe_attempts_ < 4 && StartEntryProbe()) {
+        PublishStatus("COMPLETING", "path cut; retrying locked mouth with banned chord");
+        return true;
+      }
+      retreat_attempted_ = false;
+      if (StartRetreat()) {
+        PublishStatus("NAVIGATING", "path cut at locked mouth; retreat then retry");
+        return true;
+      }
+      explorer_.RecordAttempt(*pending_entry_goal_, false);
+      recently_demoted_ = *pending_entry_goal_;
+      recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(8.0);
+      ClearEntryMouthLock();
+      next_selection_ = now() + rclcpp::Duration::from_seconds(2.0);
+      PublishStatus("SELECTING", "locked mouth path cut exhausted");
+      return true;
+    }
+    if (ReplanActiveGoalOnLatestMap("path cut mapped obstacle; replan once"))
+      return true;
+    DemoteActiveGoal("path intersected mapped obstacles");
+    if (BreakMappedObstacleThrash()) return true;
+    return true;
   }
 
   void NotePoseMotion() {
@@ -1609,15 +1650,24 @@ class AutonomousExplorer final : public rclcpp::Node {
   bool PoseImmobilityWatchdog(const navigation2d::NavigationState& state) {
     NotePoseMotion();
     if (!navigation_ || !pose_ || !pose_motion_initialized_) return false;
-    if ((now() - goal_started_).seconds() < 8.0) return false;
-    const bool pose_stuck = (now() - pose_motion_stamp_).seconds() >= 7.0;
+    const bool entry_drive = pending_entry_goal_ || locked_entry_mouth_;
+    // Entry crawls past jambs are slow; the old 8 s / 6 s path-stall fired while
+    // progress was still advancing and yanked the robot back to the junction.
+    const double min_goal_s = entry_drive ? 14.0 : 8.0;
+    if ((now() - goal_started_).seconds() < min_goal_s) return false;
+    const bool pose_stuck = (now() - pose_motion_stamp_).seconds() >=
+                            (entry_drive ? 10.0 : 7.0);
+    const double path_stall_s = entry_drive ? 12.0 : 6.0;
     const bool path_stuck =
         state.path_progress_m < .05 ||
         (last_goal_path_progress_time_.nanoseconds() > 0 &&
-         (now() - last_goal_path_progress_time_).seconds() > 6.0);
+         (now() - last_goal_path_progress_time_).seconds() > path_stall_s);
+    // Still creeping into a mouth — do not abort and hop to another tour goal.
+    if (entry_drive && state.path_progress_m >= .15 &&
+        last_goal_path_progress_time_.nanoseconds() > 0 &&
+        (now() - last_goal_path_progress_time_).seconds() < 10.0)
+      return false;
     if (!pose_stuck || !path_stuck) return false;
-    // Pose has not moved ~12 cm for 7 s and the route is not advancing — the
-    // kitchen mouth scribble and near-start return thrash both look like this.
     ++immobility_recoveries_;
     RCLCPP_WARN(get_logger(),
                 "Pose immobility watchdog: stuck=(%.2f,%.2f) recoveries=%d "
@@ -1641,8 +1691,14 @@ class AutonomousExplorer final : public rclcpp::Node {
       Finish(true, "return stalled; stopping on driven trail near home");
       return true;
     }
-    if (pending_entry_goal_ || locked_entry_mouth_) {
+    if (entry_drive) {
       if (!pending_entry_goal_) pending_entry_goal_ = locked_entry_mouth_;
+      // Prefer a short peel, then the SAME locked mouth — never BuildTour hop.
+      if (TryStartEscape()) {
+        recovery_.resume_after_escape = true;
+        PublishStatus("RECOVERING", "immobility at locked mouth; peel then retry");
+        return true;
+      }
       retreat_attempted_ = false;
       if (StartRetreat()) {
         PublishStatus("NAVIGATING",
@@ -1650,10 +1706,9 @@ class AutonomousExplorer final : public rclcpp::Node {
         return true;
       }
       if (entry_probe_attempts_ < 4 && StartEntryProbe()) return true;
-      if (TryStartEscape()) return true;
       explorer_.RecordAttempt(*pending_entry_goal_, false);
       ClearEntryMouthLock();
-      next_selection_ = now();
+      next_selection_ = now() + rclcpp::Duration::from_seconds(2.0);
       PublishStatus("SELECTING", "immobility exhausted locked mouth");
       return true;
     }
@@ -2211,6 +2266,35 @@ class AutonomousExplorer final : public rclcpp::Node {
     const auto state = navigation_->ComputeCommand(local_pose, measured_velocity,
                                                     tick_time.seconds());
     if (PoseImmobilityWatchdog(state)) return;
+    // Goal already in the observation disk — finish it instead of sitting on
+    // CARROT/GOAL with zero command (junction hesitation).
+    if (phase_ == MissionPhase::kExploring && !returning_ && pose_ &&
+        !retreat_goal_) {
+      const double goal_dist = std::hypot(active_goal_.x - pose_->pose.position.x,
+                                          active_goal_.y - pose_->pose.position.y);
+      if (goal_dist < .28 && state.path_progress_m >= .05) {
+        navigation_.reset();
+        if (pending_entry_goal_ || explorer_.GoalRegionStillFrontier(active_goal_)) {
+          if (!pending_entry_goal_) LockEntryMouth(active_goal_);
+          if (EntryProbeSatisfied()) {
+            explorer_.RecordAttempt(*pending_entry_goal_, true, false);
+            explorer_.CommitRegion(pose_->pose.position.x, pose_->pose.position.y);
+            ClearEntryMouthLock();
+            committed_tour_.clear();
+            next_selection_ = now();
+            PublishStatus("SELECTING", "arrived at mouth; finishing active region");
+            return;
+          }
+          if (entry_probe_attempts_ < 4 && StartEntryProbe()) return;
+        }
+        explorer_.RecordAttempt(pending_entry_goal_.value_or(active_goal_), true);
+        ClearEntryMouthLock();
+        if (!committed_tour_.empty()) committed_tour_.pop_front();
+        next_selection_ = now();
+        PublishStatus("SELECTING", "arrived at viewpoint; continuing tour");
+        return;
+      }
+    }
     if (PathCutsMappedObstacle()) {
       RCLCPP_WARN(get_logger(),
                   "Dropping path that intersects mapped obstacles goal=(%.2f, %.2f)",
@@ -2226,10 +2310,8 @@ class AutonomousExplorer final : public rclcpp::Node {
         if (StartBreadcrumbTowardHome()) return;
         partial_return_ = true;
         Finish(true, "return path intersected mapped obstacles");
-      } else {
-        NoteMappedObstacleReject(active_goal_);
-        DemoteActiveGoal("path intersected mapped obstacles");
-        if (BreakMappedObstacleThrash()) return;
+      } else if (HandlePathCutsWhileExploring(state)) {
+        return;
       }
       return;
     }
