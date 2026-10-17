@@ -1915,6 +1915,13 @@ class AutonomousExplorer final : public rclcpp::Node {
     const double right_range = SectorMinRange(-std::acos(-1.) / 2., .40);
     const double side_range = std::min(left_range > 0. ? left_range : 10.,
                                        right_range > 0. ? right_range : 10.);
+    // Parallel room wall (front open, one flank close) is normal driving, not a
+    // U-tip. Side-only tightness must not trigger tip-crawl / pinch escapes.
+    const bool forward_clearly_open =
+        SectorMinRange(0., .50) >= .70 || front_range >= .70;
+    const bool corridor_pinch =
+        (front_range > 0. && front_range < .45) ||
+        (side_range < .40 && !forward_clearly_open);
     // Include retreat_goal_: tip thrash used frontier_cells=0 retreat poses
     // that were exempt from this abort, so the robot spun forever in the U.
     const bool near_goal_alcove_crawl =
@@ -1925,7 +1932,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         last_goal_path_progress_time_.nanoseconds() > 0 &&
         (now() - last_goal_path_progress_time_).seconds() > 2.5 &&
         state.requested_command.linear < .06 &&
-        ((front_range > 0. && front_range < .35) || side_range < .40);
+        corridor_pinch;
     if (near_goal_alcove_crawl) {
       RCLCPP_WARN(get_logger(),
                   "Leaving near-goal alcove tip: dist=%.2f front=%.2f side=%.2f "
@@ -2049,17 +2056,18 @@ class AutonomousExplorer final : public rclcpp::Node {
                // but the robot sits in a doorway spinning/creeping without
                // meaningful advance. First-segment watches never fire here and
                // the full goal timeout left the robot stuck for minutes.
-               // Tight front/side clearance shortens the grace to 5 s so a
-               // U-alcove tip does not burn the remaining goal budget.
+               // Tight front (or side while forward is also constrained)
+               // shortens the grace to 5 s. A parallel room wall with open
+               // forward must not count as pinch — that froze robots mid-room.
                (state.path_progress_m >= .05 &&
                 last_goal_path_progress_time_.nanoseconds() > 0 &&
                 (now() - last_goal_path_progress_time_).seconds() >
-                    (((front_range > 0. && front_range < .45) || side_range < .40)
-                         ? 5.0
-                         : 10.0) &&
-                (SectorMinRange(0., .50) < .45 || state.recoveries >= 2 ||
+                    (corridor_pinch ? 5.0 : 10.0) &&
+                (SectorMinRange(0., .50) < .45 ||
+                 (state.recoveries >= 2 && !forward_clearly_open) ||
                  (state.requested_command.linear < .05 &&
-                  std::abs(state.requested_command.angular) > .15))) ||
+                  std::abs(state.requested_command.angular) > .15 &&
+                  !forward_clearly_open))) ||
                // Mid-route safety latch: only when the forward corridor is
                // actually blocked. Side-jamb STOP during a door entry is not a
                // failed mouth — abandoning it caused hesitate/replan loops.
@@ -2082,9 +2090,25 @@ class AutonomousExplorer final : public rclcpp::Node {
       const bool exploring_drive =
           phase_ == MissionPhase::kExploring && !returning_;
 
-      // SideSpeckStall: open forward, only a side speck latched STOP.
-      // Budget is owned by GoalRecoverySession (2 peels + 1 replan) so resume
-      // cannot zero the counters and loop forever on the same viewpoint.
+      // SideSpeckStall: moderately open forward with a lateral speck STOP.
+      // When forward is clearly open (>=0.70 m), a close flank is a normal
+      // room wall — peel/replan here parked the robot mid-room forever
+      // (front=1.0 left=0.18 escape loop).
+      if (exploring_drive && monitor_stop && forward_clearly_open) {
+        // Keep the active route; only trail-retreat if progress is dead.
+        if (last_goal_path_progress_time_.nanoseconds() > 0 &&
+            (now() - last_goal_path_progress_time_).seconds() > 6.0) {
+          retreat_attempted_ = false;
+          navigation_.reset();
+          if (!committed_tour_.empty()) committed_tour_.pop_front();
+          if (StartRetreat()) {
+            PublishStatus("NAVIGATING",
+                          "open-forward side-wall STOP; leaving along trail");
+            return;
+          }
+        }
+        return;
+      }
       if (exploring_drive && monitor_stop && forward_open && side_range < .35) {
         if (recovery_.side_peels < 2 && TryStartEscape()) {
           ++recovery_.side_peels;
@@ -2099,6 +2123,15 @@ class AutonomousExplorer final : public rclcpp::Node {
           if (ReplanActiveGoalOnLatestMap(
                   "side speck stall; open path replan"))
             return;
+        }
+        // Leave the cell before demoting — demote alone re-queued goals from
+        // the same pose and restarted the speck loop.
+        retreat_attempted_ = false;
+        navigation_.reset();
+        if (StartRetreat()) {
+          PublishStatus("NAVIGATING",
+                        "side speck exhausted; leaving along driven trail");
+          return;
         }
         DemoteActiveGoal("side speck stall; demoting viewpoint");
         return;
@@ -2144,9 +2177,7 @@ class AutonomousExplorer final : public rclcpp::Node {
           state.path_progress_m >= .05 &&
           last_goal_path_progress_time_.nanoseconds() > 0 &&
           (now() - last_goal_path_progress_time_).seconds() >
-              (((front_range > 0. && front_range < .45) || side_range < .40)
-                   ? 5.0
-                   : 10.0);
+              (corridor_pinch ? 5.0 : 10.0);
       const bool timed_out =
           (now() - goal_started_).seconds() > goal_timeout_s_;
 
@@ -2171,6 +2202,19 @@ class AutonomousExplorer final : public rclcpp::Node {
           pending_entry_goal_.reset();
           entry_probe_attempts_ = 0;
           recovery_.Clear();
+        }
+        // Open-forward + side wall: micro-peels spin in place. Trail retreat
+        // is the only recovery that actually leaves the room cell.
+        if (phase_ != MissionPhase::kReturning && !returning_ &&
+            forward_clearly_open && side_range < .40) {
+          retreat_attempted_ = false;
+          navigation_.reset();
+          if (!committed_tour_.empty()) committed_tour_.pop_front();
+          if (StartRetreat()) {
+            PublishStatus("NAVIGATING",
+                          "room-side wall stall; leaving along driven trail");
+            return;
+          }
         }
         // Returning already owns the home path.  A short clearance jiggle
         // here only changes the start cell, so the next plan looks new and
