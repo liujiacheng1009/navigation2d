@@ -683,11 +683,13 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (!pending_entry_goal_ || !pose_) return false;
     // First attempt past the jambs; deeper retries into the OpenPassable nose.
     // Kitchen doors need ~0.30 m past the frontier or the robot stops in the
-    // hallway and never observes the room.
+    // hallway and never observes the room. Widen max depth on retry so a
+    // corner pocket past an L-jamb remains reachable.
     const double minimum_depth = .20 + .16 * entry_probe_attempts_;
+    const double maximum_depth = entry_probe_attempts_ == 0 ? 1.00 : 1.40;
     const auto probe = explorer_.SelectEntryProbe(
         *pending_entry_goal_, pose_->pose.position.x, pose_->pose.position.y,
-        minimum_depth, 1.00);
+        minimum_depth, maximum_depth);
     if (!probe) {
       RCLCPP_WARN(get_logger(),
                   "Entry probe unavailable: frontier=(%.2f,%.2f) attempts=%d",
@@ -698,10 +700,17 @@ class AutonomousExplorer final : public rclcpp::Node {
     ++entry_probe_attempts_;
     entry_probe_initial_known_cells_ = KnownCells();
     entry_probe_initial_map_revision_ = map_revision_;
+    // Paint the outbound trail so SLAM speckles near the mouth cannot reject
+    // the only path into the pocket (PathCuts is already skipped while pending).
+    paint_driven_corridor_ = true;
+    cooled_signatures_.clear();
     if (!StartNavigation(*probe, false)) {
       RCLCPP_WARN(get_logger(),
-                  "Entry probe rejected: target=(%.2f,%.2f) depth=%.2f attempt=%d",
-                  probe->x, probe->y, minimum_depth, entry_probe_attempts_);
+                  "Entry probe rejected: target=(%.2f,%.2f) depth=%.2f attempt=%d "
+                  "reason=%s",
+                  probe->x, probe->y, minimum_depth, entry_probe_attempts_,
+                  last_planning_failure_.empty() ? "unknown" :
+                      last_planning_failure_.c_str());
       return false;
     }
     RCLCPP_INFO(get_logger(),
@@ -1649,16 +1658,43 @@ class AutonomousExplorer final : public rclcpp::Node {
 
   bool BreakMappedObstacleThrash() {
     if (mapped_obstacle_rejects_ < 3) return false;
-    RCLCPP_WARN(get_logger(),
-                "mapped-obstacle reject thrash (%d); cool tip pocket and retreat",
-                mapped_obstacle_rejects_);
     mapped_obstacle_rejects_ = 0;
-    pending_entry_goal_.reset();
-    entry_probe_attempts_ = 0;
     navigation_.reset();
     recovery_.Clear();
-    // Pocket-cool so leftover injection cannot re-queue the same tip while we
-    // are still stuck against the wall.
+    cooled_signatures_.clear();
+    const std::size_t local_unknown =
+        pose_ ? explorer_.ReachableUnknownCells(pose_->pose.position.x,
+                                                pose_->pose.position.y)
+              : 0;
+    // Unfinished pockets: try room-side entry before cooling/fleeing.
+    if (local_unknown > 80 && pose_) {
+      RCLCPP_WARN(get_logger(),
+                  "mapped-obstacle reject thrash with local unknown=%zu; "
+                  "trying entry before retreat",
+                  local_unknown);
+      pending_entry_goal_ = active_goal_;
+      entry_probe_attempts_ = 0;
+      entry_probe_initial_known_cells_ = KnownCells();
+      entry_probe_initial_map_revision_ = map_revision_;
+      paint_driven_corridor_ = true;
+      if (StartEntryProbe()) return true;
+      explorer_.RecordAttempt(active_goal_, false);
+      pending_entry_goal_.reset();
+      if (!committed_tour_.empty()) committed_tour_.pop_front();
+      retreat_attempted_ = false;
+      if (StartRetreat()) {
+        PublishStatus("NAVIGATING",
+                      "brief retreat then retry unfinished local pocket");
+        return true;
+      }
+      next_selection_ = now();
+      PublishStatus("SELECTING", "mapped-obstacle thrash; local pocket kept");
+      return true;
+    }
+    RCLCPP_WARN(get_logger(),
+                "mapped-obstacle reject thrash; cool tip pocket and retreat");
+    pending_entry_goal_.reset();
+    entry_probe_attempts_ = 0;
     if (pose_) {
       explorer_.CoolRegion(active_goal_.x, active_goal_.y, 1.80, 3000u);
       explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 1.80,
@@ -2008,6 +2044,38 @@ class AutonomousExplorer final : public rclcpp::Node {
         state.requested_command.linear < .06 &&
         corridor_pinch;
     if (near_goal_alcove_crawl) {
+      // Unfinished local unknown (kitchen corner / red-box pocket) must not be
+      // CoolRegion'd away. The old 1.8 m pocket cool + RecordAttempt(true) made
+      // leftovers vanish (raw_cells>>0, completing found none) while the robot
+      // fled down the hall.
+      const bool local_frontier_open =
+          !retreat_goal_ && explorer_.GoalRegionStillFrontier(active_goal_);
+      const std::size_t local_unknown = explorer_.ReachableUnknownCells(
+          pose_->pose.position.x, pose_->pose.position.y);
+      if (local_frontier_open || local_unknown > 80) {
+        RCLCPP_WARN(get_logger(),
+                    "Corner crawl stalled with local unknown=%zu frontier=%s; "
+                    "retry entry instead of cooling pocket",
+                    local_unknown, local_frontier_open ? "yes" : "no");
+        navigation_.reset();
+        cooled_signatures_.clear();
+        if (local_frontier_open) {
+          pending_entry_goal_ = active_goal_;
+          entry_probe_attempts_ = 0;
+          entry_probe_initial_known_cells_ = KnownCells();
+          entry_probe_initial_map_revision_ = map_revision_;
+          paint_driven_corridor_ = true;
+          if (StartEntryProbe()) return;
+        }
+        // Drop only this viewpoint; keep the pocket nominatable.
+        if (!retreat_goal_) explorer_.RecordAttempt(active_goal_, false);
+        if (!committed_tour_.empty()) committed_tour_.pop_front();
+        retreat_goal_ = false;
+        next_selection_ = now();
+        PublishStatus("SELECTING",
+                      "local pocket unfinished; retrying without pocket cool");
+        return;
+      }
       RCLCPP_WARN(get_logger(),
                   "Leaving near-goal alcove tip: dist=%.2f front=%.2f side=%.2f "
                   "progress=%.2f/%.2f elapsed=%.1f retreat=%s",
@@ -2017,7 +2085,7 @@ class AutonomousExplorer final : public rclcpp::Node {
                   retreat_goal_ ? "yes" : "no");
       navigation_.reset();
       if (!retreat_goal_) explorer_.RecordAttempt(active_goal_, true);
-      // Cool the whole tip pocket (also suppresses leftover re-entry).
+      // Cool only when the tip is truly done (no local unknown left).
       explorer_.CoolRegion(active_goal_.x, active_goal_.y, 1.80, 3000u);
       explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 1.80, 3000u);
       explorer_.CoolRegion(pose_->pose.position.x, pose_->pose.position.y, 1.80, 3000u);
