@@ -804,6 +804,47 @@ int main() {
     assert(structural.cells[18 * structural.width + 30] == 100);
   }
 
+  // OpenPassable may flood unknown past a door-looking exterior nick. Tour
+  // goals must stay on RawFree — flooded void must not become "GOAL outside".
+  {
+    navigation2d::FrontierExplorerConfig flood_config;
+    flood_config.minimum_frontier_cells = 4;
+    flood_config.footprint_clearance = .30;
+    flood_config.minimum_standoff = .20;
+    flood_config.maximum_standoff = 1.20;
+    flood_config.required_frontier_observations = 1;
+    navigation2d::ExplorationGrid flooded;
+    flooded.width = 60;
+    flooded.height = 40;
+    flooded.resolution = .05;
+    flooded.cells.assign(
+        static_cast<std::size_t>(flooded.width * flooded.height), 100);
+    for (int row = 8; row < 32; ++row)
+      for (int col = 8; col < 36; ++col)
+        flooded.cells[static_cast<std::size_t>(row * flooded.width + col)] = 0;
+    // Narrow free nick in the east wall, then a band of unknown outside.
+    for (int row = 18; row < 22; ++row)
+      flooded.cells[static_cast<std::size_t>(row * flooded.width + 36)] = 0;
+    for (int row = 10; row < 30; ++row)
+      for (int col = 37; col < 55; ++col)
+        flooded.cells[static_cast<std::size_t>(row * flooded.width + col)] = -1;
+    navigation2d::FrontierExplorer flood_explorer(flood_config);
+    flood_explorer.UpdateMap(flooded);
+    const double fx = (20 + .5) * flooded.resolution;
+    const double fy = (20 + .5) * flooded.resolution;
+    const auto flood_goals = flood_explorer.SelectGoals(fx, fy);
+    for (const auto& goal : flood_goals) {
+      const int gcol = static_cast<int>(
+          std::floor((goal.x - flooded.origin_x) / flooded.resolution));
+      const int grow = static_cast<int>(
+          std::floor((goal.y - flooded.origin_y) / flooded.resolution));
+      assert(gcol >= 0 && grow >= 0 && gcol < flooded.width && grow < flooded.height);
+      // Observation grid before OpenPassable: goal cell must have been free.
+      assert(flooded.cells[static_cast<std::size_t>(grow * flooded.width + gcol)] ==
+             0);
+    }
+  }
+
   // Production open-room config: viewpoints must stay off the wall rim.
   // Mapping observes frontiers from mid-room; min standoff 0.45 m.
   {
@@ -1160,5 +1201,57 @@ int main() {
   assert(!navigation2d::PreferTipAbandonAfterPathCut(1, .08));  // tip graze → replan
   assert(!navigation2d::PreferTipAbandonAfterPathCut(0, .10));
   assert(!navigation2d::PreferTipAbandonAfterPathCut(0, 0.));
+
+  // Diagonal corner cut: centerline misses the occupied cell but the body
+  // clips the wall corner. Must still count as 穿墙 (entry body ≥0.14).
+  {
+    navigation2d::ExplorationGrid corner;
+    corner.width = 40;
+    corner.height = 40;
+    corner.resolution = .05;
+    corner.origin_x = 0.;
+    corner.origin_y = 0.;
+    corner.cells.assign(static_cast<std::size_t>(corner.width * corner.height), 0);
+    // Solid L / block in the middle; path from SW free to NE free clips corner.
+    for (int row = 16; row < 28; ++row)
+      for (int col = 16; col < 28; ++col)
+        corner.cells[static_cast<std::size_t>(row * corner.width + col)] = 100;
+    const double x0 = (12 + .5) * corner.resolution;
+    const double y0 = (12 + .5) * corner.resolution;
+    const double x1 = (30 + .5) * corner.resolution;
+    const double y1 = (30 + .5) * corner.resolution;
+    const std::vector<std::pair<double, double>> diag = {{x0, y0}, {x1, y1}};
+    assert(navigation2d::PathCutsLiveOccupied(corner, diag, x0, y0, .14));
+    assert(navigation2d::PathCutsLiveOccupied(corner, diag, x0, y0, .10));
+  }
+
+  // Corridor island: chord through a solid pillar must reject even if the
+  // posts look "door-adjacent". OpenPassable must not make this passable.
+  {
+    navigation2d::ExplorationGrid island;
+    island.width = 60;
+    island.height = 40;
+    island.resolution = .05;
+    island.origin_x = 0.;
+    island.origin_y = 0.;
+    island.cells.assign(static_cast<std::size_t>(island.width * island.height), 100);
+    const auto ip = [&](int col0, int col1, int row0, int row1, std::int8_t value) {
+      for (int row = row0; row < row1; ++row)
+        for (int col = col0; col < col1; ++col)
+          island.cells[static_cast<std::size_t>(row * island.width + col)] = value;
+    };
+    ip(2, 58, 8, 32, 0);       // open hall
+    ip(28, 34, 16, 24, 100);   // 0.30×0.40 m solid island
+    const double x0 = (20 + .5) * island.resolution;
+    const double y0 = (20 + .5) * island.resolution;
+    const double x1 = (40 + .5) * island.resolution;
+    const double y1 = (20 + .5) * island.resolution;
+    const std::vector<std::pair<double, double>> through = {{x0, y0}, {x1, y1}};
+    assert(navigation2d::PathCutsLiveOccupied(island, through, x0, y0, .22));
+    navigation2d::OpenPassableOpenings(&island);
+    // Pillar must remain occupied after openable-seal carve.
+    assert(island.cells[20 * island.width + 30] == 100);
+    assert(navigation2d::PathCutsLiveOccupied(island, through, x0, y0, .22));
+  }
 
 }

@@ -247,20 +247,44 @@ bool PathCutsLiveOccupied(const ExplorationGrid& live,
     if (col < 0 || row < 0 || col >= width || row >= height) return true;
     return lethal(col, row);
   };
-  // Raw structural wall: occupied on the live map and not an openable door
-  // seal. Jamb erode may free a nick of post in `opened`; a path whose
-  // centerline still sits on raw non-seal occupied is 穿墙 and must reject.
+  // Raw occupied: only a door seal that OpenPassable actually freed may be
+  // crossed. Uncarved "seal-looking" cells and solid pillars stay lethal —
+  // the old seal exemption alone let GLOBAL chords pierce islands the UI
+  // still paints occupied (红框穿墙).
+  const double structural_radius = std::max(.18, body_radius);
+  const double skip_under = std::min(under_robot_m, .12);
   const auto hits_raw_structural = [&](double world_x, double world_y) {
-    if (std::hypot(world_x - robot_x, world_y - robot_y) < under_robot_m)
+    if (std::hypot(world_x - robot_x, world_y - robot_y) < skip_under)
       return false;
     const int col =
         static_cast<int>(std::floor((world_x - live.origin_x) / resolution));
     const int row =
         static_cast<int>(std::floor((world_y - live.origin_y) / resolution));
-    if (col < 0 || row < 0 || col >= width || row >= height) return true;
-    if (live.cells[static_cast<std::size_t>(row) * width + col] <= 0)
-      return false;
-    return !IsOpenableDoorSealCell(live, col, row);
+    const int reach = static_cast<int>(std::ceil(
+        (structural_radius + std::sqrt(.5) * resolution) / resolution));
+    for (int dy = -reach; dy <= reach; ++dy) {
+      for (int dx = -reach; dx <= reach; ++dx) {
+        const int x = col + dx, y = row + dy;
+        if (x < 0 || y < 0 || x >= width || y >= height) {
+          if (std::hypot(static_cast<double>(dx), static_cast<double>(dy)) *
+                  resolution <=
+              structural_radius)
+            return true;
+          continue;
+        }
+        if (live.cells[static_cast<std::size_t>(y) * width + x] <= 0) continue;
+        // Carved door seal: opened cell is free → allow. Everything else that
+        // is still occupied on the live map is 穿墙.
+        if (IsOpenableDoorSealCell(live, x, y) && !lethal(x, y)) continue;
+        const double center_x = live.origin_x + (x + .5) * resolution;
+        const double center_y = live.origin_y + (y + .5) * resolution;
+        const double half = .5 * resolution;
+        const double nearest_x = std::max(std::abs(world_x - center_x) - half, 0.);
+        const double nearest_y = std::max(std::abs(world_y - center_y) - half, 0.);
+        if (std::hypot(nearest_x, nearest_y) <= structural_radius) return true;
+      }
+    }
+    return false;
   };
   for (std::size_t index = 0; index < path_xy.size(); ++index) {
     const double x = path_xy[index].first;
@@ -272,8 +296,8 @@ bool PathCutsLiveOccupied(const ExplorationGrid& live,
     const double y0 = path_xy[index - 1].second;
     const double length = std::hypot(x - x0, y - y0);
     const int samples = std::max(
-        1, static_cast<int>(std::ceil(length / std::max(.02, .5 * resolution))));
-    for (int sample = 1; sample < samples; ++sample) {
+        2, static_cast<int>(std::ceil(length / std::max(.015, .4 * resolution))));
+    for (int sample = 1; sample <= samples; ++sample) {
       const double ratio = static_cast<double>(sample) / samples;
       const double wx = x0 + ratio * (x - x0);
       const double wy = y0 + ratio * (y - y0);
@@ -567,6 +591,9 @@ bool FrontierExplorer::SafeViewpoint(int col, int row) const {
   // The search graph stays on known free cells. Unknown may lie inside the
   // clearance disk, but the viewpoint itself is not placed in unknown space.
   if (!Free(col, row)) return false;
+  // Tour goals must sit on mapper-observed free, not OpenPassable-flooded
+  // unknown. Flooded noses past exterior walls looked like "GOAL outside map".
+  if (!RawFree(col, row)) return false;
   if (ClearAt(col, row, config_.footprint_clearance)) return true;
   // Narrow-passage candidate: permit only the physical footprint radius when
   // the free run is corridor-shaped and its measured width is in the range
@@ -1683,11 +1710,25 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
   // (2.86,4.70) × dozens with attempts stuck at 1).
   constexpr double kEntryTraverseClearance = .14;
   constexpr double kEntryGoalClearance = .14;
+  const auto near_observed_free = [&](int col, int row) {
+    if (RawFree(col, row)) return true;
+    // Short OpenPassable nose into the next room may not be RawFree yet; keep
+    // only cells that still touch observed free so probes cannot jump into
+    // flooded void past an exterior wall ("GOAL outside map").
+    for (int dy = -2; dy <= 2; ++dy) {
+      for (int dx = -2; dx <= 2; ++dx) {
+        if (RawFree(col + dx, row + dy)) return true;
+      }
+    }
+    return false;
+  };
   const auto entry_traverse = [&](int col, int row) {
-    return Free(col, row) && ClearAt(col, row, kEntryTraverseClearance);
+    return Free(col, row) && ClearAt(col, row, kEntryTraverseClearance) &&
+           near_observed_free(col, row);
   };
   const auto entry_goal = [&](int col, int row) {
-    return Free(col, row) && ClearAt(col, row, kEntryGoalClearance);
+    return Free(col, row) && ClearAt(col, row, kEntryGoalClearance) &&
+           near_observed_free(col, row);
   };
   const int robot_col = static_cast<int>(std::floor(
       (robot_x - map_.origin_x) / map_.resolution));

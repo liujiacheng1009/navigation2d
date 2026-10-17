@@ -134,6 +134,8 @@ struct GoalRecoverySession {
   double goal_y = 0.;
   int side_peels = 0;
   int open_replans = 0;
+  // Open-forward wall scrape: peel→resume same chord is the red-box sawtooth.
+  int wall_scrapes = 0;
   bool resume_after_escape = false;
   bool active = false;
 
@@ -147,6 +149,7 @@ struct GoalRecoverySession {
     goal_y = y;
     side_peels = 0;
     open_replans = 0;
+    wall_scrapes = 0;
     resume_after_escape = false;
     active = true;
   }
@@ -155,6 +158,7 @@ struct GoalRecoverySession {
     active = false;
     side_peels = 0;
     open_replans = 0;
+    wall_scrapes = 0;
     resume_after_escape = false;
   }
 };
@@ -608,12 +612,9 @@ class AutonomousExplorer final : public rclcpp::Node {
           cooled_signatures_.begin(), cooled_signatures_.end()));
       navigation_->SetGoal(navigation2d::MakePose2d(
           goal.x - navigation_origin_x_, goal.y - navigation_origin_y_, goal.yaw));
-      active_goal_ = goal;
-      returning_ = returning;
-      // Resume / latest-map replan of the same viewpoint must keep peel and
-      // open-replan counters; only a materially new goal opens a session.
-      recovery_.Begin(goal.x, goal.y);
-      goal_started_ = now();
+      // Do not commit active_goal_/returning_/recovery_ until the plan is
+      // accepted. Early assign left ghost GOALs outside painted free and kept
+      // recovery sessions alive after open-area plan rejects (stuck mid-room).
       if (scan_) FeedScan();
       const auto initial_time = now();
       const auto initial_state = navigation_->ComputeCommand(
@@ -664,6 +665,29 @@ class AutonomousExplorer final : public rclcpp::Node {
         return false;
       }
       mapped_obstacle_rejects_ = 0;
+      last_path_signature_ = initial_state.path_signature;
+      last_path_min_clearance_m_ = initial_state.global_planning.path_min_clearance_m;
+      // Open-tier wall-foot chords: refuse and fall through to pinch. Do not
+      // apply the same floor to pinch/entry — door throats legitimately sit
+      // near ~0.10 m, and start-pose lidar cannot tell a throat from a graze.
+      if (!entry_drive && !returning && !retreat_goal_ && !pinch_plan &&
+          last_path_min_clearance_m_ > 0. && last_path_min_clearance_m_ < .18) {
+        if (initial_state.path_signature != 0)
+          cooled_signatures_.insert(initial_state.path_signature);
+        last_planning_failure_ = "wall-scrape path in open clearance";
+        RCLCPP_WARN(get_logger(),
+                    "Navigation2D rejected goal before execution: %s "
+                    "(clearance=%.3f)",
+                    last_planning_failure_.c_str(), last_path_min_clearance_m_);
+        navigation_.reset();
+        if (!narrow_passage_retry_) {
+          narrow_passage_retry_ = true;
+          const bool ok = StartNavigation(goal, returning, latest_map_retry);
+          narrow_passage_retry_ = false;
+          if (ok) return true;
+        }
+        return false;
+      }
       // Do not classify a frontier from the controller's first sample. At a
       // continuous goal handoff the measured velocity still belongs to the
       // previous route, so acceleration and collision constraints may
@@ -679,6 +703,12 @@ class AutonomousExplorer final : public rclcpp::Node {
         goal_timeout_s_ = std::min(
             75., std::max(40., initial_state.global_path_length_m / .12 + 15.));
       }
+      active_goal_ = goal;
+      returning_ = returning;
+      // Resume / latest-map replan of the same viewpoint must keep peel and
+      // open-replan counters; only a materially new goal opens a session.
+      recovery_.Begin(goal.x, goal.y);
+      goal_started_ = now();
       best_goal_path_progress_m_ = 0.;
       last_goal_path_progress_time_ = now();
       PublishStatus(returning ? "RETURNING" :
@@ -1190,6 +1220,9 @@ class AutonomousExplorer final : public rclcpp::Node {
           next_selection_ = now();
           return true;
         }
+        // Wall-scrape peels must not resume the banned chord — that rebuilds
+        // the STOP→peel→scrape sawtooth along the inflation rim.
+        if (BreakWallScrapeAfterPeel()) return true;
         if (StartNavigation(active_goal_, false)) {
           PublishStatus("NAVIGATING", "resumed goal after open-space peel");
           return true;
@@ -1318,6 +1351,56 @@ class AutonomousExplorer final : public rclcpp::Node {
       return true;
     }
     return false;
+  }
+
+  // Open room with one tight flank + a wall-foot path: peel/resume of the same
+  // signature is the red-box zig-zag. Cool the chord, replan once off the wall,
+  // then demote — never resume the scrape.
+  bool IsOpenWallScrape(double path_clearance_m, double side_range,
+                        bool forward_clearly_open) const {
+    if (pending_entry_goal_ || locked_entry_mouth_ || returning_) return false;
+    if (!forward_clearly_open) return false;
+    if (side_range >= .40) return false;
+    // Door throats legitimately sit near ~0.10 m clearance; open-room wall
+    // feet report the same while the opposite flank is free.
+    return path_clearance_m > 0. && path_clearance_m < .16;
+  }
+
+  bool BreakWallScrapeThrash(const char* reason) {
+    if (last_path_signature_ != 0)
+      cooled_signatures_.insert(last_path_signature_);
+    ++recovery_.wall_scrapes;
+    navigation_.reset();
+    RCLCPP_WARN(get_logger(),
+                "%s; wall_scrapes=%d clearance=%.3f signature=%llu", reason,
+                recovery_.wall_scrapes, last_path_min_clearance_m_,
+                static_cast<unsigned long long>(last_path_signature_));
+    if (recovery_.wall_scrapes >= 2) {
+      DemoteActiveGoal("wall-scrape thrash; demoting viewpoint");
+      return true;
+    }
+    latest_map_replans_ = 0;
+    if (StartNavigation(active_goal_, false, true)) {
+      // Fresh plan still on the rim → leave this viewpoint.
+      if (last_path_min_clearance_m_ > 0. && last_path_min_clearance_m_ < .12) {
+        if (last_path_signature_ != 0)
+          cooled_signatures_.insert(last_path_signature_);
+        DemoteActiveGoal("replanned path still wall-scrape; demoting");
+        return true;
+      }
+      PublishStatus("NAVIGATING", "replanned off wall after scrape stop");
+      return true;
+    }
+    DemoteActiveGoal("wall-scrape replan failed; demoting viewpoint");
+    return true;
+  }
+
+  bool BreakWallScrapeAfterPeel() {
+    const bool scrape =
+        recovery_.side_peels > 0 || recovery_.wall_scrapes > 0 ||
+        (last_path_min_clearance_m_ > 0. && last_path_min_clearance_m_ < .16);
+    if (!scrape) return false;
+    return BreakWallScrapeThrash("after wall peel; ban scrape chord");
   }
 
   // Goal lies on the outbound trail behind the robot — picking it after a
@@ -1602,9 +1685,15 @@ class AutonomousExplorer final : public rclcpp::Node {
       }
       // Failed mouths were already RecordAttempt'd. Wait for the next map
       // tick instead of a busy reject/rebuild loop (that was the hesitation).
+      ClearDisplayedGoal();
+      ClearPublishedNavPaths();
       PublishStatus("SELECTING",
                     "frontiers locally blocked; waiting for map update");
-      if (no_executable_frontier_cycles_ >= 12) {
+      // Open room with only unplannable mouths: do not sit mid-aisle for a
+      // dozen empty cycles while a ghost GOAL hangs outside painted free.
+      const int wait_budget =
+          (attempted > 0 && SectorMinRange(0., .50) >= .70) ? 4 : 12;
+      if (no_executable_frontier_cycles_ >= wait_budget) {
         if (completing_probe_rounds_ < 5 && explorer_.raw_frontier_cells() > 0) {
           StartCompletingProbe();
           return;
@@ -1888,6 +1977,14 @@ class AutonomousExplorer final : public rclcpp::Node {
     return StartNavigation(active_goal_, returning_, true);
   }
 
+  void ClearDisplayedGoal() {
+    active_goal_ = Goal{};
+    active_goal_.x = std::numeric_limits<double>::quiet_NaN();
+    active_goal_.y = std::numeric_limits<double>::quiet_NaN();
+    active_goal_.frontier_x = std::numeric_limits<double>::quiet_NaN();
+    active_goal_.frontier_y = std::numeric_limits<double>::quiet_NaN();
+  }
+
   void DemoteActiveGoal(const char* reason) {
     if (phase_ != MissionPhase::kReturning && !returning_) {
       explorer_.RecordAttempt(pending_entry_goal_.value_or(active_goal_), false);
@@ -1896,6 +1993,8 @@ class AutonomousExplorer final : public rclcpp::Node {
     }
     ClearEntryMouthLock();
     navigation_.reset();
+    ClearPublishedNavPaths();
+    ClearDisplayedGoal();
     recovery_.Clear();
     if (!committed_tour_.empty()) committed_tour_.pop_front();
     // Dwell before hopping mouths — immediate BuildTour caused junction thrash.
@@ -2121,6 +2220,21 @@ class AutonomousExplorer final : public rclcpp::Node {
     }
     retreat_attempted_ = false;
     clear_start_pinch_ = true;
+    {
+      const double front = SectorMinRange(0., .50);
+      const double left = SectorMinRange(+std::acos(-1.) / 2., .40);
+      const double right = SectorMinRange(-std::acos(-1.) / 2., .40);
+      const double side =
+          std::min(left > 0. ? left : 10., right > 0. ? right : 10.);
+      const double path_clear =
+          state.global_planning.path_min_clearance_m > 0.
+              ? state.global_planning.path_min_clearance_m
+              : last_path_min_clearance_m_;
+      if (IsOpenWallScrape(path_clear, side, front >= .70)) {
+        BreakWallScrapeThrash("immobility wall-scrape");
+        return true;
+      }
+    }
     if (EscapeOrShortRetreat("immobility; peel then continue",
                              "immobility; short trail retreat"))
       return true;
@@ -2267,14 +2381,19 @@ class AutonomousExplorer final : public rclcpp::Node {
         ",\"candidates\":" + std::to_string(explorer_.candidate_frontier_goals()) +
         ",\"tour_remaining\":" + std::to_string(committed_tour_.size()) +
         ",\"tour\":" + tour_json + "]" +
-        ",\"current_goal\":{\"x\":" + std::to_string(active_goal_.x) +
-        ",\"y\":" + std::to_string(active_goal_.y) +
-        ",\"yaw\":" + std::to_string(active_goal_.yaw) +
-        ",\"frontier_x\":" + std::to_string(active_goal_.frontier_x) +
-        ",\"frontier_y\":" + std::to_string(active_goal_.frontier_y) +
-        ",\"frontier_cells\":" + std::to_string(active_goal_.frontier_cells) +
-        ",\"information_gain\":" + std::to_string(active_goal_.information_gain) +
-        "},\"carrot\":{\"x\":" + std::to_string(last_carrot_x_) +
+        ",\"current_goal\":" +
+        (std::isfinite(active_goal_.x) && std::isfinite(active_goal_.y)
+             ? ("{\"x\":" + std::to_string(active_goal_.x) +
+                ",\"y\":" + std::to_string(active_goal_.y) +
+                ",\"yaw\":" + std::to_string(active_goal_.yaw) +
+                ",\"frontier_x\":" + std::to_string(active_goal_.frontier_x) +
+                ",\"frontier_y\":" + std::to_string(active_goal_.frontier_y) +
+                ",\"frontier_cells\":" +
+                std::to_string(active_goal_.frontier_cells) +
+                ",\"information_gain\":" +
+                std::to_string(active_goal_.information_gain) + "}")
+             : "null") +
+        ",\"carrot\":{\"x\":" + std::to_string(last_carrot_x_) +
         ",\"y\":" + std::to_string(last_carrot_y_) +
         ",\"yaw\":" + std::to_string(last_carrot_yaw_) +
         ",\"valid\":" + (last_carrot_valid_ ? "true" : "false") +
@@ -2325,6 +2444,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     last_path_progress_m_ = state.path_progress_m;
     last_path_length_m_ = state.global_path_length_m;
     last_path_min_clearance_m_ = state.global_planning.path_min_clearance_m;
+    if (state.path_signature != 0) last_path_signature_ = state.path_signature;
     last_path_max_curvature_ = state.global_planning.path_max_curvature;
     last_replans_ = state.replans;
     last_incremental_replans_ = state.incremental_replans;
@@ -2446,10 +2566,12 @@ class AutonomousExplorer final : public rclcpp::Node {
     }
     const double robot_x = pose_ ? pose_->pose.position.x : path_xy.front().first;
     const double robot_y = pose_ ? pose_->pose.position.y : path_xy.front().second;
-    // Locked-mouth entry: slim body so OpenPassable throats are not
-    // PathCuts-killed by jamb graze.
+    // Entry may use a slightly slimmer body on the opened throat, but never
+    // below 0.14 m — 0.10 m missed diagonal corner cuts through raw walls
+    // (UI: GLOBAL path through solid black). Structural checks inside
+    // PathCutsLiveOccupied still use ≥0.14 m regardless.
     const double body =
-        (pending_entry_goal_ || locked_entry_mouth_) ? .10 : .22;
+        (pending_entry_goal_ || locked_entry_mouth_) ? .14 : .22;
     return navigation2d::PathCutsLiveOccupied(live, path_xy, robot_x, robot_y,
                                               body);
   }
@@ -2476,8 +2598,21 @@ class AutonomousExplorer final : public rclcpp::Node {
     return false;
   }
 
+  void ClearPublishedNavPaths() {
+    nav_msgs::msg::Path empty;
+    empty.header.stamp = now();
+    empty.header.frame_id = "map";
+    path_publisher_->publish(empty);
+    local_trajectory_publisher_->publish(empty);
+    tour_publisher_->publish(empty);
+    last_carrot_valid_ = false;
+  }
+
   void PublishDebugPaths(const navigation2d::NavigationState& state) {
-    if (!navigation_ || !pose_) return;
+    if (!navigation_ || !pose_) {
+      ClearPublishedNavPaths();
+      return;
+    }
     const auto& route = navigation_->path();
     nav_msgs::msg::Path global;
     global.header.stamp = now();
@@ -2788,10 +2923,7 @@ class AutonomousExplorer final : public rclcpp::Node {
                   active_goal_.x, active_goal_.y);
       geometry_msgs::msg::Twist stop;
       command_publisher_->publish(stop);
-      nav_msgs::msg::Path empty;
-      empty.header.stamp = now();
-      empty.header.frame_id = "map";
-      path_publisher_->publish(empty);
+      ClearPublishedNavPaths();
       if (phase_ == MissionPhase::kReturning || returning_) {
         navigation_.reset();
         cooled_signatures_.clear();
@@ -3131,8 +3263,7 @@ class AutonomousExplorer final : public rclcpp::Node {
 
       // SideSpeckStall: moderately open forward with a lateral speck STOP.
       // When forward is clearly open (>=0.70 m), a close flank is a normal
-      // room wall — peel/replan here parked the robot mid-room forever
-      // (front=1.0 left=0.18 escape loop).
+      // room wall — peel/resume of a wall-foot path is the red-box sawtooth.
       if (exploring_drive && monitor_stop && forward_clearly_open) {
         // Locked doorway: jamb STOP with open forward is the entry crawl, not
         // a mid-room wall. Retreating here left CARROT inside the room.
@@ -3157,16 +3288,20 @@ class AutonomousExplorer final : public rclcpp::Node {
           }
           return;
         }
-        // Keep the active route; only peel/short-retreat if progress is dead.
+        const double path_clear =
+            state.global_planning.path_min_clearance_m > 0.
+                ? state.global_planning.path_min_clearance_m
+                : last_path_min_clearance_m_;
+        if (IsOpenWallScrape(path_clear, side_range, true) ||
+            (side_range < .35 && path_clear > 0. && path_clear < .18)) {
+          BreakWallScrapeThrash("open-forward wall-scrape STOP");
+          return;
+        }
+        // Keep a centered open-space route; only peel if progress is dead.
         if (last_goal_path_progress_time_.nanoseconds() > 0 &&
             (now() - last_goal_path_progress_time_).seconds() > 6.0) {
-          retreat_attempted_ = false;
-          navigation_.reset();
-          if (!committed_tour_.empty()) committed_tour_.pop_front();
-          if (EscapeOrShortRetreat(
-                  "open-forward side-wall STOP; peel",
-                  "open-forward side-wall STOP; short trail retreat"))
-            return;
+          BreakWallScrapeThrash("open-forward side-wall stall");
+          return;
         }
         return;
       }
@@ -3193,19 +3328,31 @@ class AutonomousExplorer final : public rclcpp::Node {
           }
           return;
         }
-        if (recovery_.side_peels < 2 && TryStartEscape()) {
+        const double path_clear =
+            state.global_planning.path_min_clearance_m > 0.
+                ? state.global_planning.path_min_clearance_m
+                : last_path_min_clearance_m_;
+        // Prefer ban+replan over peel when the committed path itself scrapes.
+        if (IsOpenWallScrape(path_clear, side_range, forward_clearly_open) ||
+            (path_clear > 0. && path_clear < .14)) {
+          BreakWallScrapeThrash("side speck wall-scrape path");
+          return;
+        }
+        if (recovery_.open_replans < 1) {
+          ++recovery_.open_replans;
+          if (last_path_signature_ != 0)
+            cooled_signatures_.insert(last_path_signature_);
+          if (ReplanActiveGoalOnLatestMap(
+                  "side speck stall; open path replan"))
+            return;
+        }
+        if (recovery_.side_peels < 1 && TryStartEscape()) {
           ++recovery_.side_peels;
           navigation_.reset();
           recovery_.resume_after_escape = true;
           PublishStatus("RECOVERING",
                         "open-space peel after side clearance stop");
           return;
-        }
-        if (recovery_.open_replans < 1) {
-          ++recovery_.open_replans;
-          if (ReplanActiveGoalOnLatestMap(
-                  "side speck stall; open path replan"))
-            return;
         }
         // Leave the cell before demoting — demote alone re-queued goals from
         // the same pose and restarted the speck loop.
@@ -3328,17 +3475,12 @@ class AutonomousExplorer final : public rclcpp::Node {
               now() + rclcpp::Duration::from_seconds(25.0);
           recovery_.Clear();
         }
-        // Open-forward + side wall: micro-peels spin in place. Prefer a short
-        // peel; long trail reverse is the inefficient 往回跑.
+        // Open-forward + side wall: peel→resume same chord is the sawtooth.
+        // Ban the scrape and replan/demote instead of micro-peeling in place.
         if (phase_ != MissionPhase::kReturning && !returning_ &&
             forward_clearly_open && side_range < .40) {
-          retreat_attempted_ = false;
-          navigation_.reset();
-          if (!committed_tour_.empty()) committed_tour_.pop_front();
-          if (EscapeOrShortRetreat(
-                  "room-side wall stall; peel",
-                  "room-side wall stall; short trail retreat"))
-            return;
+          BreakWallScrapeThrash("room-side wall stall");
+          return;
         }
         // Returning already owns the home path.  A short clearance jiggle
         // here only changes the start cell, so the next plan looks new and
@@ -3456,6 +3598,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   double last_path_progress_m_ = 0.;
   double last_path_length_m_ = 0.;
   double last_path_min_clearance_m_ = 0.;
+  std::uint64_t last_path_signature_ = 0;
   double last_path_max_curvature_ = 0.;
   double last_cmd_linear_ = 0.;
   double last_cmd_angular_ = 0.;
