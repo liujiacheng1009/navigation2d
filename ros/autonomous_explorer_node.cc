@@ -426,6 +426,37 @@ class AutonomousExplorer final : public rclcpp::Node {
     planning_grid.origin_y = map_->info.origin.position.y;
     planning_grid.cells = map_->data;
     navigation2d::OpenPassableOpenings(&planning_grid);
+    // Locked-mouth entry: paint a short unknown corridor past the frontier so
+    // theta* can step into a still-white room after OpenPassable opened the
+    // seal. Occupied cells stay lethal — only unknown is temporarily free.
+    if (pending_entry_goal_ && map_->info.resolution > 0.) {
+      const double ax =
+          pending_entry_goal_->frontier_x - pending_entry_goal_->x;
+      const double ay =
+          pending_entry_goal_->frontier_y - pending_entry_goal_->y;
+      const double alen = std::hypot(ax, ay);
+      if (alen > .05) {
+        const double ux = ax / alen, uy = ay / alen;
+        const double lx = -uy, ly = ux;
+        const double res = map_->info.resolution;
+        const int width = static_cast<int>(map_->info.width);
+        const int height = static_cast<int>(map_->info.height);
+        for (double depth = -.15; depth <= 1.35; depth += res) {
+          for (double lat = -.28; lat <= .28 + 1e-9; lat += res) {
+            const double wx = pending_entry_goal_->frontier_x + depth * ux + lat * lx;
+            const double wy = pending_entry_goal_->frontier_y + depth * uy + lat * ly;
+            const int col = static_cast<int>(
+                std::floor((wx - navigation_origin_x_) / res));
+            const int row = static_cast<int>(
+                std::floor((wy - navigation_origin_y_) / res));
+            if (col < 0 || row < 0 || col >= width || row >= height) continue;
+            const std::size_t index =
+                static_cast<std::size_t>(row) * map_->info.width + col;
+            if (planning_grid.cells[index] < 0) planning_grid.cells[index] = 0;
+          }
+        }
+      }
+    }
     for (std::size_t index = 0; index < planning_grid.cells.size(); ++index) {
       if (index) output << ',';
       // Free is 0. A real obstacle is 254 and inflates. Unknown is 255:
@@ -1240,10 +1271,16 @@ class AutonomousExplorer final : public rclcpp::Node {
       // Nominated mouths that all fail StartNavigation are not executable
       // either. Requiring candidates==0 skipped leftover completion and
       // returned PARTIAL while the same 3 unplannable T-labels looped.
+      // Empty tour with candidates>0 is the BLOCKED-DFS trap: mouths exist but
+      // Order wiped them — treat as no-executable so completing/entry runs.
       const bool tour_unplannable =
           committed_tour_.empty() && attempted > 0;
+      const bool tour_empty_with_candidates =
+          committed_tour_.empty() && attempted == 0 &&
+          explorer_.candidate_frontier_goals() > 0;
       const bool no_executable_mouths =
-          explorer_.candidate_frontier_goals() == 0 || tour_unplannable;
+          explorer_.candidate_frontier_goals() == 0 || tour_unplannable ||
+          tour_empty_with_candidates;
       if (explorer_.raw_frontier_cells() > 0 && no_executable_mouths) {
         if (completing_probe_rounds_ < 5) {
           StartCompletingProbe();

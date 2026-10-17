@@ -31,8 +31,10 @@ class RegionScheduler {
   RegionId RegionAt(double x, double y) const;
   // Keeps a DFS context until its raw frontiers are gone (not merely until
   // SelectGoals returns candidates). When truly empty/completed, pop and use
-  // graph BFS to prefer adjacent regions. Returns ordered candidates; an
-  // unfinished active room with only out-of-context mouths yields {}.
+  // graph BFS to prefer adjacent regions. Hard-locks the active room while it
+  // still has in-context mouths; a BLOCKED tip (raw frontiers, 0 candidates)
+  // soft-unlocks so sibling PENDING work is not discarded. Preferred stays on
+  // the stack to resume later.
   // `robot_yaw` (rad) ranks reverse U-turn goals after forward ones inside the
   // same DFS region. Pass NaN when heading is unknown.
   std::vector<ExplorationGoal> Order(std::vector<ExplorationGoal> goals,

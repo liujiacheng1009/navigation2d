@@ -217,7 +217,12 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
   {
     const int min_lat = static_cast<int>(std::ceil(kNarrowMinWidth / grid->resolution));
     const int max_lat = static_cast<int>(std::floor(kNarrowMaxWidth / grid->resolution));
-    const int max_thick = std::max(1, static_cast<int>(std::ceil(.20 / grid->resolution)));
+    // Unknown-touching seals may be thicker after SLAM bleed (~0.35 m); free↔free
+    // false walls stay at the thin 0.20 m contract.
+    const int max_thick_unknown =
+        std::max(1, static_cast<int>(std::ceil(.35 / grid->resolution)));
+    const int max_thick_free =
+        std::max(1, static_cast<int>(std::ceil(.20 / grid->resolution)));
     std::vector<std::uint8_t> clear(grid->cells.size(), 0);
     // lateral=(lx,ly) walks along the bar; passage is perpendicular.
     auto carve_axis = [&](int lx, int ly) {
@@ -231,8 +236,10 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
           auto cell = [&](int bb) {
             return lx != 0 ? std::pair<int, int>{bb, a} : std::pair<int, int>{a, bb};
           };
+          // Look farther than a short vestibule: rooms often have ~0.5–0.8 m of
+          // free before white unknown, which the old 4-cell look-ahead missed.
           auto passage_reaches_unknown = [&](int c, int r, int dir) {
-            for (int step = 1; step <= 4; ++step) {
+            for (int step = 1; step <= 12; ++step) {
               const int nc = c + dir * step * px;
               const int nr = r + dir * step * py;
               if (nc < 0 || nr < 0 || nc >= width || nr >= height) return false;
@@ -269,6 +276,8 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
             const std::int8_t neg = value_at(c - px, r - py);
             const std::int8_t pos = value_at(c + px, r + py);
             if (neg < 0 || pos < 0) touches_unknown = true;
+            // Provisional max; refined once touches_unknown is known for the run.
+            const int max_thick = max_thick_unknown;
             int thick = 1;
             for (int s = 1; s <= max_thick; ++s) {
               const int nc = c + s * px, nr = r + s * py;
@@ -286,6 +295,30 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
             }
             if (thick > max_thick) thick_ok = 0;
             ++b;
+          }
+          // Free↔free seals without nearby unknown keep the thin contract so
+          // real walls between explored rooms are not carved open.
+          if (!touches_unknown) {
+            thick_ok = 1;
+            for (int bb = begin; bb < b; ++bb) {
+              const auto [c, r] = cell(bb);
+              int thick = 1;
+              for (int s = 1; s <= max_thick_free; ++s) {
+                const int nc = c + s * px, nr = r + s * py;
+                if (nc < 0 || nr < 0 || nc >= width || nr >= height ||
+                    value_at(nc, nr) <= 0)
+                  break;
+                ++thick;
+              }
+              for (int s = 1; s <= max_thick_free; ++s) {
+                const int nc = c - s * px, nr = r - s * py;
+                if (nc < 0 || nr < 0 || nc >= width || nr >= height ||
+                    value_at(nc, nr) <= 0)
+                  break;
+                ++thick;
+              }
+              if (thick > max_thick_free) { thick_ok = 0; break; }
+            }
           }
           const int span = b - begin;
           // Unknown-touching seals may be as narrow as a pinch; free↔free
@@ -308,11 +341,12 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
     for (std::size_t index = 0; index < clear.size(); ++index)
       if (clear[index]) grid->cells[index] = 0;
   }
-  // Unknown just past a pinched SLAM door (perpendicular to the gap).
+  // Unknown just past a pinched SLAM door (perpendicular to the gap). Look
+  // through a short free vestibule (~0.6 m) before giving up.
   auto unknown_beyond = [&](bool horizontal, int fixed, int begin, int end) {
     const int mid = (begin + end) / 2;
     for (const int delta : {-1, 1}) {
-      for (int step = 1; step <= 4; ++step) {
+      for (int step = 1; step <= 12; ++step) {
         const int col = horizontal ? mid : fixed + delta * step;
         const int row = horizontal ? fixed + delta * step : mid;
         if (col < 0 || row < 0 || col >= width || row >= height) break;
@@ -382,12 +416,13 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
     // A gap that is already entirely free is an observed corridor. Unknown
     // beyond it is the next room, not a missing piece of this opening.
     if (!known_free || !unknown) return;
-    // Prefer a longer flood budget so the kitchen nose clears the jambs.
+    // Prefer a longer flood budget so the kitchen / bedroom nose clears the
+    // jambs and the planner can step into still-white rooms.
     const int max_span_cells =
         static_cast<int>(std::floor(kNarrowMaxWidth / grid->resolution));
     const int flood_budget = std::max(
         std::min(span, max_span_cells),
-        static_cast<int>(std::ceil(.80 / grid->resolution)));
+        static_cast<int>(std::ceil(1.20 / grid->resolution)));
     for (int cursor = span_begin; cursor < span_end; ++cursor) {
       const int col = horizontal ? cursor : fixed;
       const int row = horizontal ? fixed : cursor;
@@ -442,7 +477,7 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
       // remaining budget even after the cell is no longer "opening-shaped":
       // requiring OpeningCells here stopped at the jambs, left the kitchen
       // unknown, and made every entry probe unplannable (planner cannot step
-      // into unknown). Budget reaches ~0.80 m into the next room.
+      // into unknown). Budget reaches ~1.20 m into the next room.
       const int next_budget = budget[static_cast<std::size_t>(current)] - 1;
       if (next_budget <= budget[static_cast<std::size_t>(next)]) continue;
       budget[static_cast<std::size_t>(next)] = next_budget;
@@ -1662,7 +1697,31 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
       }
     }
   }
-  return best;
+  if (best) return best;
+  // Geometric fallback: OpenPassable flooded a nose but BFS from the robot
+  // still cannot step through a residual speck. Place the probe on the
+  // approach axis past the frontier when that cell is free (carved) and clear.
+  const double lateral_unit_x = -direction_y;
+  const double lateral_unit_y = direction_x;
+  for (double depth = minimum_depth_m; depth <= maximum_depth_m + 1e-6;
+       depth += std::max(.05, map_.resolution)) {
+    for (const double lateral : {0., .10, -.10, .20, -.20}) {
+      const double x = frontier_goal.frontier_x + depth * direction_x +
+                       lateral * lateral_unit_x;
+      const double y = frontier_goal.frontier_y + depth * direction_y +
+                       lateral * lateral_unit_y;
+      const int col = static_cast<int>(std::floor((x - map_.origin_x) / map_.resolution));
+      const int row = static_cast<int>(std::floor((y - map_.origin_y) / map_.resolution));
+      if (!entry_goal(col, row)) continue;
+      ExplorationGoal probe = frontier_goal;
+      probe.x = map_.origin_x + (col + .5) * map_.resolution;
+      probe.y = map_.origin_y + (row + .5) * map_.resolution;
+      probe.yaw = std::atan2(direction_y, direction_x);
+      probe.score = depth;
+      return probe;
+    }
+  }
+  return std::nullopt;
 }
 
 bool FrontierExplorer::GoalStillFrontier(const ExplorationGoal& goal) const {

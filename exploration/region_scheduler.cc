@@ -375,16 +375,26 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
   // may wait here. The navigation planner remains authoritative for safety.
   if (preferred && regions_.at(preferred).state == RegionState::kWaiting &&
       goals.empty()) return {};
-  // Unfinished active room owns the tour: sibling mouths must not steal the
-  // robot while this context still has raw frontiers (0 candidates is common
-  // for wall-hugging tips that only leftover approaches can clear).
+  // Unfinished active room owns the tour while it still has executable mouths
+  // (or child work). When the preferred region is BLOCKED — raw frontiers but
+  // zero in-region candidates — hard-locking discarded large PENDING sibling
+  // rooms and forced PARTIAL with the map still white. Soft-unlock: keep the
+  // preferred region on the DFS stack, but let sibling candidates run.
   if (preferred && regions_.at(preferred).frontier_cells > 0) {
-    goals.erase(std::remove_if(goals.begin(), goals.end(),
-                               [&](const ExplorationGoal& g) {
-                                 return !descendant(g.region_id, preferred);
-                               }),
-                goals.end());
-    if (goals.empty()) return {};
+    const bool preferred_has_mouths =
+        regions_.at(preferred).candidates > 0 ||
+        std::any_of(goals.begin(), goals.end(), [&](const ExplorationGoal& g) {
+          return descendant(g.region_id, preferred);
+        });
+    if (preferred_has_mouths) {
+      goals.erase(std::remove_if(goals.begin(), goals.end(),
+                                 [&](const ExplorationGoal& g) {
+                                   return !descendant(g.region_id, preferred);
+                                 }),
+                  goals.end());
+      if (goals.empty()) return {};
+    }
+    // else: preferred blocked with no offered mouths — keep stack, rank all
   }
   RegionId origin = last_region_;
   if (!origin || !regions_.at(origin).visible) origin = RegionAt(x, y);

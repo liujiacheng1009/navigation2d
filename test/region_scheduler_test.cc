@@ -134,8 +134,12 @@ int main() {
   const auto locked = finish_first.Order({right_high, left_low}, .8, 1.2);
   assert(locked.front().region_id == left);
   assert(locked.back().region_id == right);
-  // Unfinished tip with zero in-room candidates: do not pop / flee to sibling.
-  assert(finish_first.Order({right_high}, .8, 1.2).empty());
+  // BLOCKED tip (raw frontiers, zero in-room candidates): soft-unlock siblings
+  // so large PENDING rooms are not discarded, but keep the preferred region
+  // on the DFS stack for later resume.
+  const auto soft = finish_first.Order({right_high}, .8, 1.2);
+  assert(!soft.empty());
+  assert(soft.front().region_id == right);
   assert(finish_first.ActiveRegion() == left);
   assert(finish_first.regions().at(left).frontier_cells > 0);
   return 0;
