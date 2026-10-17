@@ -23,8 +23,10 @@ constexpr double kDoorPinchMinWidth = .18;
 // When a real free throat is narrower than the planning footprint after SLAM
 // thickens the jambs, erode only those posts (never a sealed solid wall) until
 // the free span reaches this width.
-constexpr double kDoorCarveTargetWidth = .56;
-constexpr int kDoorJambErodeMaxCells = 4;
+// Planning footprint is 0.22 m radius; keep a little slack past 2×radius so
+// PathCuts / ClearAt still fit after SLAM thickens both posts.
+constexpr double kDoorCarveTargetWidth = .64;
+constexpr int kDoorJambErodeMaxCells = 5;
 // Narrow doorway floor: close enough to see through a kitchen mouth, but not
 // the old 0.08 m rim that parked the chassis on the wall. Open-space goals
 // use config.minimum_standoff (much larger); this only unlocks corridor poses.
@@ -124,12 +126,13 @@ bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row) {
   if (grid.cells[static_cast<std::size_t>(row) * grid.width + col] <= 0) return false;
   const int width = grid.width;
   const int height = grid.height;
-  // Match OpenPassableOpenings: unknown-touching door bleed may be ~0.35 m;
-  // free↔free false walls stay on the thin 0.20 m contract.
+  // Match OpenPassableOpenings: unknown-touching door bleed may be ~0.45 m;
+  // free↔free SLAM seals thicken to ~0.30 m once both rooms are mapped
+  // (live: 0.20 m contract left kitchen bars uncarved → entry no-path).
   const int max_thick_free =
-      std::max(1, static_cast<int>(std::ceil(.20 / grid.resolution)));
+      std::max(1, static_cast<int>(std::ceil(.30 / grid.resolution)));
   const int max_thick_unknown =
-      std::max(1, static_cast<int>(std::ceil(.35 / grid.resolution)));
+      std::max(1, static_cast<int>(std::ceil(.45 / grid.resolution)));
   const int min_lat = static_cast<int>(std::ceil(kNarrowMinWidth / grid.resolution));
   const int max_lat = static_cast<int>(std::floor(kNarrowMaxWidth / grid.resolution));
   auto value_at = [&](int c, int r) -> std::int8_t {
@@ -244,10 +247,26 @@ bool PathCutsLiveOccupied(const ExplorationGrid& live,
     if (col < 0 || row < 0 || col >= width || row >= height) return true;
     return lethal(col, row);
   };
+  // Raw structural wall: occupied on the live map and not an openable door
+  // seal. Jamb erode may free a nick of post in `opened`; a path whose
+  // centerline still sits on raw non-seal occupied is 穿墙 and must reject.
+  const auto hits_raw_structural = [&](double world_x, double world_y) {
+    if (std::hypot(world_x - robot_x, world_y - robot_y) < under_robot_m)
+      return false;
+    const int col =
+        static_cast<int>(std::floor((world_x - live.origin_x) / resolution));
+    const int row =
+        static_cast<int>(std::floor((world_y - live.origin_y) / resolution));
+    if (col < 0 || row < 0 || col >= width || row >= height) return true;
+    if (live.cells[static_cast<std::size_t>(row) * width + col] <= 0)
+      return false;
+    return !IsOpenableDoorSealCell(live, col, row);
+  };
   for (std::size_t index = 0; index < path_xy.size(); ++index) {
     const double x = path_xy[index].first;
     const double y = path_xy[index].second;
-    if (hits_body(x, y) || hits_centerline(x, y)) return true;
+    if (hits_body(x, y) || hits_centerline(x, y) || hits_raw_structural(x, y))
+      return true;
     if (index == 0) continue;
     const double x0 = path_xy[index - 1].first;
     const double y0 = path_xy[index - 1].second;
@@ -258,7 +277,9 @@ bool PathCutsLiveOccupied(const ExplorationGrid& live,
       const double ratio = static_cast<double>(sample) / samples;
       const double wx = x0 + ratio * (x - x0);
       const double wy = y0 + ratio * (y - y0);
-      if (hits_body(wx, wy) || hits_centerline(wx, wy)) return true;
+      if (hits_body(wx, wy) || hits_centerline(wx, wy) ||
+          hits_raw_structural(wx, wy))
+        return true;
     }
   }
   return false;
@@ -291,7 +312,9 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
   }
   // Flood unknown through an already-free wall-to-wall gap. If SLAM thickened
   // the posts so the free throat is under the footprint, erode only those
-  // posts (requires an existing free gap + unknown beyond).
+  // posts. Live log: y≈3.0 free span was 0.25 m with known free on BOTH sides
+  // of the mouth — unknown_beyond alone skipped erode and ClearAt(0.22) / entry
+  // probes returned no path while the UI still showed an open doorway.
   auto unknown_beyond = [&](bool horizontal, int fixed, int begin, int end) {
     const int mid = (begin + end) / 2;
     for (const int delta : {-1, 1}) {
@@ -306,8 +329,32 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
     }
     return false;
   };
+  auto free_beyond_both = [&](bool horizontal, int fixed, int begin, int end) {
+    const int mid = (begin + end) / 2;
+    bool neg = false;
+    bool pos = false;
+    for (const int delta : {-1, 1}) {
+      for (int step = 1; step <= 12; ++step) {
+        const int col = horizontal ? mid : fixed + delta * step;
+        const int row = horizontal ? fixed + delta * step : mid;
+        if (col < 0 || row < 0 || col >= width || row >= height) break;
+        const std::int8_t value = value_at(col, row);
+        if (value == 0 || value < 0) {
+          if (delta < 0)
+            neg = true;
+          else
+            pos = true;
+          break;
+        }
+        if (value > 0) break;
+      }
+    }
+    return neg && pos;
+  };
   auto erode_jambs = [&](bool horizontal, int fixed, int* begin, int* end) {
-    if (!unknown_beyond(horizontal, fixed, *begin, *end)) return;
+    if (!unknown_beyond(horizontal, fixed, *begin, *end) &&
+        !free_beyond_both(horizontal, fixed, *begin, *end))
+      return;
     double gap_m = static_cast<double>(*end - *begin) * grid->resolution;
     if (gap_m >= kDoorCarveTargetWidth) return;
     // Posts must already be occupied wall cells bounding a free throat.
@@ -349,9 +396,10 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
                      horizontal ? 0 : 1) > 0;
     const double gap_m =
         static_cast<double>(end - begin) * grid->resolution;
-    const bool pinch = (end - begin) >= pinch_cells &&
-                       gap_m <= kNarrowMaxWidth &&
-                       unknown_beyond(horizontal, fixed, begin, end);
+    const bool pinch =
+        (end - begin) >= pinch_cells && gap_m <= kNarrowMaxWidth &&
+        (unknown_beyond(horizontal, fixed, begin, end) ||
+         free_beyond_both(horizontal, fixed, begin, end));
     if (!shaped && !pinch) return;
     // Widen only true free pinches. Never invent a gap through solid wall.
     if (pinch && gap_m < kDoorCarveTargetWidth)
@@ -1629,18 +1677,17 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
   if (approach_length < .05) return std::nullopt;
   direction_x /= approach_length;
   direction_y /= approach_length;
-  // Entry poses must clear the same robot_radius the planner uses for goals.
-  // Traverse may step planning-only free (carved seals / unknown flood) to
-  // connect the throat, but the published probe itself must sit on observed
-  // free — never on flooded white "outside the map". Match PathCuts body
-  // radius so a probe that clears here is not dropped as live-occupied.
-  constexpr double kEntryTraverseClearance = kPlanningRadius;
-  constexpr double kEntryGoalClearance = kPlanningRadius;
+  // Entry traverse/goal clearance matches the locked-mouth planner radius
+  // (0.14 m). Requiring the open-space 0.22 m left OpenPassable noses
+  // unselectable while the flooded throat was already Free (live: frontier
+  // (2.86,4.70) × dozens with attempts stuck at 1).
+  constexpr double kEntryTraverseClearance = .14;
+  constexpr double kEntryGoalClearance = .14;
   const auto entry_traverse = [&](int col, int row) {
     return Free(col, row) && ClearAt(col, row, kEntryTraverseClearance);
   };
   const auto entry_goal = [&](int col, int row) {
-    return RawFree(col, row) && ClearAt(col, row, kEntryGoalClearance);
+    return Free(col, row) && ClearAt(col, row, kEntryGoalClearance);
   };
   const int robot_col = static_cast<int>(std::floor(
       (robot_x - map_.origin_x) / map_.resolution));
@@ -1728,7 +1775,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
   }
   if (best) return best;
   // Geometric fallback: place the probe on the approach axis when BFS cannot
-  // reach a candidate. Still requires observed free (RawFree via entry_goal).
+  // reach a candidate. Uses planning Free (incl. OpenPassable flood).
   const double lateral_unit_x = -direction_y;
   const double lateral_unit_y = direction_x;
   for (double depth = minimum_depth_m; depth <= maximum_depth_m + 1e-6;

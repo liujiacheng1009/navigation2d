@@ -369,6 +369,14 @@ int main() {
       std::hypot(entry_direction_x, entry_direction_y);
   assert((entry_dx * entry_direction_x + entry_dy * entry_direction_y) /
              entry_direction_length >= .20);
+  // Probe must be allowed on OpenPassable-flooded cells (not only RawFree):
+  // a white kitchen nose has no observed-free cells past the frontier.
+  assert(!entry_explorer.RawFree(
+      static_cast<int>(std::floor(
+          (entry_probe->x - entry.origin_x) / entry.resolution)),
+      static_cast<int>(std::floor(
+          (entry_probe->y - entry.origin_y) / entry.resolution))) ||
+         entry_probe->x > hallway_standoff.frontier_x - 1e-6);
 
   // Opening a partially observed passage is a planning-only transformation.
   // The mapper's unknown boundary must remain visible to completion logic and
@@ -844,6 +852,44 @@ int main() {
     }
   }
 
+  // Entry-style unknown paint must not turn a long structural bar into a
+  // PathCuts-legal chord (UI GLOBAL 穿墙). Paint free past the wall, then
+  // PathCuts on the painted grid must still reject.
+  {
+    navigation2d::ExplorationGrid painted_wall;
+    painted_wall.width = 40;
+    painted_wall.height = 40;
+    painted_wall.resolution = .05;
+    painted_wall.origin_x = 0.;
+    painted_wall.origin_y = 0.;
+    painted_wall.cells.assign(
+        static_cast<std::size_t>(painted_wall.width * painted_wall.height), 100);
+    const auto pp = [&](int col0, int col1, int row0, int row1,
+                        std::int8_t value) {
+      for (int row = row0; row < row1; ++row)
+        for (int col = col0; col < col1; ++col)
+          painted_wall
+              .cells[static_cast<std::size_t>(row * painted_wall.width + col)] =
+              value;
+    };
+    pp(4, 36, 4, 20, 0);      // hall
+    pp(4, 36, 20, 21, 100);   // full-width structural bar
+    pp(4, 36, 21, 36, -1);    // unknown room
+    // Simulate the old PathCuts entry paint: unknown → free in a strip.
+    const int mid = 20;
+    for (int row = 21; row < 30; ++row)
+      for (int col = mid - 2; col <= mid + 2; ++col)
+        painted_wall
+            .cells[static_cast<std::size_t>(row * painted_wall.width + col)] = 0;
+    const double rx = (mid + .5) * painted_wall.resolution;
+    const double ry = (18 + .5) * painted_wall.resolution;
+    const std::vector<std::pair<double, double>> through = {
+        {rx, ry},
+        {rx, (24 + .5) * painted_wall.resolution},
+    };
+    assert(navigation2d::PathCutsLiveOccupied(painted_wall, through, rx, ry));
+  }
+
   // PathCutsLiveOccupied: entry must reject through-wall chords even when the
   // robot stands on the threshold (old 0.35 m under-robot disk hid them).
   {
@@ -862,11 +908,11 @@ int main() {
           doorway.cells[static_cast<std::size_t>(row * doorway.width + col)] =
               value;
     };
-    // South hall free; north pocket free; structural wall cluster at row 20.
+    // South hall free; north pocket free; structural wall at row 20 wider than
+    // the door-seal lateral contract (>1.40 m) so OpenPassable must not carve.
     dpaint(4, 36, 4, 20, 0);
     dpaint(4, 36, 21, 36, 0);
-    dpaint(12, 28, 20, 21, 100);  // solid wall bar (not a door seal: both free
-                                 // but span is wide continuous wall)
+    dpaint(4, 36, 20, 21, 100);  // full-width structural bar
 
     const double robot_x = (20 + .5) * doorway.resolution;  // 1.025
     const double robot_y = (18 + .5) * doorway.resolution;  // 0.925
@@ -1000,6 +1046,49 @@ int main() {
     assert(pinch.cells[24 * pinch.width + 28] == 0);
   }
 
+  // Free↔free pinch (0.25 m) after both rooms are already mapped: old
+  // unknown_beyond-only erode left ClearAt(0.22) / entry probes with no path.
+  {
+    navigation2d::ExplorationGrid both_free;
+    both_free.width = 60;
+    both_free.height = 40;
+    both_free.resolution = .05;
+    both_free.origin_x = 0.;
+    both_free.origin_y = 0.;
+    both_free.cells.assign(
+        static_cast<std::size_t>(both_free.width * both_free.height), 100);
+    const auto bp = [&](int col0, int col1, int row0, int row1, std::int8_t value) {
+      for (int row = row0; row < row1; ++row)
+        for (int col = col0; col < col1; ++col)
+          both_free.cells[static_cast<std::size_t>(row * both_free.width + col)] =
+              value;
+    };
+    bp(2, 58, 4, 18, 0);      // hall (known free)
+    bp(2, 58, 22, 36, 0);     // room (known free) — no unknown beyond
+    bp(27, 32, 18, 22, 0);    // 0.25 m free throat (5 cells)
+    navigation2d::OpenPassableOpenings(&both_free);
+    int span_begin = -1;
+    int span_end = -1;
+    for (int col = 20; col < 40; ++col) {
+      if (both_free.cells[18 * both_free.width + col] != 0) {
+        if (span_begin >= 0) break;
+        continue;
+      }
+      if (span_begin < 0) span_begin = col;
+      span_end = col + 1;
+    }
+    // Erode posts until the planning target (~0.64 m ≈ 13 cells).
+    assert(span_begin >= 0);
+    assert(span_end - span_begin >= 12);
+    const double rx = (29 + .5) * both_free.resolution;
+    const double ry = (17 + .5) * both_free.resolution;
+    const std::vector<std::pair<double, double>> entry = {
+        {rx, ry},
+        {rx, (24 + .5) * both_free.resolution},
+    };
+    assert(!navigation2d::PathCutsLiveOccupied(both_free, entry, rx, ry));
+  }
+
   // Occupied door-width kitchen bar: OpenPassable carves it; PathCuts allows
   // the entry chord (structural through-wall cases above still cut).
   {
@@ -1030,6 +1119,37 @@ int main() {
         {rx, (24 + .5) * sealed.resolution},
     };
     assert(!navigation2d::PathCutsLiveOccupied(sealed, entry, rx, ry));
+  }
+
+  // Free↔free SLAM seal 0.30 m thick (6 cells): old 0.20 m contract left these
+  // uncarved so ClearAt/entry probes returned no path after both rooms mapped.
+  {
+    navigation2d::ExplorationGrid thick_seal;
+    thick_seal.width = 60;
+    thick_seal.height = 40;
+    thick_seal.resolution = .05;
+    thick_seal.origin_x = 0.;
+    thick_seal.origin_y = 0.;
+    thick_seal.cells.assign(
+        static_cast<std::size_t>(thick_seal.width * thick_seal.height), 100);
+    const auto tp = [&](int col0, int col1, int row0, int row1,
+                        std::int8_t value) {
+      for (int row = row0; row < row1; ++row)
+        for (int col = col0; col < col1; ++col)
+          thick_seal.cells[static_cast<std::size_t>(row * thick_seal.width +
+                                                    col)] = value;
+    };
+    tp(2, 58, 4, 18, 0);       // hall
+    tp(2, 58, 24, 36, 0);      // room (known free)
+    tp(22, 34, 18, 24, 100);   // 0.30 m × 0.60 m occupied door seal
+    assert(navigation2d::IsOpenableDoorSealCell(thick_seal, 28, 20));
+    const double rx = (28 + .5) * thick_seal.resolution;
+    const double ry = (17 + .5) * thick_seal.resolution;
+    const std::vector<std::pair<double, double>> entry = {
+        {rx, ry},
+        {rx, (26 + .5) * thick_seal.resolution},
+    };
+    assert(!navigation2d::PathCutsLiveOccupied(thick_seal, entry, rx, ry));
   }
 
   // Wall-tip thrash: abandon only after repeated live-occupied cuts. A single

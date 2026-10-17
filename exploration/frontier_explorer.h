@@ -27,7 +27,7 @@ void OpenPassableOpenings(ExplorationGrid* grid);
 
 // True when this occupied cell is a door-width SLAM seal (passable on both
 // passage sides, lateral span in [0.32, 1.40] m). Unknown-touching seals may
-// be up to ~0.35 m thick; free↔free seals stay ≤0.20 m. Long exterior walls
+// be up to ~0.45 m thick; free↔free seals stay ≤0.30 m. Long exterior walls
 // are not seals.
 bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row);
 

@@ -352,6 +352,37 @@ class NavigationSystem::Impl {
             path, costmap, config.robot_radius);
         if (PathFootprintValid(smoothed, costmap, planning_radius)) path = std::move(smoothed);
       }
+      // Theta* long visibility chords still cut inside corners after densify.
+      // If the route hugs the wall while a cell-wise A* path has more clearance,
+      // take A* — exits go through the free middle then turn (loc-delay safe).
+      if (config.planner == "theta_star") {
+        GlobalPlanningDiagnostics probe{};
+        AddPathMetrics(path, costmap, config.robot_radius, &probe);
+        const double want =
+            std::max(config.robot_radius + .08, .55 * config.smoother_min_clearance);
+        if (probe.path_min_clearance_m < want) {
+          try {
+            AStarPlanner centered(planning_radius);
+            Path alternate = DensifyPath(centered.Plan(costmap, pose, *goal), .08);
+            if (config.smoother_enabled) {
+              Path smoothed = planning_internal::ConstrainedPathSmoother(config).Smooth(
+                  alternate, costmap, config.robot_radius);
+              if (PathFootprintValid(smoothed, costmap, planning_radius))
+                alternate = std::move(smoothed);
+            }
+            if (PathFootprintValid(alternate, costmap, planning_radius)) {
+              GlobalPlanningDiagnostics alt{};
+              AddPathMetrics(alternate, costmap, config.robot_radius, &alt);
+              if (alt.path_min_clearance_m > probe.path_min_clearance_m + .03) {
+                path = std::move(alternate);
+                state.path_signature =
+                    FirstSegmentSignature(path, pose, costmap.grid().resolution());
+              }
+            }
+          } catch (const std::runtime_error&) {
+          }
+        }
+      }
       // A replan is a new ordered route contract. Reset the controller's
       // internal projection state even when the new path has similar endpoints.
       controller = MakeController(config);

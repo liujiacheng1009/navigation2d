@@ -25,8 +25,9 @@ constexpr std::array<std::array<int, 2>, 8> kDirections{{
 // win when they are the only connection: every cell there carries a similar
 // penalty, so the relative ranking stays length-dominated. Open rooms with a
 // single speck used to keep shortest chords on the inflated rim (weight 32);
-// a stronger preference pulls routes into free space when it is available.
-constexpr double kClearancePenaltyWeight = 72.0;
+// weight 110 strongly prefers open channels over obstacle-hugging pinches
+// when both connect the same goals (live: kitchen exit hugged the rim).
+constexpr double kClearancePenaltyWeight = 110.0;
 
 double TraversalCellCost(std::uint8_t cost) {
   if (cost == kFree) return 1.;
