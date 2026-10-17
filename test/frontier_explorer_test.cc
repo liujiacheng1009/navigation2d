@@ -192,6 +192,11 @@ int main() {
   assert(leftover_after_fail.has_value());
   leftover_explorer.ClearFailedBlacklist();
   assert(leftover_explorer.SelectLeftoverApproaches(5., 5., 3).size() >= 1);
+  // Wide pocket cool (tip-leave) must suppress leftover re-entry into a wall
+  // tip — narrow failure cools above must not.
+  leftover_explorer.CoolRegion(leftover_goal->frontier_x, leftover_goal->frontier_y,
+                               1.80, 3000u);
+  assert(!leftover_explorer.SelectLeftoverApproach(5., 5.).has_value());
 
   // A 0.45 m pinch is wide enough for the 0.29 m chassis. The observation
   // pose has to sit on the far side of that pinch, beside the unknown

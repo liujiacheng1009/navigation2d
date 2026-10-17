@@ -981,17 +981,26 @@ class AutonomousExplorer final : public rclcpp::Node {
     const auto cell = PoseCell();
     if (retreat_attempted_ && retreat_cell_x_ == cell.first && retreat_cell_y_ == cell.second)
       return false;
+    // Wall-tip thrash: a 1.2 m trail walk still lands inside the same U-alcove.
+    // Back farther into open space when lidar already shows a pinch.
+    const double front = SectorMinRange(0., .45);
+    const double left = SectorMinRange(+std::acos(-1.) / 2., .45);
+    const double right = SectorMinRange(-std::acos(-1.) / 2., .45);
+    const double side = std::min(left > 0. ? left : 10., right > 0. ? right : 10.);
+    const bool pinched = (front > 0. && front < .55) || (side < .50);
+    const double want_arc = pinched ? 3.2 : 1.2;
+    const double min_arc = pinched ? 1.6 : .6;
     double arc = 0.;
     std::size_t index = trajectory_.size() - 1;
-    while (index > 0 && arc < 1.2) {
+    while (index > 0 && arc < want_arc) {
       arc += std::hypot(trajectory_[index].first - trajectory_[index - 1].first,
                          trajectory_[index].second - trajectory_[index - 1].second);
       --index;
     }
-    if (arc < .6) return false;
+    if (arc < min_arc) return false;
     const double goal_x = trajectory_[index].first;
     const double goal_y = trajectory_[index].second;
-    if (std::hypot(goal_x - pose_->pose.position.x, goal_y - pose_->pose.position.y) < .4)
+    if (std::hypot(goal_x - pose_->pose.position.x, goal_y - pose_->pose.position.y) < .55)
       return false;
     Goal retreat;
     retreat.x = goal_x;
@@ -1569,15 +1578,24 @@ class AutonomousExplorer final : public rclcpp::Node {
   bool BreakMappedObstacleThrash() {
     if (mapped_obstacle_rejects_ < 3) return false;
     RCLCPP_WARN(get_logger(),
-                "mapped-obstacle reject thrash (%d); keep tour, retreat only",
+                "mapped-obstacle reject thrash (%d); cool tip pocket and retreat",
                 mapped_obstacle_rejects_);
     mapped_obstacle_rejects_ = 0;
     pending_entry_goal_.reset();
     entry_probe_attempts_ = 0;
     navigation_.reset();
     recovery_.Clear();
-    // Do not clear committed_tour_ or jump into Completing — that rebuilt a
-    // reverse tour across the apartment after every through-wall reject.
+    // Pocket-cool so leftover injection cannot re-queue the same tip while we
+    // are still stuck against the wall.
+    if (pose_) {
+      explorer_.CoolRegion(active_goal_.x, active_goal_.y, 1.80, 3000u);
+      explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 1.80,
+                           3000u);
+      explorer_.CoolRegion(pose_->pose.position.x, pose_->pose.position.y, 1.80,
+                           3000u);
+    }
+    retreat_attempted_ = false;
+    committed_tour_.clear();
     PublishStatus("SELECTING", "leaving pinch after mapped-obstacle rejects");
     if (StartRetreat()) return true;
     if (TryStartEscape()) return true;
@@ -1875,8 +1893,10 @@ class AutonomousExplorer final : public rclcpp::Node {
     const double right_range = SectorMinRange(-std::acos(-1.) / 2., .40);
     const double side_range = std::min(left_range > 0. ? left_range : 10.,
                                        right_range > 0. ? right_range : 10.);
+    // Include retreat_goal_: tip thrash used frontier_cells=0 retreat poses
+    // that were exempt from this abort, so the robot spun forever in the U.
     const bool near_goal_alcove_crawl =
-        phase_ == MissionPhase::kExploring && !returning_ && !retreat_goal_ &&
+        phase_ == MissionPhase::kExploring && !returning_ &&
         (goal_distance_now < .45 ||
          (state.global_path_length_m > .20 &&
           state.path_progress_m >= .80 * state.global_path_length_m)) &&
@@ -1887,22 +1907,27 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (near_goal_alcove_crawl) {
       RCLCPP_WARN(get_logger(),
                   "Leaving near-goal alcove tip: dist=%.2f front=%.2f side=%.2f "
-                  "progress=%.2f/%.2f elapsed=%.1f",
+                  "progress=%.2f/%.2f elapsed=%.1f retreat=%s",
                   goal_distance_now, front_range, side_range,
                   state.path_progress_m, state.global_path_length_m,
-                  (now() - goal_started_).seconds());
+                  (now() - goal_started_).seconds(),
+                  retreat_goal_ ? "yes" : "no");
       navigation_.reset();
-      explorer_.RecordAttempt(active_goal_, true);
-      // Cool the whole tip pocket. Retreat-then-nearest-first used to walk
-      // out and immediately re-queue the next crumb in the same alcove.
+      if (!retreat_goal_) explorer_.RecordAttempt(active_goal_, true);
+      // Cool the whole tip pocket (also suppresses leftover re-entry).
       explorer_.CoolRegion(active_goal_.x, active_goal_.y, 1.80, 3000u);
       explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 1.80, 3000u);
+      explorer_.CoolRegion(pose_->pose.position.x, pose_->pose.position.y, 1.80, 3000u);
       pending_entry_goal_.reset();
       entry_probe_attempts_ = 0;
+      retreat_goal_ = false;
+      retreat_attempted_ = false;  // allow a long trail exit from this cell
       committed_tour_.clear();
       cooled_signatures_.clear();
-      // Brief reverse/turn out of the tip; do not StartRetreat — that path
-      // endpoint sits just outside the pocket and nearest-first walks back in.
+      if (StartRetreat()) {
+        PublishStatus("NAVIGATING", "leaving alcove tip along driven trail");
+        return;
+      }
       if (TryStartEscape()) return;
       next_selection_ = now();
       PublishStatus("SELECTING", "alcove tip left; pocket cooled, picking a farther goal");

@@ -138,6 +138,7 @@ class FrontierExplorer {
   void RecordAttempt(const ExplorationGoal& goal, bool succeeded);
   // Temporary cool-down of a local pocket (dead-end alcove crumbs) so
   // nearest-first touring cannot re-queue the same room immediately.
+  // Radii >= 1.5 m also suppress leftover approaches (wall-tip thrash).
   void CoolRegion(double x, double y, double radius_m,
                   std::size_t required_known_growth = 2500u);
   void ClearBlacklist() { blacklist_.clear(); }

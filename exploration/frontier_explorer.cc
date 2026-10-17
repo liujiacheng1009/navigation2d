@@ -1100,13 +1100,24 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectLeftoverApproaches(
     bool room_mouth = false;
   };
   std::vector<RankedLeftover> ranked;
+  // Completing must still see mouths that narrow failure cools hid from the
+  // exploring tour. Wide pocket cools (>=1.5 m, tip-leave / thrash) must
+  // suppress leftovers too — otherwise the robot re-enters a wall tip with a
+  // frontier_cells=0 retreat ping-pong and never escapes.
+  const std::size_t known_now = KnownCells();
+  const auto leftover_suppressed = [&](double x, double y) {
+    if (PersistentlyBlacklisted(x, y)) return true;
+    return std::any_of(blacklist_.begin(), blacklist_.end(), [&](const auto& entry) {
+      if (entry.persistent || entry.radius < 1.5) return false;
+      if (known_now >= entry.known_cells + entry.required_growth) return false;
+      return std::hypot(x - entry.x, y - entry.y) < entry.radius;
+    });
+  };
   for (int index = 0; index < map_.width * map_.height; ++index) {
     if (!frontier[index]) continue;
     const int target_row = index / map_.width, target_col = index % map_.width;
     const auto [frontier_x, frontier_y] = CellCenter(target_col, target_row);
-    // Completing must still see mouths that temporary failure cools hid from
-    // the exploring tour. Only a successful visit permanently suppresses them.
-    if (PersistentlyBlacklisted(frontier_x, frontier_y)) continue;
+    if (leftover_suppressed(frontier_x, frontier_y)) continue;
     // Skip tips with no reachable approach cell — wall-external unknown.
     bool approachable = travel_cells[static_cast<std::size_t>(index)] >= 0;
     if (!approachable) {
@@ -1133,7 +1144,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectLeftoverApproaches(
             !RawFree(col, row))
           continue;
         const auto [x, y] = CellCenter(col, row);
-        if (PersistentlyBlacklisted(x, y)) continue;
+        if (leftover_suppressed(x, y)) continue;
         const double standoff = std::hypot(x - frontier_x, y - frontier_y);
         if (standoff < kCloseStandoff || standoff > kLeftoverRadius) continue;
         const double travel = travel_cells[viewpoint_index] * map_.resolution;
