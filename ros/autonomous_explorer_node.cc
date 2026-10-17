@@ -548,12 +548,14 @@ class AutonomousExplorer final : public rclcpp::Node {
     // with the open-space travel corridor. Passage mode narrows that band.
     if (entry_drive) {
       // Passage mode: keep monitor on so a true bumper hit still stops, but
-      // do not treat door jambs as forward obstacles.
+      // do not treat door jambs as forward obstacles. stop_distance was 0.02 m
+      // (contact) — the mouth-crawl override then shoved 0.16 m/s into the
+      // wall after the monitor had already zeroed the command (UI: LOC on wall).
       config.collision_monitor_enabled = true;
       config.collision_monitor_passage_mode = true;
-      config.collision_monitor_slowdown_distance = .10;
-      config.collision_monitor_approach_horizon = .35;
-      config.collision_monitor_stop_distance = .02;
+      config.collision_monitor_slowdown_distance = .18;
+      config.collision_monitor_approach_horizon = .50;
+      config.collision_monitor_stop_distance = .08;
     }
     // Entry crawl must clear the sim/base deadzone. Live: RPP published
     // 0.048 m/s (accel-limited from rest), measured velocity stayed 0, and
@@ -1192,7 +1194,20 @@ class AutonomousExplorer final : public rclcpp::Node {
   bool TickEscape() {
     if (escape_until_.nanoseconds() == 0) return false;
     if (now() < escape_until_) {
-      command_publisher_->publish(escape_command_);
+      // Escape bypasses NavigationSystem's collision filter — gate on lidar so
+      // a peel cannot drive the chassis into the wall it is leaving.
+      geometry_msgs::msg::Twist command = escape_command_;
+      const double front = SectorMinRange(0., .40);
+      const double back = SectorMinRange(std::acos(-1.), .40);
+      if (command.linear.x > 0. && front > 0. && front < .22) {
+        command.linear.x = 0.;
+        if (std::abs(command.angular.z) < .20)
+          command.angular.z = command.angular.z >= 0. ? .55 : -.55;
+      }
+      if (command.linear.x < 0. && back > 0. && back < .18) {
+        command.linear.x = 0.;
+      }
+      command_publisher_->publish(command);
       PublishStatus("RECOVERING", "short clearance translation after first-segment stall");
       return true;
     }
@@ -2982,16 +2997,27 @@ class AutonomousExplorer final : public rclcpp::Node {
     geometry_msgs::msg::Twist command;
     command.linear.x = state.command.linear;
     command.angular.z = state.command.angular;
+    const bool safety_held =
+        state.safety_stopped_motion ||
+        state.collision_monitor_action ==
+            navigation2d::CollisionMonitorAction::kStop ||
+        state.collision_monitor_action ==
+            navigation2d::CollisionMonitorAction::kBlindZoneStop;
     // Near a locked mouth, RPP often accel-limits to <0.05 m/s. Crawl toward a
     // point just past the frontier — never straight through a structural wall
     // toward a deep probe (that looked like 穿墙 + 往回跑).
-    if ((pending_entry_goal_ || locked_entry_mouth_) && pose_ && !retreat_goal_) {
+    // CRITICAL: when the monitor already zeroed the command, abs(linear)<0.12
+    // is true — the old crawl then forced 0.16 m/s into the wall (LOC on wall).
+    if (!safety_held && (pending_entry_goal_ || locked_entry_mouth_) && pose_ &&
+        !retreat_goal_) {
       const Goal& mouth = pending_entry_goal_.value_or(*locked_entry_mouth_);
       const double rx = pose_->pose.position.x;
       const double ry = pose_->pose.position.y;
       const double mouth_range =
           std::hypot(rx - mouth.frontier_x, ry - mouth.frontier_y);
-      if (mouth_range < 1.20 && std::abs(command.linear.x) < .12) {
+      const double front_clear = SectorMinRange(0., .40);
+      if (mouth_range < 1.20 && std::abs(command.linear.x) < .12 &&
+          (front_clear <= 0. || front_clear >= .22)) {
         double into_x = active_goal_.x - mouth.frontier_x;
         double into_y = active_goal_.y - mouth.frontier_y;
         double into_len = std::hypot(into_x, into_y);
@@ -3018,6 +3044,16 @@ class AutonomousExplorer final : public rclcpp::Node {
             }
           }
         }
+      }
+    }
+    // Last hard gate: never publish a forward shove into a near lidar wall,
+    // even if a crawl/escape path above set linear > 0.
+    if (command.linear.x > 0.) {
+      const double front = SectorMinRange(0., .35);
+      if (front > 0. && front < .16) {
+        command.linear.x = 0.;
+        if (std::abs(command.angular.z) < .15)
+          command.angular.z = 0.;
       }
     }
     command_publisher_->publish(command);
