@@ -36,9 +36,9 @@ bool PathCutsLiveOccupied(const ExplorationGrid& live,
                           double body_radius = .22,
                           double under_robot_m = .22);
 
-// After a live-map path cut, skip replan-and-retry when the route was already
-// hugging a wall tip (or rejects stacked). Replanning those chords produces
-// the stop→replan→stop thrash at protruding wall tips.
+// After repeated live-map path cuts (>=2), leave the tip pocket instead of
+// replan thrash. A single low-clearance graze near a passable door must not
+// abandon the room.
 bool PreferTipAbandonAfterPathCut(int mapped_obstacle_rejects,
                                   double path_min_clearance_m);
 
