@@ -28,9 +28,10 @@ struct ExplorationGrid {
 // wider unknown room, and a gap the chassis cannot enter stay as mapped.
 void OpenPassableOpenings(ExplorationGrid* grid);
 
-// True when this occupied cell is a thin SLAM door bar that OpenPassable would
-// carve (passable on both passage sides, door-thickness, unknown beyond).
-// Live-map PathCuts must ignore these cells or entry probes never enter rooms.
+// True when this occupied cell is a thin door-width SLAM seal (passable on both
+// passage sides, door thickness, lateral span in [0.32, 1.40] m). Long
+// free↔unknown exterior walls are not seals — PathCuts must still reject
+// through-wall chords into unfinished rooms.
 bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row);
 
 // True when a world-frame polyline puts the body on a LIVE occupied cell that
