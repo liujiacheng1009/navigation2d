@@ -632,10 +632,19 @@ class AutonomousExplorer final : public rclcpp::Node {
                     "Navigation2D rejected goal before execution: %s",
                     last_planning_failure_.c_str());
         navigation_.reset();
-        // Open-tier clearance can seal the only door-width throat. One pinch
-        // retry is the robust fallback for any map — not a per-scene knob.
+        // Pinch is only for sealed door throats (no route / scrape). Never
+        // pinch-retry "goal occupied" — that accepted corner-tip viewpoints
+        // at ~0.18 m and drove the chassis straight into the wall (UI red box).
+        const bool goal_in_obstacle =
+            last_planning_failure_.find("goal occupied") != std::string::npos;
+        const bool pinch_worthy =
+            !goal_in_obstacle &&
+            (last_planning_failure_.find("no route") != std::string::npos ||
+             last_planning_failure_.find("no path") != std::string::npos ||
+             last_planning_failure_.find("wall-scrape") != std::string::npos ||
+             last_planning_failure_.find("first-segment") != std::string::npos);
         if (!entry_drive && !returning && !retreat_goal_ &&
-            !narrow_passage_retry_) {
+            !narrow_passage_retry_ && pinch_worthy) {
           narrow_passage_retry_ = true;
           RCLCPP_INFO(get_logger(),
                       "Open clearance blocked (%s); retrying pinch clearance",
@@ -669,9 +678,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       mapped_obstacle_rejects_ = 0;
       last_path_signature_ = initial_state.path_signature;
       last_path_min_clearance_m_ = initial_state.global_planning.path_min_clearance_m;
-      // Open-tier wall-foot chords: refuse and fall through to pinch. Do not
-      // apply the same floor to pinch/entry — door throats legitimately sit
-      // near ~0.10 m, and start-pose lidar cannot tell a throat from a graze.
+      // Open-tier wall-foot chords: refuse and fall through to pinch.
       // Open-tier paths that graze partition tips (~0.18–0.21 m) still park
       // CARROT on the corner; require a clearer aisle before accepting.
       if (!entry_drive && !returning && !retreat_goal_ && !pinch_plan &&
@@ -690,6 +697,19 @@ class AutonomousExplorer final : public rclcpp::Node {
           narrow_passage_retry_ = false;
           if (ok) return true;
         }
+        return false;
+      }
+      // Pinch may thread a door (~0.14 m) but must not accept a corner-tip
+      // scrape (live: clearance=0.13 into south wall pocket).
+      if (!entry_drive && !returning && !retreat_goal_ && pinch_plan &&
+          last_path_min_clearance_m_ > 0. && last_path_min_clearance_m_ < .15) {
+        if (initial_state.path_signature != 0)
+          cooled_signatures_.insert(initial_state.path_signature);
+        last_planning_failure_ = "pinch path still wall-scrape";
+        RCLCPP_WARN(get_logger(),
+                    "Navigation2D rejected pinch path: clearance=%.3f",
+                    last_path_min_clearance_m_);
+        navigation_.reset();
         return false;
       }
       // Do not classify a frontier from the controller's first sample. At a
@@ -2982,6 +3002,31 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (state.path_progress_m >= best_goal_path_progress_m_ + .08) {
       best_goal_path_progress_m_ = state.path_progress_m;
       last_goal_path_progress_time_ = now();
+    }
+    // Driving a scrape chord into a wall pocket: do not wait for monitor STOP
+    // after the nose is already in the corner (live: clear=0.13, cmd still
+    // 0.27 m/s into south tip).
+    if (phase_ == MissionPhase::kExploring && !returning_ && !retreat_goal_ &&
+        !pending_entry_goal_ && !locked_entry_mouth_ && pose_) {
+      const double path_clear =
+          state.global_planning.path_min_clearance_m > 0.
+              ? state.global_planning.path_min_clearance_m
+              : last_path_min_clearance_m_;
+      const double goal_dist = std::hypot(active_goal_.x - pose_->pose.position.x,
+                                          active_goal_.y - pose_->pose.position.y);
+      const double front = SectorMinRange(0., .40);
+      const double left = SectorMinRange(+std::acos(-1.) / 2., .40);
+      const double right = SectorMinRange(-std::acos(-1.) / 2., .40);
+      const double side =
+          std::min(left > 0. ? left : 10., right > 0. ? right : 10.);
+      if (path_clear > 0. && path_clear < .15 && goal_dist < 1.60 &&
+          state.path_progress_m >= .25 &&
+          IsCornerTipStall(path_clear, front, side)) {
+        geometry_msgs::msg::Twist stop;
+        command_publisher_->publish(stop);
+        BreakWallScrapeThrash("driving scrape path into corner tip");
+        return;
+      }
     }
     if (phase_ == MissionPhase::kExploring && !returning_) {
       const double path_remaining =
