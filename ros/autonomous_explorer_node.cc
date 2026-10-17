@@ -1604,6 +1604,10 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   bool PathCutsMappedObstacle() const {
+    // Entry probes intentionally cross OpenPassable-carved door seals. The
+    // live map still draws those bars as occupied; rejecting them left rooms
+    // unentered forever (PARTIAL with hundreds of raw frontiers).
+    if (pending_entry_goal_) return false;
     if (!navigation_ || !map_ || map_->info.resolution <= 0.) return false;
     const auto& route = navigation_->path();
     if (route.size() < 2) return false;
@@ -1612,6 +1616,22 @@ class AutonomousExplorer final : public rclcpp::Node {
     const double origin_y = map_->info.origin.position.y;
     const int width = static_cast<int>(map_->info.width);
     const int height = static_cast<int>(map_->info.height);
+    navigation2d::ExplorationGrid seal_grid;
+    seal_grid.width = width;
+    seal_grid.height = height;
+    seal_grid.resolution = resolution;
+    seal_grid.origin_x = origin_x;
+    seal_grid.origin_y = origin_y;
+    seal_grid.cells.resize(static_cast<std::size_t>(width * height));
+    for (int row = 0; row < height; ++row) {
+      for (int col = 0; col < width; ++col) {
+        const auto cell = map_->data[static_cast<std::size_t>(row) * map_->info.width + col];
+        std::int8_t value = 0;
+        if (cell < 0) value = -1;
+        else if (cell >= 50) value = 100;
+        seal_grid.cells[static_cast<std::size_t>(row) * width + col] = value;
+      }
+    }
     constexpr double kBodyRadius = .22;
     const double robot_x = pose_ ? pose_->pose.position.x : 0.;
     const double robot_y = pose_ ? pose_->pose.position.y : 0.;
@@ -1630,6 +1650,8 @@ class AutonomousExplorer final : public rclcpp::Node {
           if (x < 0 || y < 0 || x >= width || y >= height) continue;
           const auto cell = map_->data[static_cast<std::size_t>(y) * map_->info.width + x];
           if (cell < 50) continue;
+          // Thin door bars OpenPassable would carve are legal to cross.
+          if (navigation2d::IsOpenableDoorSealCell(seal_grid, x, y)) continue;
           const double center_x = origin_x + (x + .5) * resolution;
           const double center_y = origin_y + (y + .5) * resolution;
           const double half = .5 * resolution;

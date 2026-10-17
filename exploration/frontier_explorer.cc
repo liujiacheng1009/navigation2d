@@ -110,6 +110,59 @@ int OpeningCells(const ExplorationGrid& grid, int col, int row, int step_col, in
 
 }  // namespace
 
+bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row) {
+  if (grid.resolution <= 0. || grid.width <= 2 || grid.height <= 2 ||
+      col < 0 || row < 0 || col >= grid.width || row >= grid.height ||
+      grid.cells.size() != static_cast<std::size_t>(grid.width) * grid.height)
+    return false;
+  if (grid.cells[static_cast<std::size_t>(row) * grid.width + col] <= 0) return false;
+  const int width = grid.width;
+  const int height = grid.height;
+  const int max_thick = std::max(1, static_cast<int>(std::ceil(.20 / grid.resolution)));
+  auto value_at = [&](int c, int r) -> std::int8_t {
+    if (c < 0 || r < 0 || c >= width || r >= height) return 100;
+    return grid.cells[static_cast<std::size_t>(r) * width + c];
+  };
+  auto passable = [&](int c, int r) { return value_at(c, r) <= 0; };
+  auto passage_reaches_unknown = [&](int c, int r, int px, int py, int dir) {
+    for (int step = 1; step <= 4; ++step) {
+      const int nc = c + dir * step * px;
+      const int nr = r + dir * step * py;
+      if (nc < 0 || nr < 0 || nc >= width || nr >= height) return false;
+      const std::int8_t value = value_at(nc, nr);
+      if (value < 0) return true;
+      if (value > 0) return false;
+    }
+    return false;
+  };
+  auto thickness_ok = [&](int c, int r, int px, int py) {
+    int thick = 1;
+    for (int s = 1; s <= max_thick; ++s) {
+      if (value_at(c + s * px, r + s * py) <= 0) break;
+      ++thick;
+    }
+    for (int s = 1; s <= max_thick; ++s) {
+      if (value_at(c - s * px, r - s * py) <= 0) break;
+      ++thick;
+    }
+    return thick <= max_thick;
+  };
+  // Passage axis (px,py); seal runs perpendicular.
+  auto seal_on_axis = [&](int px, int py) {
+    if (!passable(col - px, row - py) || !passable(col + px, row + py)) return false;
+    if (!thickness_ok(col, row, px, py)) return false;
+    const std::int8_t neg = value_at(col - px, row - py);
+    const std::int8_t pos = value_at(col + px, row + py);
+    if ((neg == 0 && pos < 0) || (neg < 0 && pos == 0) || (neg < 0 && pos < 0))
+      return true;
+    if (neg == 0 && pos == 0)
+      return passage_reaches_unknown(col, row, px, py, 1) ||
+             passage_reaches_unknown(col, row, px, py, -1);
+    return false;
+  };
+  return seal_on_axis(0, 1) || seal_on_axis(1, 0);
+}
+
 void OpenPassableOpenings(ExplorationGrid* grid) {
   if (grid == nullptr || grid->resolution <= 0. || grid->width <= 2 || grid->height <= 2 ||
       grid->cells.size() != static_cast<std::size_t>(grid->width) * grid->height) return;

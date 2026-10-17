@@ -630,9 +630,12 @@ int main() {
   bpaint(2, 58, 22, 36, -1);   // north kitchen unknown
   bpaint(20, 34, 18, 22, 0);   // 0.70 m mouth
   bpaint(20, 34, 20, 21, 100); // 1-cell occupied bar sealing the mouth
+  // Before carving, PathCuts must treat the bar as an openable door seal.
+  assert(navigation2d::IsOpenableDoorSealCell(barred, 27, 20));
   navigation2d::OpenPassableOpenings(&barred);
   assert(barred.cells[20 * barred.width + 27] == 0);
   assert(barred.cells[24 * barred.width + 27] == 0);
+  assert(!navigation2d::IsOpenableDoorSealCell(barred, 27, 20));
 
   // Vestibule: both free runs are door-width (~0.50 m). SafeViewpoint must
   // still accept the center with planning radius (.22); the old XOR treated
