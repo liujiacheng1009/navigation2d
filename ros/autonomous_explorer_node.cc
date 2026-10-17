@@ -507,6 +507,14 @@ class AutonomousExplorer final : public rclcpp::Node {
     // collision projection into sparse unknown cells caused false stops in
     // visibly clear aisles; retain near-field collision checking only.
     config.collision_horizon = .50;
+    // Doorway crawl: jamb returns sit at ~body half-width and latched STOP
+    // with the open-space travel corridor. Passage mode narrows that band.
+    if (pending_entry_goal_) {
+      config.collision_monitor_passage_mode = true;
+      config.collision_monitor_slowdown_distance = .18;
+      config.collision_monitor_approach_horizon = .55;
+      config.collision_monitor_stop_distance = .06;
+    }
     config.desired_linear_velocity = .28;
     config.regulated_min_speed = .10;
     // Soft target in open space: pull paths off speckles/walls when the room
@@ -2286,8 +2294,17 @@ class AutonomousExplorer final : public rclcpp::Node {
             return;
           }
           if (entry_probe_attempts_ < 4 && StartEntryProbe()) return;
+          // Still on the threshold with the room open — never mark success or
+          // hop mouths; that left CARROT inside while the robot walked away.
+          explorer_.RecordAttempt(*pending_entry_goal_, false);
+          recently_demoted_ = *pending_entry_goal_;
+          recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(4.0);
+          next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
+          PublishStatus("SELECTING",
+                        "at doorway; entry incomplete, keeping locked mouth");
+          return;
         }
-        explorer_.RecordAttempt(pending_entry_goal_.value_or(active_goal_), true);
+        explorer_.RecordAttempt(active_goal_, true);
         ClearEntryMouthLock();
         if (!committed_tour_.empty()) committed_tour_.pop_front();
         next_selection_ = now();
@@ -2592,6 +2609,30 @@ class AutonomousExplorer final : public rclcpp::Node {
       // room wall — peel/replan here parked the robot mid-room forever
       // (front=1.0 left=0.18 escape loop).
       if (exploring_drive && monitor_stop && forward_clearly_open) {
+        // Locked doorway: jamb STOP with open forward is the entry crawl, not
+        // a mid-room wall. Retreating here left CARROT inside the room.
+        if (locked_entry_mouth_ || pending_entry_goal_) {
+          if (!pending_entry_goal_) pending_entry_goal_ = locked_entry_mouth_;
+          if (last_goal_path_progress_time_.nanoseconds() > 0 &&
+              (now() - last_goal_path_progress_time_).seconds() > 4.0) {
+            navigation_.reset();
+            cooled_signatures_.clear();
+            paint_driven_corridor_ = true;
+            paint_trail_budget_m_ = 8.0;
+            if (entry_probe_attempts_ < 4 && StartEntryProbe()) {
+              PublishStatus("COMPLETING",
+                            "doorjamb STOP; retrying locked mouth entry");
+              return;
+            }
+            if (TryStartEscape()) {
+              recovery_.resume_after_escape = true;
+              PublishStatus("RECOVERING",
+                            "doorjamb STOP; peel then resume locked mouth");
+              return;
+            }
+          }
+          return;
+        }
         // Keep the active route; only trail-retreat if progress is dead.
         if (last_goal_path_progress_time_.nanoseconds() > 0 &&
             (now() - last_goal_path_progress_time_).seconds() > 6.0) {
@@ -2607,6 +2648,25 @@ class AutonomousExplorer final : public rclcpp::Node {
         return;
       }
       if (exploring_drive && monitor_stop && forward_open && side_range < .35) {
+        if (locked_entry_mouth_ || pending_entry_goal_) {
+          if (!pending_entry_goal_) pending_entry_goal_ = locked_entry_mouth_;
+          navigation_.reset();
+          cooled_signatures_.clear();
+          paint_driven_corridor_ = true;
+          paint_trail_budget_m_ = 8.0;
+          if (entry_probe_attempts_ < 4 && StartEntryProbe()) {
+            PublishStatus("COMPLETING",
+                          "side clearance at mouth; deeper entry probe");
+            return;
+          }
+          if (TryStartEscape()) {
+            recovery_.resume_after_escape = true;
+            PublishStatus("RECOVERING",
+                          "side clearance at mouth; peel then resume entry");
+            return;
+          }
+          return;
+        }
         if (recovery_.side_peels < 2 && TryStartEscape()) {
           ++recovery_.side_peels;
           navigation_.reset();

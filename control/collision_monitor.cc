@@ -24,7 +24,12 @@ double BodyHalfWidth(const NavigationConfig& config) {
 // slowdown margin so a corner beside the bumper eases the speed; it must not
 // widen the stop zone.
 double TravelCorridorHalfWidth(const NavigationConfig& config) {
-  return BodyHalfWidth(config) + std::sqrt(.5) * config.map_resolution + .05;
+  const double body = BodyHalfWidth(config);
+  const double raster = std::sqrt(.5) * config.map_resolution;
+  // Passage mode: body + one raster cell only. The extra 0.05 m open-space
+  // margin turns door jambs into travel-corridor hits and latches STOP.
+  if (config.collision_monitor_passage_mode) return body + raster;
+  return body + raster + .05;
 }
 
 // Stop only for returns that overlap the body, plus one raster cell. A jamb
@@ -32,7 +37,9 @@ double TravelCorridorHalfWidth(const NavigationConfig& config) {
 // and used to satisfy the radial stop test, which then latched a zero command
 // for the rest of the traverse.
 double StopCorridorHalfWidth(const NavigationConfig& config) {
-  return BodyHalfWidth(config) + std::sqrt(.5) * config.map_resolution;
+  const double body = BodyHalfWidth(config);
+  if (config.collision_monitor_passage_mode) return body;
+  return body + std::sqrt(.5) * config.map_resolution;
 }
 
 // Distance from the robot origin to the bumper in the commanded direction.

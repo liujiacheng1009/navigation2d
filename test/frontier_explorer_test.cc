@@ -589,6 +589,16 @@ int main() {
       hall_standoff, kx, ky, .20, .70);
   assert(kitchen_probe.has_value());
   assert(kitchen_probe->x > kg.frontier_x - .05);
+  // Lateral hall standoff (beside the jamb): old viewpoint→frontier axis
+  // walked along the wall; unknown-centroid must still send the probe into
+  // the kitchen (+x).
+  navigation2d::ExplorationGoal lateral = kg;
+  lateral.x = kg.frontier_x;
+  lateral.y = kg.frontier_y - .55;
+  const auto lateral_probe = kitchen_explorer.SelectEntryProbe(
+      lateral, kx, ky, .20, .70);
+  assert(lateral_probe.has_value());
+  assert(lateral_probe->x > kg.frontier_x + .10);
 
   // SLAM-pinched kitchen: free throat shrinks to 0.20 m with unknown beyond.
   // OpenPassableOpenings must erode jamb bleed and open a plannable nose.

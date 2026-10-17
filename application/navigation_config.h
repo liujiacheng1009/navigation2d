@@ -53,6 +53,11 @@ struct NavigationConfig {
   double collision_monitor_source_timeout = .3;
   int collision_monitor_trigger_cycles = 2;
   int collision_monitor_release_cycles = 2;
+  // Doorway crawl: jambs sit ~body-half-width beside the chassis. The normal
+  // travel corridor (+0.05 m) treats them as forward obstacles and latches
+  // STOP at the threshold. Narrow the corridor to the body so side returns
+  // only slow, while a true bumper obstacle still stops.
+  bool collision_monitor_passage_mode = false;
   double max_navigation_duration = 60.;
   double control_period = .06;
   double global_replan_period = .5;
