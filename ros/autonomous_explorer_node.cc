@@ -503,7 +503,6 @@ class AutonomousExplorer final : public rclcpp::Node {
     // the whole localization map and never return, so the node produces no
     // result.json.  First-segment cooldown, escape, and A* replay rejection
     // already stop rotate-in-place stalls without that planner.
-    config.planner = "theta_star";
     // Regulated Pure Pursuit is the Nav2 controller used for robust service
     // robot path following. Its velocity regulation around curvature and
     // obstacles avoids MPPI fallback oscillation on partially observed maps.
@@ -517,6 +516,10 @@ class AutonomousExplorer final : public rclcpp::Node {
     // so CollisionMonitor BodyHalfWidth matches the planner throat instead of
     // latching STOP on jambs at ~0.15 m while the OpenPassable gap is 0.64 m.
     const bool entry_drive = pending_entry_goal_ || locked_entry_mouth_;
+    // Entry: A* only. Theta* long chords cut nearby wall tips even when the
+    // locked mouth is metres wide (live: gap=2.15 Entry probe rejected
+    // path-intersects → abandon → tour loop → failed_goals thrash).
+    config.planner = entry_drive ? "astar" : "theta_star";
     config.robot_radius = entry_drive ? .14 : .22;
     if (entry_drive) {
       config.footprint.clear();
@@ -575,11 +578,9 @@ class AutonomousExplorer final : public rclcpp::Node {
     // entry chords into jambs / PathCuts rejects (live: probe rejected
     // path-intersects while the OpenPassable throat was free).
     if (entry_drive) {
-      config.smoother_min_clearance = .16;
-      config.smoother_obstacle_weight = .35;
-      config.smoother_data_weight = .20;
-      config.smoother_max_deviation = .18;
-      config.smoother_max_step = .04;
+      // No soft pull on entry — smoother bows cut wall tips and PathCuts then
+      // rejects a perfectly wide mouth (live gap=2.15 thrash).
+      config.smoother_enabled = false;
     } else if (pinch_plan) {
       // Enough to thread a certified doorway; not a wall-foot preference.
       config.smoother_min_clearance = .28;
@@ -663,7 +664,9 @@ class AutonomousExplorer final : public rclcpp::Node {
         RCLCPP_WARN(get_logger(),
                     "Navigation2D rejected goal before execution: %s",
                     last_planning_failure_.c_str());
-        if (!entry_drive && initial_state.path_signature != 0)
+        // Must cool on entry too — skipping the ban let the same through-tip
+        // chord replay until AbandonLockedEntryMouth (gap=2.15 thrash).
+        if (initial_state.path_signature != 0)
           cooled_signatures_.insert(initial_state.path_signature);
         navigation_.reset();
         if (!mapped_obstacle_retry_) {
@@ -950,6 +953,19 @@ class AutonomousExplorer final : public rclcpp::Node {
     return std::hypot(a.frontier_x - b.frontier_x, a.frontier_y - b.frontier_y) <
                .75 ||
            std::hypot(a.x - b.x, a.y - b.y) < .55;
+  }
+
+  bool EasyLockedMouth() const {
+    if (!pending_entry_goal_ && !locked_entry_mouth_) return false;
+    const Goal& mouth =
+        pending_entry_goal_.value_or(*locked_entry_mouth_);
+    return explorer_.MouthGapWidth(mouth.frontier_x, mouth.frontier_y) >= .50;
+  }
+
+  int EntryAttemptBudget() const {
+    // Wide free mouths must not be abandoned after a few PathCuts rejects —
+    // live log: gap=2.15 failed_goals→69 while the opening stayed clear.
+    return EasyLockedMouth() ? 14 : 6;
   }
 
   bool StartEntryProbe() {
@@ -1277,8 +1293,14 @@ class AutonomousExplorer final : public rclcpp::Node {
           if (!pending_entry_goal_) pending_entry_goal_ = locked_entry_mouth_;
           // One peel retry only. Further resumes of the same mouth + trail
           // reverse were the post-脱困 折返 loop.
-          if (entry_probe_attempts_ < 3 && StartEntryProbe()) {
+          if (entry_probe_attempts_ < EntryAttemptBudget() && StartEntryProbe()) {
             PublishStatus("COMPLETING", "resumed locked mouth after peel");
+            return true;
+          }
+          if (EasyLockedMouth()) {
+            if (entry_open_loop_ticks_ == 0) entry_open_loop_ticks_ = 1;
+            PublishStatus("COMPLETING",
+                          "peel done; wide mouth crawl instead of abandon");
             return true;
           }
           AbandonLockedEntryMouth(
@@ -1629,7 +1651,16 @@ class AutonomousExplorer final : public rclcpp::Node {
         PublishStatus("SELECTING",
                       "room entered; finishing active region first");
         return;
-      } else if (entry_probe_attempts_ < 6 && StartEntryProbe()) {
+      } else if (entry_probe_attempts_ < EntryAttemptBudget() &&
+                 StartEntryProbe()) {
+        return;
+      } else if (EasyLockedMouth() && entry_probe_attempts_ < EntryAttemptBudget()) {
+        // Keep the lock on a wide mouth; open-loop crawl mid-gap instead of
+        // abandoning into a tour loop (live: "entry blocked" spam).
+        if (entry_open_loop_ticks_ == 0) entry_open_loop_ticks_ = 1;
+        next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+        PublishStatus("COMPLETING",
+                      "wide mouth blocked; crawling mid-gap instead of abandon");
         return;
       } else {
         // Plan failed at the mouth: leave it and continue the tour from HERE.
@@ -1739,7 +1770,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       if (StartEntryProbe()) return;
       // Hallway reject + failed entry: keep the lock for a few SelectNextGoal
       // retries; abandon (wide cool) after the attempt budget is exhausted.
-      if (entry_probe_attempts_ >= 6) {
+      if (entry_probe_attempts_ >= EntryAttemptBudget()) {
         AbandonLockedEntryMouth(
             "hallway reject; entry probe exhausted, leaving mouth");
         continue;
@@ -2208,7 +2239,7 @@ class AutonomousExplorer final : public rclcpp::Node {
                       "path cut; replanning locked mouth on latest map");
         return true;
       }
-      if (entry_probe_attempts_ < 6 && StartEntryProbe()) {
+      if (entry_probe_attempts_ < EntryAttemptBudget() && StartEntryProbe()) {
         PublishStatus("COMPLETING",
                       "path cut; retrying locked mouth at deeper probe");
         return true;
@@ -2313,7 +2344,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       if (EscapeOrShortRetreat("immobility at locked mouth; peel then retry",
                                "unused"))
         return true;
-      if (mouth_range <= 1.5 && entry_probe_attempts_ < 6 && StartEntryProbe())
+      if (mouth_range <= 1.5 && entry_probe_attempts_ < EntryAttemptBudget() && StartEntryProbe())
         return true;
       AbandonLockedEntryMouth(
           "immobility exhausted locked mouth; continue tour (no reverse)");
@@ -2962,7 +2993,7 @@ class AutonomousExplorer final : public rclcpp::Node {
                       "entry no-motion; open-loop crawl into mouth");
         if (entry_open_loop_ticks_ > 40) {
           entry_open_loop_ticks_ = 0;
-          if (entry_probe_attempts_ < 6 && StartEntryProbe()) return;
+          if (entry_probe_attempts_ < EntryAttemptBudget() && StartEntryProbe()) return;
           AbandonLockedEntryMouth(
               "open-loop crawl exhausted; leaving mouth");
         }
@@ -3026,7 +3057,7 @@ class AutonomousExplorer final : public rclcpp::Node {
                         pose_->pose.position.x, pose_->pose.position.y);
             return;
           }
-          if (entry_probe_attempts_ < 6 && StartEntryProbe()) return;
+          if (entry_probe_attempts_ < EntryAttemptBudget() && StartEntryProbe()) return;
           // Budget spent on the threshold: cool the mouth. Keeping the lock
           // here re-drove hall→door→fail→hall (red-box shuttle).
           AbandonLockedEntryMouth(
@@ -3308,7 +3339,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         retreat_goal_ = false;
         reject_streak_ = 0;
         // After a trail retreat while a mouth is locked, resume that mouth.
-        if (locked_entry_mouth_ && entry_probe_attempts_ < 6) {
+        if (locked_entry_mouth_ && entry_probe_attempts_ < EntryAttemptBudget()) {
           pending_entry_goal_ = locked_entry_mouth_;
           if (StartEntryProbe()) return;
         }
@@ -3322,7 +3353,7 @@ class AutonomousExplorer final : public rclcpp::Node {
           QueueActiveRegionFinish();
           next_selection_ = now();
           PublishStatus("SELECTING", "room entered; finishing active region first");
-        } else if (entry_probe_attempts_ < 6 && StartEntryProbe()) {
+        } else if (entry_probe_attempts_ < EntryAttemptBudget() && StartEntryProbe()) {
           return;
         } else {
           RCLCPP_WARN(get_logger(),
@@ -3342,7 +3373,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         if (StartEntryProbe()) return;
         // Easy/shallow doors often need a second depth schedule — do not
         // abandon on the first nullopt (live: wide free doorway left).
-        if (entry_probe_attempts_ < 6) {
+        if (entry_probe_attempts_ < EntryAttemptBudget()) {
           next_selection_ = now() + rclcpp::Duration::from_seconds(0.35);
           PublishStatus("SELECTING",
                         "at doorway; retrying centered entry probe");
@@ -3467,7 +3498,7 @@ class AutonomousExplorer final : public rclcpp::Node {
             // and restarted the probe↔retreat shuttle.
             paint_driven_corridor_ = true;
             paint_trail_budget_m_ = 8.0;
-            if (entry_probe_attempts_ < 6 && StartEntryProbe()) {
+            if (entry_probe_attempts_ < EntryAttemptBudget() && StartEntryProbe()) {
               PublishStatus("COMPLETING",
                             "doorjamb STOP; retrying locked mouth entry");
               return;
@@ -3507,7 +3538,7 @@ class AutonomousExplorer final : public rclcpp::Node {
             navigation_.reset();
             paint_driven_corridor_ = true;
             paint_trail_budget_m_ = 8.0;
-            if (entry_probe_attempts_ < 6 && StartEntryProbe()) {
+            if (entry_probe_attempts_ < EntryAttemptBudget() && StartEntryProbe()) {
               PublishStatus("COMPLETING",
                             "side clearance stall; deeper entry probe");
               return;
@@ -3653,7 +3684,7 @@ class AutonomousExplorer final : public rclcpp::Node {
               if (entry_open_loop_ticks_ == 0) entry_open_loop_ticks_ = 1;
               return;
             }
-            if (entry_probe_attempts_ < 6 && StartEntryProbe()) return;
+            if (entry_probe_attempts_ < EntryAttemptBudget() && StartEntryProbe()) return;
             AbandonLockedEntryMouth(
                 "entry stall; leave mouth and continue tour (no reverse)");
             recovery_.Clear();
