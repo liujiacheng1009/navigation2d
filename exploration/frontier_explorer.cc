@@ -186,10 +186,10 @@ bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row) {
 
 bool PreferTipAbandonAfterPathCut(int mapped_obstacle_rejects,
                                   double path_min_clearance_m) {
-  if (mapped_obstacle_rejects >= 2) return true;
-  // Clearance already below body half-width: another theta* chord will clip
-  // the same tip and PathCuts will drop it again (pause thrash).
-  return path_min_clearance_m > 0. && path_min_clearance_m < .14;
+  (void)path_min_clearance_m;
+  // Only leave after repeated live-occupied cuts. A single low-clearance
+  // chord near a passable door jamb must replan, not abandon the room.
+  return mapped_obstacle_rejects >= 2;
 }
 
 bool PathCutsLiveOccupied(const ExplorationGrid& live,
@@ -1577,14 +1577,16 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
   direction_x /= approach_length;
   direction_y /= approach_length;
   // Entry poses must clear the same robot_radius the planner uses for goals.
-  // Traverse may be a hair tighter so the BFS can step the carved throat.
+  // Traverse may step planning-only free (unknown flood) to connect the
+  // throat, but the published probe itself must sit on observed free — never
+  // on flooded white "outside the map".
   constexpr double kEntryTraverseClearance = .20;
   constexpr double kEntryGoalClearance = kPlanningRadius;
   const auto entry_traverse = [&](int col, int row) {
     return Free(col, row) && ClearAt(col, row, kEntryTraverseClearance);
   };
   const auto entry_goal = [&](int col, int row) {
-    return Free(col, row) && ClearAt(col, row, kEntryGoalClearance);
+    return RawFree(col, row) && ClearAt(col, row, kEntryGoalClearance);
   };
   const int robot_col = static_cast<int>(std::floor(
       (robot_x - map_.origin_x) / map_.resolution));
@@ -1671,9 +1673,8 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
     }
   }
   if (best) return best;
-  // Geometric fallback: OpenPassable flooded a nose but BFS from the robot
-  // still cannot step through a residual speck. Place the probe on the
-  // approach axis past the frontier when that cell is free (carved) and clear.
+  // Geometric fallback: place the probe on the approach axis when BFS cannot
+  // reach a candidate. Still requires observed free (RawFree via entry_goal).
   const double lateral_unit_x = -direction_y;
   const double lateral_unit_y = direction_x;
   for (double depth = minimum_depth_m; depth <= maximum_depth_m + 1e-6;

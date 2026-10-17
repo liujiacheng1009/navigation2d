@@ -608,6 +608,15 @@ int main() {
       hall_standoff, kx, ky, .20, .70);
   assert(kitchen_probe.has_value());
   assert(kitchen_probe->x > kg.frontier_x - .05);
+  // Probe must sit on observed free, not flooded unknown past the map.
+  {
+    const int pc = static_cast<int>(
+        std::floor(kitchen_probe->x / kitchen.resolution));
+    const int pr = static_cast<int>(
+        std::floor(kitchen_probe->y / kitchen.resolution));
+    assert(kitchen.cells[static_cast<std::size_t>(pr) * kitchen.width + pc] ==
+           0);
+  }
   // Lateral hall standoff (beside the jamb): old viewpoint→frontier axis
   // walked along the wall; unknown-centroid must still send the probe into
   // the kitchen (+x).
@@ -982,12 +991,13 @@ int main() {
     assert(navigation2d::PathCutsLiveOccupied(sealed, entry, rx, ry));
   }
 
-  // Wall-tip pause thrash: low-clearance path cuts must abandon (not replan).
+  // Wall-tip thrash: abandon only after repeated live-occupied cuts. A single
+  // low-clearance graze near a passable door must replan, not leave the room.
   assert(!navigation2d::PreferTipAbandonAfterPathCut(0, .30));
   assert(!navigation2d::PreferTipAbandonAfterPathCut(1, .30));
   assert(navigation2d::PreferTipAbandonAfterPathCut(2, .30));
-  assert(navigation2d::PreferTipAbandonAfterPathCut(1, .08));  // tip graze
-  assert(navigation2d::PreferTipAbandonAfterPathCut(0, .10));
-  assert(!navigation2d::PreferTipAbandonAfterPathCut(0, 0.));  // unknown clearance
+  assert(!navigation2d::PreferTipAbandonAfterPathCut(1, .08));  // tip graze → replan
+  assert(!navigation2d::PreferTipAbandonAfterPathCut(0, .10));
+  assert(!navigation2d::PreferTipAbandonAfterPathCut(0, 0.));
 
 }

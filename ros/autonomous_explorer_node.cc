@@ -426,9 +426,10 @@ class AutonomousExplorer final : public rclcpp::Node {
     planning_grid.origin_y = map_->info.origin.position.y;
     planning_grid.cells = map_->data;
     navigation2d::OpenPassableOpenings(&planning_grid);
-    // Locked-mouth entry: paint a short unknown corridor past the frontier so
-    // theta* can step into a still-white room after OpenPassable opened the
-    // seal. Occupied cells stay lethal — only unknown is temporarily free.
+    // Locked-mouth entry: paint a narrow unknown centerline past the frontier
+    // so theta* can step into still-white space. Wide lateral paint used to
+    // invent chords that clipped live jambs and PathCuts then abandoned the
+    // door. Occupied stays lethal — only unknown is temporarily free.
     if (pending_entry_goal_ && map_->info.resolution > 0.) {
       const double ax =
           pending_entry_goal_->frontier_x - pending_entry_goal_->x;
@@ -441,8 +442,8 @@ class AutonomousExplorer final : public rclcpp::Node {
         const double res = map_->info.resolution;
         const int width = static_cast<int>(map_->info.width);
         const int height = static_cast<int>(map_->info.height);
-        for (double depth = -.15; depth <= 1.35; depth += res) {
-          for (double lat = -.28; lat <= .28 + 1e-9; lat += res) {
+        for (double depth = -.10; depth <= .80; depth += res) {
+          for (double lat = -.10; lat <= .10 + 1e-9; lat += res) {
             const double wx = pending_entry_goal_->frontier_x + depth * ux + lat * lx;
             const double wy = pending_entry_goal_->frontier_y + depth * uy + lat * ly;
             const int col = static_cast<int>(
