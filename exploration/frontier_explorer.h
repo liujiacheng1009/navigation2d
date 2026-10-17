@@ -132,6 +132,12 @@ class FrontierExplorer {
   bool ShouldPreemptForNearerMouth(double robot_x, double robot_y,
                                    const ExplorationGoal& active_goal,
                                    double path_remaining_m = -1.);
+  // Free throat width at a frontier (metres). Wide easy doors (~≥0.50 m)
+  // use shallower entry probes; pinch mouths stay on the deep-probe path.
+  double MouthGapWidth(double frontier_x, double frontier_y) const;
+  // How far Free space continues past the frontier along the into-room axis.
+  double MouthFreeDepth(const ExplorationGoal& frontier_goal, double robot_x,
+                        double robot_y) const;
   // Returns a reachable pose beyond a doorway frontier.  The pose is chosen
   // from the private planning grid, where only physically passable narrow
   // openings have been opened; it never treats an arbitrary unknown room as

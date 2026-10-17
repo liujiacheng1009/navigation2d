@@ -961,23 +961,49 @@ class AutonomousExplorer final : public rclcpp::Node {
       locked_entry_mouth_ = *pending_entry_goal_;
     else
       pending_entry_goal_ = *locked_entry_mouth_;
-    // First attempt past the jambs; deeper retries into the OpenPassable nose.
-    // Kitchen doors need ~0.30 m past the frontier or the robot stops in the
-    // hallway and never observes the room. Widen max depth on retry so a
-    // corner pocket past an L-jamb remains reachable.
-    // Probe depth must exceed EntryProbeSatisfied (0.48 m) or the robot can
-    // arrive at the probe and still never mark the room entered.
-    const double minimum_depth = .55 + .12 * entry_probe_attempts_;
-    const double maximum_depth = entry_probe_attempts_ == 0 ? 1.30 : 1.60;
-    const auto probe = explorer_.SelectEntryProbe(
-        *pending_entry_goal_, pose_->pose.position.x, pose_->pose.position.y,
-        minimum_depth, maximum_depth);
+    // Adaptive entry depth: fixed 0.55 m rejected easy shallow rooms (UI:
+    // wide free doorway, SelectEntryProbe nullopt → abandon). Wide gaps use
+    // a mid-gap poke; pinch mouths keep deeper probes into the nose.
+    const double gap = explorer_.MouthGapWidth(pending_entry_goal_->frontier_x,
+                                               pending_entry_goal_->frontier_y);
+    const double free_depth = explorer_.MouthFreeDepth(
+        *pending_entry_goal_, pose_->pose.position.x, pose_->pose.position.y);
+    const bool easy_door = gap >= .50;
+    std::optional<Goal> probe;
+    double used_min_depth = 0.;
+    const double schedules[][2] = {
+        {easy_door ? (.28 + .08 * entry_probe_attempts_)
+                   : (.42 + .10 * entry_probe_attempts_),
+         easy_door ? 1.05 : (entry_probe_attempts_ == 0 ? 1.30 : 1.60)},
+        {.24, .85},
+        {.18, .55},
+    };
+    for (const auto& schedule : schedules) {
+      double minimum_depth = schedule[0];
+      double maximum_depth = schedule[1];
+      if (free_depth > .05) {
+        minimum_depth =
+            std::min(minimum_depth, std::max(.18, free_depth - .08));
+        maximum_depth = std::max(maximum_depth, minimum_depth + .12);
+        maximum_depth = std::min(maximum_depth, std::max(minimum_depth + .12,
+                                                         free_depth + .05));
+      }
+      if (maximum_depth < minimum_depth) continue;
+      probe = explorer_.SelectEntryProbe(
+          *pending_entry_goal_, pose_->pose.position.x, pose_->pose.position.y,
+          minimum_depth, maximum_depth);
+      if (probe) {
+        used_min_depth = minimum_depth;
+        break;
+      }
+    }
     if (!probe) {
       ++entry_probe_attempts_;
       RCLCPP_WARN(get_logger(),
-                  "Entry probe unavailable: frontier=(%.2f,%.2f) attempts=%d",
+                  "Entry probe unavailable: frontier=(%.2f,%.2f) attempts=%d "
+                  "gap=%.2f free_depth=%.2f",
                   pending_entry_goal_->frontier_x, pending_entry_goal_->frontier_y,
-                  entry_probe_attempts_);
+                  entry_probe_attempts_, gap, free_depth);
       return false;
     }
     // Already past the jambs: close the mouth without StartNavigation (live:
@@ -1020,17 +1046,18 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (!StartNavigation(*probe, false)) {
       RCLCPP_WARN(get_logger(),
                   "Entry probe rejected: target=(%.2f,%.2f) depth=%.2f attempt=%d "
-                  "reason=%s",
-                  probe->x, probe->y, minimum_depth, entry_probe_attempts_,
+                  "gap=%.2f reason=%s",
+                  probe->x, probe->y, used_min_depth, entry_probe_attempts_, gap,
                   last_planning_failure_.empty() ? "unknown" :
                       last_planning_failure_.c_str());
       return false;
     }
     RCLCPP_INFO(get_logger(),
                 "Entry probe started: frontier=(%.2f,%.2f) target=(%.2f,%.2f) "
-                "depth=%.2f attempt=%d",
+                "depth=%.2f attempt=%d gap=%.2f easy=%s",
                 pending_entry_goal_->frontier_x, pending_entry_goal_->frontier_y,
-                probe->x, probe->y, minimum_depth, entry_probe_attempts_);
+                probe->x, probe->y, used_min_depth, entry_probe_attempts_, gap,
+                easy_door ? "yes" : "no");
     PublishStatus("COMPLETING", "crossing frontier entry and waiting for map growth");
     return true;
   }
@@ -1069,9 +1096,11 @@ class AutonomousExplorer final : public rclcpp::Node {
     const double lateral = std::abs((rx - fx) * (-uy) + (ry - fy) * ux);
     if (lateral > .60) return false;
     const double robot_side = (rx - fx) * ux + (ry - fy) * uy;
-    // ~half metre into the pocket (past body + jamb), not a threshold peek.
-    // Keep below the first SelectEntryProbe minimum_depth (0.55 m).
-    return robot_side > .48;
+    // Wide easy doors: a shallow mid-gap poke (~0.30 m) is enough to mark
+    // entered. Narrow mouths still need ~0.48 m so we do not peek-and-leave.
+    const double gap = explorer_.MouthGapWidth(fx, fy);
+    const double need = gap >= .50 ? .30 : .48;
+    return robot_side > need;
   }
 
   // After crossing a mouth: queue in-room leftovers before any hallway tour so
@@ -3311,9 +3340,14 @@ class AutonomousExplorer final : public rclcpp::Node {
         // Keep the tour; clearing it forced a reverse rebuild every doorway.
         LockEntryMouth(active_goal_);
         if (StartEntryProbe()) return;
-        // Do not RecordAttempt+clear then instantly re-dispatch the same
-        // hallway standoff (failed_goals climbed 12→83 while pose was frozen
-        // at the NE mouth with "Entry probe unavailable" attempts=1).
+        // Easy/shallow doors often need a second depth schedule — do not
+        // abandon on the first nullopt (live: wide free doorway left).
+        if (entry_probe_attempts_ < 6) {
+          next_selection_ = now() + rclcpp::Duration::from_seconds(0.35);
+          PublishStatus("SELECTING",
+                        "at doorway; retrying centered entry probe");
+          return;
+        }
         AbandonLockedEntryMouth(
             "frontier reached but no safe entry probe; leaving mouth");
       } else {

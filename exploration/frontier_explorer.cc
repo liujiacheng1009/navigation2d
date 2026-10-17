@@ -1521,7 +1521,9 @@ std::vector<ExplorationGoal> FrontierExplorer::OneGoalPerMouth(
         (goal.frontier_x - map_.origin_x) / map_.resolution));
     const int frow = static_cast<int>(std::floor(
         (goal.frontier_y - map_.origin_y) / map_.resolution));
-    double best_depth = depth_past_frontier(goal, goal.x, goal.y);
+    // Mid-gap: maximize clearance (not depth). Old depth-max parked the
+    // standoff on the deeper jamb side so RPP froze at an easy doorway.
+    double best_score = -1.;
     int best_col = -1, best_row = -1;
     for (int row = std::max(0, frow - search);
          row <= std::min(map_.height - 1, frow + search); ++row) {
@@ -1534,9 +1536,12 @@ std::vector<ExplorationGoal> FrontierExplorer::OneGoalPerMouth(
         const double depth = depth_past_frontier(goal, x, y);
         const double lateral = std::abs((x - goal.frontier_x) * dir_y -
                                         (y - goal.frontier_y) * dir_x);
-        if (lateral > .38 || depth < -.05 || depth > .55) continue;
-        if (depth > best_depth + .02) {
-          best_depth = depth;
+        if (lateral > .28 || depth < -.10 || depth > .55) continue;
+        const double clearance = OccupiedClearanceAt(map_, col, row);
+        if (clearance < .16) continue;
+        const double score = 5.0 * clearance - 2.0 * lateral + 0.4 * depth;
+        if (score > best_score) {
+          best_score = score;
           best_col = col;
           best_row = row;
         }
@@ -1719,6 +1724,60 @@ bool FrontierExplorer::ShouldPreemptForNearerMouth(
   return d_far >= kFarRatio * d_near + kFarSlackM;
 }
 
+double FrontierExplorer::MouthGapWidth(double frontier_x,
+                                       double frontier_y) const {
+  if (map_.resolution <= 0. || map_.width <= 0 || map_.height <= 0) return 0.;
+  const int col = static_cast<int>(
+      std::floor((frontier_x - map_.origin_x) / map_.resolution));
+  const int row = static_cast<int>(
+      std::floor((frontier_y - map_.origin_y) / map_.resolution));
+  if (col < 0 || row < 0 || col >= map_.width || row >= map_.height) return 0.;
+  auto free = [&](int c, int r) {
+    if (c < 0 || r < 0 || c >= map_.width || r >= map_.height) return false;
+    return map_.cells[static_cast<std::size_t>(r) * map_.width + c] == 0;
+  };
+  const int probe = static_cast<int>(std::ceil(1.4 / map_.resolution));
+  int horizontal = 0, vertical = 0;
+  for (int x = col; x >= 0 && x > col - probe && free(x, row); --x) ++horizontal;
+  for (int x = col + 1; x < map_.width && x <= col + probe && free(x, row); ++x)
+    ++horizontal;
+  for (int y = row; y >= 0 && y > row - probe && free(col, y); --y) ++vertical;
+  for (int y = row + 1; y < map_.height && y <= row + probe && free(col, y); ++y)
+    ++vertical;
+  // Throat width is the narrow free run (door gap), not the deep room axis.
+  return static_cast<double>(std::min(horizontal, vertical)) * map_.resolution;
+}
+
+double FrontierExplorer::MouthFreeDepth(const ExplorationGoal& frontier_goal,
+                                        double robot_x, double robot_y) const {
+  if (map_.resolution <= 0. || map_.width <= 2 || map_.height <= 2) return 0.;
+  double dir_x = frontier_goal.frontier_x - robot_x;
+  double dir_y = frontier_goal.frontier_y - robot_y;
+  double len = std::hypot(dir_x, dir_y);
+  if (len < .05) {
+    dir_x = frontier_goal.frontier_x - frontier_goal.x;
+    dir_y = frontier_goal.frontier_y - frontier_goal.y;
+    len = std::hypot(dir_x, dir_y);
+  }
+  if (len < .05) return 0.;
+  dir_x /= len;
+  dir_y /= len;
+  double depth = 0.;
+  for (double step = map_.resolution; step <= 1.40 + 1e-6;
+       step += map_.resolution) {
+    const double x = frontier_goal.frontier_x + step * dir_x;
+    const double y = frontier_goal.frontier_y + step * dir_y;
+    const int col =
+        static_cast<int>(std::floor((x - map_.origin_x) / map_.resolution));
+    const int row =
+        static_cast<int>(std::floor((y - map_.origin_y) / map_.resolution));
+    if (col < 0 || row < 0 || col >= map_.width || row >= map_.height) break;
+    if (!Free(col, row) || !ClearAt(col, row, .14)) break;
+    depth = step;
+  }
+  return depth;
+}
+
 std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
     const ExplorationGoal& frontier_goal, double robot_x, double robot_y,
     double minimum_depth_m, double maximum_depth_m) const {
@@ -1870,15 +1929,22 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
       const double depth = relative_x * direction_x + relative_y * direction_y;
       const double lateral = std::abs(relative_x * direction_y - relative_y * direction_x);
       // Keep probes in the door throat center — .38 m lateral parked on the
-      // jamb (UI: GOAL on left threshold wall, path clear ~0.06 m).
-      if (depth < minimum_depth_m || depth > maximum_depth_m || lateral > .22)
+      // jamb (UI: GOAL on left threshold wall, path clear ~0.06 m). Wide easy
+      // mouths allow a hair more lateral so angled hall approaches still land
+      // mid-gap instead of returning nullopt and abandoning the door.
+      const double gap =
+          MouthGapWidth(frontier_goal.frontier_x, frontier_goal.frontier_y);
+      const double max_lateral = gap >= .50 ? .28 : .20;
+      if (depth < minimum_depth_m || depth > maximum_depth_m ||
+          lateral > max_lateral)
         continue;
       // Do not select a pose that is merely on the approach side of the
       // frontier or an unrelated free cell behind a nearby wall.
       if (std::hypot(relative_x, relative_y) > maximum_depth_m + .20) continue;
       const double clearance = OccupiedClearanceAt(map_, col, row);
       if (clearance < .14) continue;
-      const double score = depth + 4.5 * clearance - 2.5 * lateral -
+      // Clearance dominates: mid-gap beats a deeper jamb-hugging cell.
+      const double score = 0.35 * depth + 5.5 * clearance - 3.0 * lateral -
                            .01 * static_cast<double>(distance[index]);
       if (score > best_score) {
         best_score = score;
