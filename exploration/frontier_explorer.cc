@@ -23,11 +23,12 @@ constexpr double kNarrowClearance = kPlanningRadius;
 constexpr double kDoorCarveTargetWidth = .56;
 constexpr double kDoorPinchMinWidth = .18;
 constexpr int kDoorJambErodeMaxCells = 4;
-// The frontier cell is already the last free cell beside unknown. A 0.22 m
-// floor left the goal in the corridor, and the 0.18 m arrival tolerance
-// stopped the robot before a 0.50 m kitchen door. SafeViewpoint still keeps
-// the pose off the walls.
-constexpr double kCloseStandoff = .08;
+// Narrow doorway floor: close enough to see through a kitchen mouth, but not
+// the old 0.08 m rim that parked the chassis on the wall. Open-space goals
+// use config.minimum_standoff (much larger); this only unlocks corridor poses.
+constexpr double kCloseStandoff = .18;
+// Mapping observes frontiers from mid-room, not from the occupied rim.
+constexpr double kPreferredStandoff = .55;
 // A successful doorway observation needs only a small local guard.  A wide
 // permanent disk can hide a legitimate neighbouring doorway; room coverage
 // is enforced by the active-region tour, not by suppressing that doorway.
@@ -37,9 +38,12 @@ constexpr double kVisitedFrontierRadius = .60;
 // Ranks observation poses inside one frontier cluster (which standoff cell to
 // stand on). Tour order between rooms is decided separately by BuildTour with
 // nearest-first coverage — do not use this score to jump across the map.
+// Prefer standing near kPreferredStandoff: the old −2·standoff term rewarded
+// wall-hugging and sent the robot into side-clearance thrash mid-room.
 double ViewpointScore(double information_gain, double travel, double standoff,
                       double gain_weight) {
-  return gain_weight * information_gain / (0.45 + travel) - 2.0 * standoff;
+  return gain_weight * information_gain / (0.45 + travel) -
+         2.5 * std::abs(standoff - kPreferredStandoff);
 }
 
 }  // namespace

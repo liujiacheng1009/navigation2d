@@ -58,9 +58,11 @@ navigation2d::FrontierExplorerConfig ExplorerConfig() {
   // must leave room for the physical footprint and its obstacle buffer, not
   // merely be free in the raw occupancy image. CAD max footprint radius is
   // ~0.207 m; planning uses 0.22 m + soft inflation 0.26 m (same as production).
-  config.footprint_clearance = .30;
-  config.minimum_standoff = .10;
-  config.maximum_standoff = 1.10;
+  // Open-space standoff stays well off walls — lidar covers the rim without
+  // driving there. Narrow doorways still use kCloseStandoff via SafeViewpoint.
+  config.footprint_clearance = .38;
+  config.minimum_standoff = .45;
+  config.maximum_standoff = 1.20;
   config.blacklist_radius = 1.20;
   return config;
 }
