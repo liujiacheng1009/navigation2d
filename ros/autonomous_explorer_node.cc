@@ -1074,12 +1074,16 @@ class AutonomousExplorer final : public rclcpp::Node {
         committed_tour_.pop_front();
         continue;
       }
-      // Keep reverse goals at the back while a forward alternative remains.
-      // Demote→rebuild used to U-turn across the living room every few seconds.
+      // Defer reverse goals only when they are far. A tip inside the local
+      // pocket must be finished even if it sits behind the robot — otherwise
+      // we flee the alcove with a red frontier arc still visible.
       const double bearing = std::atan2(goal.y - pose_->pose.position.y,
                                         goal.x - pose_->pose.position.x);
       const double turn = std::abs(NormalizeAngle(bearing - yaw));
-      if (turn > 1.75 && rotated_reverse < static_cast<int>(committed_tour_.size())) {
+      const double goal_range = std::hypot(goal.x - pose_->pose.position.x,
+                                           goal.y - pose_->pose.position.y);
+      if (turn > 1.75 && goal_range > 2.5 &&
+          rotated_reverse < static_cast<int>(committed_tour_.size())) {
         committed_tour_.pop_front();
         committed_tour_.push_back(goal);
         ++rotated_reverse;

@@ -29,9 +29,10 @@ class RegionScheduler {
  public:
   void Update(const ExplorationGrid& observed, double footprint_clearance);
   RegionId RegionAt(double x, double y) const;
-  // Keeps a DFS context until all its executable observations are consumed.
-  // When blocked/completed, pop and use graph BFS to prefer adjacent regions.
-  // Returns every candidate (ordered), never a filtered local-only queue.
+  // Keeps a DFS context until its raw frontiers are gone (not merely until
+  // SelectGoals returns candidates). When truly empty/completed, pop and use
+  // graph BFS to prefer adjacent regions. Returns ordered candidates; an
+  // unfinished active room with only out-of-context mouths yields {}.
   // `robot_yaw` (rad) ranks reverse U-turn goals after forward ones inside the
   // same DFS region. Pass NaN when heading is unknown.
   std::vector<ExplorationGoal> Order(std::vector<ExplorationGoal> goals,

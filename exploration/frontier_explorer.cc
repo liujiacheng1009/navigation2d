@@ -1331,6 +1331,27 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
   // scheduling owns inter-room order: stay in the active room until its
   // executable observations are gone, then BFS to an adjacent unfinished room.
   auto remaining = SelectGoals(robot_x, robot_y);
+  const RegionId active = regions_.ActiveRegion();
+  const auto active_it = active ? regions_.regions().find(active)
+                                : regions_.regions().end();
+  const bool active_unfinished =
+      active_it != regions_.regions().end() && active_it->second.frontier_cells > 0;
+  if (active_unfinished) {
+    // Pinched tips often fail SelectGoals ClearAt while still showing a red
+    // frontier arc. Always merge leftover approaches for the active context
+    // so a far forward mouth in the same room cannot hide the local tip.
+    auto leftovers = SelectLeftoverApproaches(robot_x, robot_y, 5);
+    for (auto& leftover : leftovers) {
+      if (!GoalInActiveRegion(leftover)) continue;
+      const bool duplicate = std::any_of(
+          remaining.begin(), remaining.end(), [&](const ExplorationGoal& prior) {
+            return std::hypot(prior.frontier_x - leftover.frontier_x,
+                              prior.frontier_y - leftover.frontier_y) < .80 ||
+                   std::hypot(prior.x - leftover.x, prior.y - leftover.y) < .80;
+          });
+      if (!duplicate) remaining.push_back(std::move(leftover));
+    }
+  }
   if (remaining.empty()) return {};
   return regions_.Order(std::move(remaining), robot_x, robot_y, robot_yaw);
 }

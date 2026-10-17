@@ -358,7 +358,12 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
     const bool child_work = std::any_of(goals.begin(), goals.end(), [&](const auto& g) {
       return descendant(g.region_id, r.id);
     });
-    if (r.candidates || child_work || r.state == RegionState::kWaiting) break;
+    // Keep the DFS lock while the room still has raw free↔unknown cells,
+    // even when SelectGoals found no SafeViewpoint (pinched alcove tip).
+    // Popping on candidates==0 was the "ran away before finishing" bug.
+    if (r.candidates || child_work || r.state == RegionState::kWaiting ||
+        r.frontier_cells > 0)
+      break;
     last_region_ = stack_.back(); stack_.pop_back();
   }
   RegionId preferred = stack_.empty() ? 0 : stack_.back();
@@ -370,6 +375,17 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
   // may wait here. The navigation planner remains authoritative for safety.
   if (preferred && regions_.at(preferred).state == RegionState::kWaiting &&
       goals.empty()) return {};
+  // Unfinished active room owns the tour: sibling mouths must not steal the
+  // robot while this context still has raw frontiers (0 candidates is common
+  // for wall-hugging tips that only leftover approaches can clear).
+  if (preferred && regions_.at(preferred).frontier_cells > 0) {
+    goals.erase(std::remove_if(goals.begin(), goals.end(),
+                               [&](const ExplorationGoal& g) {
+                                 return !descendant(g.region_id, preferred);
+                               }),
+                goals.end());
+    if (goals.empty()) return {};
+  }
   RegionId origin = last_region_;
   if (!origin || !regions_.at(origin).visible) origin = RegionAt(x, y);
   std::map<RegionId, int> hops;
@@ -388,10 +404,13 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
   const bool use_heading = std::isfinite(robot_yaw);
   auto rank = [&](const ExplorationGoal& g) {
     // Finish the active room before crossing a doorway (coverage + fewer
-    // revisits). Within that room prefer forward viewpoints so a demote does
-    // not U-turn across the apartment and burn path length. BFS depth then
-    // ranks adjacent rooms.
+    // revisits). Within that room clear the local pocket first — a tip 1–2 m
+    // behind the robot is still cheaper than fleeing to a far forward mouth.
+    // Reverse demotion only applies among similarly distant goals so demote
+    // does not U-turn across the apartment.
     const double distance = std::hypot(g.x - x, g.y - y);
+    const double frontier_range =
+        std::hypot(g.frontier_x - x, g.frontier_y - y);
     const double gain_per_meter = g.information_gain / (0.45 + distance);
     double turn = 0.;
     if (use_heading) {
@@ -399,10 +418,13 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
       turn = std::abs(std::atan2(std::sin(bearing - robot_yaw),
                                  std::cos(bearing - robot_yaw)));
     }
-    // >~100° is a reverse commitment; keep it after forward work in-region.
-    const bool reverse = use_heading && turn > 1.75;
+    constexpr double kLocalPocketM = 2.5;
+    const bool far_pocket =
+        std::min(distance, frontier_range) > kLocalPocketM;
+    // >~100° reverse only after local pocket work is gone.
+    const bool reverse = use_heading && turn > 1.75 && far_pocket;
     return std::tuple(preferred && !descendant(g.region_id, preferred),
-                      reverse, turn, depth(g.region_id),
+                      far_pocket, reverse, turn, depth(g.region_id),
                       distance - .20 * gain_per_meter, -gain_per_meter,
                       g.region_id, g.x, g.y);
   };
