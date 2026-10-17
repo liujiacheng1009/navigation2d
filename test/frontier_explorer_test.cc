@@ -904,6 +904,38 @@ int main() {
     assert(navigation2d::PathCutsLiveOccupied(alcove_wall, through, rx, ry));
   }
 
+  // Continuous free↔unknown exterior wall (unfinished room beyond): every cell
+  // used to count as an openable seal without a door-width check, so entry
+  // probes planned straight through the wall.
+  {
+    navigation2d::ExplorationGrid exterior;
+    exterior.width = 60;
+    exterior.height = 40;
+    exterior.resolution = .05;
+    exterior.origin_x = 0.;
+    exterior.origin_y = 0.;
+    exterior.cells.assign(
+        static_cast<std::size_t>(exterior.width * exterior.height), 100);
+    const auto epaint = [&](int col0, int col1, int row0, int row1,
+                            std::int8_t value) {
+      for (int row = row0; row < row1; ++row)
+        for (int col = col0; col < col1; ++col)
+          exterior.cells[static_cast<std::size_t>(row * exterior.width + col)] =
+              value;
+    };
+    epaint(2, 58, 4, 18, 0);     // explored hall
+    epaint(2, 58, 18, 19, 100);  // long structural wall (no door gap)
+    epaint(2, 58, 19, 36, -1);   // unfinished room unknown
+    assert(!navigation2d::IsOpenableDoorSealCell(exterior, 30, 18));
+    const double rx = (30 + .5) * exterior.resolution;
+    const double ry = (16 + .5) * exterior.resolution;
+    const std::vector<std::pair<double, double>> through = {
+        {rx, ry},
+        {rx, (24 + .5) * exterior.resolution},
+    };
+    assert(navigation2d::PathCutsLiveOccupied(exterior, through, rx, ry));
+  }
+
   // Door-width SLAM seal: entry chord through the seal must stay legal so
   // kitchen entry probes are not rejected as "mapped obstacles".
   {

@@ -148,31 +148,32 @@ bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row) {
     if (!passable(c - px, r - py) || !passable(c + px, r + py)) return false;
     return thickness_ok(c, r, px, py);
   };
-  // Passage axis (px,py); seal runs perpendicular.
+  auto door_width_span = [&](int c, int r, int px, int py) {
+    const int lx = py, ly = px;
+    int span = 1;
+    for (int s = 1; s <= max_lat; ++s) {
+      if (!thin_passage_cell(c + s * lx, r + s * ly, px, py)) break;
+      ++span;
+    }
+    for (int s = 1; s <= max_lat; ++s) {
+      if (!thin_passage_cell(c - s * lx, r - s * ly, px, py)) break;
+      ++span;
+    }
+    return span >= min_lat && span <= max_lat;
+  };
+  // Passage axis (px,py); seal runs perpendicular. Every mouth type — including
+  // free↔unknown — needs a door-width lateral bar. Returning true for any
+  // free↔unknown thin cell treated whole exterior walls of unfinished rooms
+  // as openable, so PathCuts accepted through-wall entry probes (then dropped
+  // them mid-track — the yellow GOAL↔CARROT chords through black walls).
   auto seal_on_axis = [&](int px, int py) {
     if (!thin_passage_cell(col, row, px, py)) return false;
     const std::int8_t neg = value_at(col - px, row - py);
     const std::int8_t pos = value_at(col + px, row + py);
-    if ((neg == 0 && pos < 0) || (neg < 0 && pos == 0) || (neg < 0 && pos < 0))
-      return true;
-    if (neg == 0 && pos == 0) {
-      // Match OpenPassableOpenings: free↔free needs a door-width lateral bar.
-      // Unknown in the vestibule alone used to return true here, so structural
-      // walls beside unfinished alcoves were treated as openable seals and
-      // PathCutsLiveOccupied ignored through-wall GOAL↔CARROT chords.
-      const int lx = py, ly = px;
-      int span = 1;
-      for (int s = 1; s <= max_lat; ++s) {
-        if (!thin_passage_cell(col + s * lx, row + s * ly, px, py)) break;
-        ++span;
-      }
-      for (int s = 1; s <= max_lat; ++s) {
-        if (!thin_passage_cell(col - s * lx, row - s * ly, px, py)) break;
-        ++span;
-      }
-      return span >= min_lat && span <= max_lat;
-    }
-    return false;
+    const bool mouth = (neg == 0 && pos < 0) || (neg < 0 && pos == 0) ||
+                       (neg < 0 && pos < 0) || (neg == 0 && pos == 0);
+    if (!mouth) return false;
+    return door_width_span(col, row, px, py);
   };
   return seal_on_axis(0, 1) || seal_on_axis(1, 0);
 }
