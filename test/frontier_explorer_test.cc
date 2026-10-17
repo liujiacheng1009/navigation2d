@@ -616,6 +616,27 @@ int main() {
       hall_standoff, kx, ky, .20, .70);
   assert(kitchen_probe.has_value());
   assert(kitchen_probe->x > kg.frontier_x - .05);
+  // Doorway probe / standoff must sit mid-gap, not glued to a jamb.
+  {
+    const int pcol = static_cast<int>(std::floor(
+        (kitchen_probe->x - kitchen.origin_x) / kitchen.resolution));
+    const int prow = static_cast<int>(std::floor(
+        (kitchen_probe->y - kitchen.origin_y) / kitchen.resolution));
+    double nearest = 10.;
+    for (int row = 0; row < kitchen.height; ++row) {
+      for (int col = 0; col < kitchen.width; ++col) {
+        if (kitchen.cells[static_cast<std::size_t>(row * kitchen.width + col)] <= 0)
+          continue;
+        const double ox = (col + .5) * kitchen.resolution;
+        const double oy = (row + .5) * kitchen.resolution;
+        nearest = std::min(nearest, std::hypot(kitchen_probe->x - ox,
+                                               kitchen_probe->y - oy));
+      }
+    }
+    assert(nearest + 1e-9 >= .14);
+    (void)pcol;
+    (void)prow;
+  }
   // Probe must sit on observed free, not flooded unknown past the map.
   {
     const int pc = static_cast<int>(

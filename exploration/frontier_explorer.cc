@@ -44,10 +44,13 @@ constexpr double kVisitedFrontierRadius = .60;
 // nearest-first coverage — do not use this score to jump across the map.
 // Prefer standing near kPreferredStandoff: the old −2·standoff term rewarded
 // wall-hugging and sent the robot into side-clearance thrash mid-room.
+// Clearance pulls doorway/standoff goals off the jamb toward the free center
+// (UI: GOAL glued to the left threshold wall → stuck at the mouth).
 double ViewpointScore(double information_gain, double travel, double standoff,
-                      double gain_weight) {
+                      double gain_weight, double clearance_m = .20) {
   return gain_weight * information_gain / (0.45 + travel) -
-         2.5 * std::abs(standoff - kPreferredStandoff);
+         2.5 * std::abs(standoff - kPreferredStandoff) +
+         4.0 * std::min(clearance_m, .40);
 }
 
 }  // namespace
@@ -55,6 +58,37 @@ double ViewpointScore(double information_gain, double travel, double standoff,
 namespace navigation2d {
 
 namespace {
+
+// Distance from cell center to the nearest occupied cell (planning map).
+double OccupiedClearanceAt(const ExplorationGrid& map, int col, int row) {
+  if (map.resolution <= 0. || col < 0 || row < 0 || col >= map.width ||
+      row >= map.height)
+    return 0.;
+  if (map.cells[static_cast<std::size_t>(row) * map.width + col] != 0) return 0.;
+  const double wx = map.origin_x + (col + .5) * map.resolution;
+  const double wy = map.origin_y + (row + .5) * map.resolution;
+  const double half = .5 * map.resolution;
+  const int reach = static_cast<int>(std::ceil(.55 / map.resolution));
+  double best = .55;
+  for (int dy = -reach; dy <= reach; ++dy) {
+    for (int dx = -reach; dx <= reach; ++dx) {
+      const int x = col + dx, y = row + dy;
+      if (x < 0 || y < 0 || x >= map.width || y >= map.height) {
+        best = std::min(best, std::hypot(static_cast<double>(dx),
+                                         static_cast<double>(dy)) *
+                                  map.resolution);
+        continue;
+      }
+      if (map.cells[static_cast<std::size_t>(y) * map.width + x] <= 0) continue;
+      const double ox = map.origin_x + (x + .5) * map.resolution;
+      const double oy = map.origin_y + (y + .5) * map.resolution;
+      const double nearest_x = std::max(std::abs(wx - ox) - half, 0.);
+      const double nearest_y = std::max(std::abs(wy - oy) - half, 0.);
+      best = std::min(best, std::hypot(nearest_x, nearest_y));
+    }
+  }
+  return best;
+}
 
 // True when the frontier sits in a door/alcove throat (narrow free run), not
 // an open-boundary wall expansion. Used to prefer unfinished rooms over
@@ -1047,6 +1081,10 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
              !(narrow_viewpoint(col, row) && standoff >= kCloseStandoff))) continue;
         if (!HasFreeLineOfSight(col, row, representative % map_.width,
                                 representative / map_.width)) continue;
+        // Door/alcove standoffs that clear only 0.14 m sit on the jamb and
+        // stall at the threshold — require a usable mid-gap clearance.
+        const double clearance = OccupiedClearanceAt(map_, col, row);
+        if (narrow_viewpoint(col, row) && clearance < .16) continue;
         const double travel = travel_cells[viewpoint_index] * map_.resolution;
         const double information_gain = std::max(
             visible_unknown_gain(col, row),
@@ -1054,7 +1092,8 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
         ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
                                   frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                   information_gain,
-                                  ViewpointScore(information_gain, travel, standoff, 2.)};
+                                  ViewpointScore(information_gain, travel, standoff, 2.,
+                                                 clearance)};
         if (!best || candidate.score > best->score) best = candidate;
       }
     }
@@ -1081,6 +1120,8 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
             return HasFreeLineOfSight(col, row, cell % map_.width, cell / map_.width);
           });
           if (!sees_component) continue;
+          const double clearance = OccupiedClearanceAt(map_, col, row);
+          if (narrow_viewpoint(col, row) && clearance < .16) continue;
           const double travel = travel_cells[viewpoint_index] * map_.resolution;
           const double information_gain = std::max(
               visible_unknown_gain(col, row),
@@ -1088,7 +1129,8 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
           ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
                                     frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                     information_gain,
-                                    ViewpointScore(information_gain, travel, standoff, 1.5)};
+                                    ViewpointScore(information_gain, travel, standoff, 1.5,
+                                                   clearance)};
           if (!best || candidate.score > best->score) best = candidate;
         }
       }
@@ -1111,6 +1153,8 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
           if (Blacklisted(x, y)) continue;
           const double standoff = std::hypot(x - frontier_x, y - frontier_y);
           if (standoff < kCloseStandoff || standoff > 1.5) continue;
+          const double clearance = OccupiedClearanceAt(map_, col, row);
+          if (clearance < .14) continue;
           const double travel = travel_cells[viewpoint_index] * map_.resolution;
           const double information_gain = std::max(
               visible_unknown_gain(col, row),
@@ -1118,7 +1162,8 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
           ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
                                     frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                     information_gain,
-                                    ViewpointScore(information_gain, travel, standoff, 1.)};
+                                    ViewpointScore(information_gain, travel, standoff, 1.,
+                                                   clearance)};
           if (!best || candidate.score > best->score) best = candidate;
         }
       }
@@ -1145,6 +1190,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
             const auto [target_x, target_y] = CellCenter(target_col, target_row);
             const double standoff = std::hypot(x - target_x, y - target_y);
             if (standoff < kCloseStandoff || standoff > kApproachRadius) continue;
+            const double clearance = OccupiedClearanceAt(map_, col, row);
             const double travel = travel_cells[viewpoint_index] * map_.resolution;
             const double information_gain = std::max(
                 visible_unknown_gain(col, row),
@@ -1152,7 +1198,8 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
             ExplorationGoal candidate{x, y, std::atan2(target_y - y, target_x - x),
                                       frontier_x, frontier_y, static_cast<int>(cluster.size()),
                                       information_gain,
-                                      ViewpointScore(information_gain, travel, standoff, .8)};
+                                      ViewpointScore(information_gain, travel, standoff, .8,
+                                                     clearance)};
             if (!best || candidate.score > best->score) best = candidate;
           }
         }
@@ -1778,8 +1825,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
   }
 
   std::optional<ExplorationGoal> best;
-  double best_depth = -std::numeric_limits<double>::infinity();
-  int best_travel = std::numeric_limits<int>::max();
+  double best_score = -std::numeric_limits<double>::infinity();
   const int search = static_cast<int>(std::ceil(maximum_depth_m / map_.resolution)) + 2;
   const int frontier_col = static_cast<int>(std::floor(
       (frontier_goal.frontier_x - map_.origin_x) / map_.resolution));
@@ -1796,32 +1842,39 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
       const double relative_y = y - frontier_goal.frontier_y;
       const double depth = relative_x * direction_x + relative_y * direction_y;
       const double lateral = std::abs(relative_x * direction_y - relative_y * direction_x);
-      if (depth < minimum_depth_m || depth > maximum_depth_m || lateral > .38)
+      // Keep probes in the door throat center — .38 m lateral parked on the
+      // jamb (UI: GOAL on left threshold wall, path clear ~0.06 m).
+      if (depth < minimum_depth_m || depth > maximum_depth_m || lateral > .22)
         continue;
       // Do not select a pose that is merely on the approach side of the
       // frontier or an unrelated free cell behind a nearby wall.
       if (std::hypot(relative_x, relative_y) > maximum_depth_m + .20) continue;
-      if (depth > best_depth + .01 ||
-          (std::abs(depth - best_depth) <= .01 && distance[index] < best_travel)) {
-        best_depth = depth;
-        best_travel = distance[index];
+      const double clearance = OccupiedClearanceAt(map_, col, row);
+      if (clearance < .14) continue;
+      const double score = depth + 4.5 * clearance - 2.5 * lateral -
+                           .01 * static_cast<double>(distance[index]);
+      if (score > best_score) {
+        best_score = score;
         ExplorationGoal probe = frontier_goal;
         probe.x = x;
         probe.y = y;
         probe.yaw = std::atan2(direction_y, direction_x);
-        probe.score = depth - .01 * static_cast<double>(distance[index]);
+        probe.score = score;
         best = probe;
       }
     }
   }
   if (best) return best;
   // Geometric fallback: place the probe on the approach axis when BFS cannot
-  // reach a candidate. Uses planning Free (incl. OpenPassable flood).
+  // reach a candidate. Uses planning Free (incl. OpenPassable flood). Prefer
+  // the lateral with the largest jamb clearance, not the first hit.
   const double lateral_unit_x = -direction_y;
   const double lateral_unit_y = direction_x;
+  std::optional<ExplorationGoal> fallback;
+  double fallback_clear = -1.;
   for (double depth = minimum_depth_m; depth <= maximum_depth_m + 1e-6;
        depth += std::max(.05, map_.resolution)) {
-    for (const double lateral : {0., .10, -.10, .20, -.20}) {
+    for (const double lateral : {0., .08, -.08, .14, -.14}) {
       const double x = frontier_goal.frontier_x + depth * direction_x +
                        lateral * lateral_unit_x;
       const double y = frontier_goal.frontier_y + depth * direction_y +
@@ -1829,15 +1882,21 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
       const int col = static_cast<int>(std::floor((x - map_.origin_x) / map_.resolution));
       const int row = static_cast<int>(std::floor((y - map_.origin_y) / map_.resolution));
       if (!entry_goal(col, row)) continue;
-      ExplorationGoal probe = frontier_goal;
-      probe.x = map_.origin_x + (col + .5) * map_.resolution;
-      probe.y = map_.origin_y + (row + .5) * map_.resolution;
-      probe.yaw = std::atan2(direction_y, direction_x);
-      probe.score = depth;
-      return probe;
+      const double clearance = OccupiedClearanceAt(map_, col, row);
+      if (clearance < .14) continue;
+      if (clearance > fallback_clear) {
+        fallback_clear = clearance;
+        ExplorationGoal probe = frontier_goal;
+        probe.x = map_.origin_x + (col + .5) * map_.resolution;
+        probe.y = map_.origin_y + (row + .5) * map_.resolution;
+        probe.yaw = std::atan2(direction_y, direction_x);
+        probe.score = depth + 4.5 * clearance;
+        fallback = probe;
+      }
     }
+    if (fallback && fallback_clear >= .18) return fallback;
   }
-  return std::nullopt;
+  return fallback;
 }
 
 bool FrontierExplorer::GoalStillFrontier(const ExplorationGoal& goal) const {
