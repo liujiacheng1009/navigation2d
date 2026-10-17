@@ -93,6 +93,35 @@ double OccupiedClearanceAt(const ExplorationGrid& map, int col, int row) {
 // True when the frontier sits in a door/alcove throat (narrow free run), not
 // an open-boundary wall expansion. Used to prefer unfinished rooms over
 // nearby hallway frontier crawling.
+// True when unknown extends ≥0.55 m past a free↔unknown frontier — a room
+// pocket — rather than a 1-cell open-wall fringe. Used so wide doorways that
+// hit the free-run probe cap after OpenPassable floods are not demoted to
+// "open wall" (live: left sealed rooms left PARTIAL with candidates=0).
+bool UnknownRoomBeyond(const ExplorationGrid& map, int col, int row) {
+  if (map.resolution <= 0.) return false;
+  const int need =
+      std::max(1, static_cast<int>(std::ceil(.55 / map.resolution)));
+  auto value = [&](int c, int r) -> std::int8_t {
+    if (c < 0 || r < 0 || c >= map.width || r >= map.height) return 100;
+    return map.cells[static_cast<std::size_t>(r) * map.width + c];
+  };
+  int max_depth = 0;
+  constexpr int dx[] = {-1, 1, 0, 0};
+  constexpr int dy[] = {0, 0, -1, 1};
+  for (int direction = 0; direction < 4; ++direction) {
+    const int step_c = dx[direction];
+    const int step_r = dy[direction];
+    if (value(col + step_c, row + step_r) >= 0) continue;
+    int depth = 0;
+    for (int step = 1; step <= need + 2; ++step) {
+      if (value(col + step * step_c, row + step * step_r) >= 0) break;
+      depth = step;
+    }
+    max_depth = std::max(max_depth, depth);
+  }
+  return max_depth >= need;
+}
+
 bool CorridorMouthAt(const ExplorationGrid& map, double frontier_x,
                      double frontier_y) {
   if (map.resolution <= 0. || map.width <= 0 || map.height <= 0) return false;
@@ -117,7 +146,11 @@ bool CorridorMouthAt(const ExplorationGrid& map, double frontier_x,
   const int narrow_max = static_cast<int>(std::floor(kNarrowMaxWidth / map.resolution));
   // Open-room free space hits the probe cap on BOTH axes — that is a wall
   // expansion, not a door throat (live: gap=1.65 "easy door" on open wall).
-  if (horizontal >= narrow_max && vertical >= narrow_max) return false;
+  // Exception: a still-unknown room behind a wide free gap also caps both
+  // axes after the throat is flooded; keep those as mouths so entry is not
+  // abandoned mid-approach (live: frontier≈(-2.20,2.49) → candidates=0).
+  if (horizontal >= narrow_max && vertical >= narrow_max)
+    return UnknownRoomBeyond(map, col, row);
   const bool narrow_h = horizontal >= narrow_min && horizontal <= narrow_max;
   const bool narrow_v = vertical >= narrow_min && vertical <= narrow_max;
   const int smaller = std::min(horizontal, vertical);
@@ -2033,7 +2066,7 @@ bool FrontierExplorer::GoalRegionStillFrontier(const ExplorationGoal& goal) cons
 }
 
 void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded,
-                                     bool region_complete) {
+                                     bool region_complete, bool cool_frontier) {
   // Failure describes an attempted observation pose, not an entire doorway.
   // A distant standoff must never create a room-sized exclusion disk around
   // its frontier; other safe viewpoints on the same boundary remain useful.
@@ -2057,14 +2090,16 @@ void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded
     // same tip. Cool longer and wider so the tour moves on.
     blacklist_.push_back({goal.x, goal.y, std::max(.55, pose_radius), known,
                           2500u, false});
-    blacklist_.push_back({goal.frontier_x, goal.frontier_y, 1.10, known, 4000u,
-                          false});
+    if (cool_frontier) {
+      blacklist_.push_back(
+          {goal.frontier_x, goal.frontier_y, 1.10, known, 4000u, false});
+    }
     ++failed_goals_;
   }
 }
 
 void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded) {
-  RecordAttempt(goal, succeeded, true);
+  RecordAttempt(goal, succeeded, true, true);
 }
 
 void FrontierExplorer::CoolRegion(double x, double y, double radius_m,

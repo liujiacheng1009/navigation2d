@@ -162,8 +162,10 @@ class FrontierExplorer {
   bool GoalRegionStillFrontier(const ExplorationGoal& goal) const;
   // `region_complete` is false for a successful doorway probe: crossing an
   // entrance observes the room but does not prove the room has been swept.
+  // `cool_frontier` false cools only the viewpoint — open-wall demotes must
+  // not 1.1 m-blacklist a nearby real door (live: sealed rooms → candidates=0).
   void RecordAttempt(const ExplorationGoal& goal, bool succeeded,
-                     bool region_complete);
+                     bool region_complete, bool cool_frontier = true);
   void RecordAttempt(const ExplorationGoal& goal, bool succeeded);
   // Temporary cool-down of a local pocket (dead-end alcove crumbs) so
   // nearest-first touring cannot re-queue the same room immediately.

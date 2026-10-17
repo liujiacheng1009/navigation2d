@@ -644,11 +644,18 @@ class AutonomousExplorer final : public rclcpp::Node {
              last_planning_failure_.find("no path") != std::string::npos ||
              last_planning_failure_.find("wall-scrape") != std::string::npos ||
              last_planning_failure_.find("first-segment") != std::string::npos);
-        if (!entry_drive && !returning && !retreat_goal_ &&
-            !narrow_passage_retry_ && pinch_worthy) {
+        // Entry also pinch-retries first-segment: open-tier paths from across
+        // the room grazed jambs and abandoned sealed mouths before open-loop.
+        if (!returning && !retreat_goal_ && !narrow_passage_retry_ &&
+            pinch_worthy &&
+            (!entry_drive ||
+             last_planning_failure_.find("first-segment") != std::string::npos ||
+             last_planning_failure_.find("no route") != std::string::npos ||
+             last_planning_failure_.find("no path") != std::string::npos)) {
           narrow_passage_retry_ = true;
           RCLCPP_INFO(get_logger(),
-                      "Open clearance blocked (%s); retrying pinch clearance",
+                      "%s clearance blocked (%s); retrying pinch clearance",
+                      entry_drive ? "Entry" : "Open",
                       last_planning_failure_.c_str());
           const bool ok = StartNavigation(goal, returning, latest_map_retry);
           narrow_passage_retry_ = false;
@@ -860,6 +867,15 @@ class AutonomousExplorer final : public rclcpp::Node {
     pending_entry_goal_ = mouth;
     entry_probe_attempts_ = 0;
     entry_open_loop_ticks_ = 0;
+    // Latch easy/corridor at lock time — OpenPassable flood can make both
+    // free-run axes hit the probe cap and flip IsCorridorMouth false mid
+    // approach, which abandoned real sealed rooms (candidates=0 → PARTIAL).
+    locked_entry_easy_ = explorer_.IsCorridorMouth(mouth.frontier_x,
+                                                   mouth.frontier_y) &&
+                         explorer_.MouthGapWidth(mouth.frontier_x,
+                                                 mouth.frontier_y) >= .50 &&
+                         explorer_.MouthGapWidth(mouth.frontier_x,
+                                                 mouth.frontier_y) <= 1.40;
     entry_probe_initial_known_cells_ = KnownCells();
     entry_probe_initial_map_revision_ = map_revision_;
   }
@@ -869,6 +885,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     pending_entry_goal_.reset();
     entry_probe_attempts_ = 0;
     entry_open_loop_ticks_ = 0;
+    locked_entry_easy_ = false;
   }
 
   // Entry budget exhausted or mouth unplannable: short demote so the tour
@@ -880,9 +897,13 @@ class AutonomousExplorer final : public rclcpp::Node {
   void AbandonLockedEntryMouth(const std::string& reason) {
     Goal mouth = pending_entry_goal_.value_or(
         locked_entry_mouth_.value_or(active_goal_));
-    explorer_.RecordAttempt(mouth, false);
+    // Do not 1.1 m / 4000-cell blacklist the frontier: that hid the sealed
+    // room for the rest of the run after a first-segment miss. Cool only the
+    // viewpoint briefly so the tour can re-approach after open-loop / peel.
+    explorer_.RecordAttempt(mouth, false, true, false);
+    explorer_.CoolRegion(mouth.x, mouth.y, 0.55, 1200u);
     recently_demoted_ = mouth;
-    recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(14.0);
+    recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(8.0);
     ClearEntryMouthLock();
     constexpr double kLocalHopM = 4.0;
     const double rx = pose_ ? pose_->pose.position.x : mouth.x;
@@ -958,8 +979,10 @@ class AutonomousExplorer final : public rclcpp::Node {
   // Real door/alcove only: CorridorMouthAt AND throat in [0.50, 1.40] m.
   // Open-room free span (live gap=1.65 along a wall) is NOT a mouth — treating
   // it as "easy door" locked entry and thrash-abandoned the wrong place.
+  // Once locked, trust the latch: flooded throats flip IsCorridorMouth false.
   bool EasyLockedMouth() const {
     if (!pending_entry_goal_ && !locked_entry_mouth_) return false;
+    if (locked_entry_mouth_ && locked_entry_easy_) return true;
     const Goal& mouth =
         pending_entry_goal_.value_or(*locked_entry_mouth_);
     if (!explorer_.IsCorridorMouth(mouth.frontier_x, mouth.frontier_y))
@@ -1018,9 +1041,32 @@ class AutonomousExplorer final : public rclcpp::Node {
     // Commit to one mouth: hopping across kitchen / alcove frontiers while the
     // robot sits on the threshold produces the scribble thrash in the red box.
     if (!locked_entry_mouth_ || !SameEntryMouth(*locked_entry_mouth_, *pending_entry_goal_))
-      locked_entry_mouth_ = *pending_entry_goal_;
+      LockEntryMouth(*pending_entry_goal_);
     else
       pending_entry_goal_ = *locked_entry_mouth_;
+    // Far from the mouth: drive the hall standoff first. A long chord into the
+    // flooded nose failed first-segment replay while the chassis never moved
+    // (live: pose=(-0.70,1.12) → target=(-2.50,2.49)).
+    {
+      const double mouth_range = std::hypot(
+          pose_->pose.position.x - pending_entry_goal_->frontier_x,
+          pose_->pose.position.y - pending_entry_goal_->frontier_y);
+      if (mouth_range > 1.55) {
+        Goal approach = *pending_entry_goal_;
+        paint_driven_corridor_ = true;
+        paint_trail_budget_m_ = 8.0;
+        cooled_signatures_.clear();
+        if (StartNavigation(approach, false)) {
+          RCLCPP_INFO(get_logger(),
+                      "Entry approach standoff: frontier=(%.2f,%.2f) "
+                      "range=%.2f before poke",
+                      pending_entry_goal_->frontier_x,
+                      pending_entry_goal_->frontier_y, mouth_range);
+          PublishStatus("COMPLETING", "approaching sealed-room mouth");
+          return true;
+        }
+      }
+    }
     // Adaptive entry depth: fixed 0.55 m rejected easy shallow rooms (UI:
     // wide free doorway, SelectEntryProbe nullopt → abandon). Wide gaps use
     // a mid-gap poke; pinch mouths keep deeper probes into the nose.
@@ -1825,7 +1871,9 @@ class AutonomousExplorer final : public rclcpp::Node {
         next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
         return;
       }
-      explorer_.RecordAttempt(goal, false);
+      // Viewpoint-only cool: frontier blacklist here poisoned sealed-room
+      // mouths a metre away (gap≈2.15 open-wall spam → candidates=0).
+      explorer_.RecordAttempt(goal, false, true, false);
       recently_demoted_ = goal;
       recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(10.0);
       RCLCPP_WARN(get_logger(),
@@ -3836,6 +3884,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   bool partial_return_ = false;
   int latest_map_replans_ = 0;
   int entry_open_loop_ticks_ = 0;
+  bool locked_entry_easy_ = false;
   bool pending_region_finish_ = false;
   int first_segment_failures_at_pose_ = 0;
   int execution_stall_cycles_ = 0;
