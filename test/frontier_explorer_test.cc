@@ -1275,6 +1275,40 @@ int main() {
     assert(navigation2d::PathCutsLiveOccupied(island, through, x0, y0, .22));
   }
 
+  // Concave L-corner must not become a tour GOAL (UI: path into wall vertex).
+  {
+    navigation2d::ExplorationGrid corner;
+    corner.width = 40;
+    corner.height = 40;
+    corner.resolution = .05;
+    corner.cells.assign(static_cast<std::size_t>(corner.width * corner.height),
+                        100);
+    for (int row = 8; row < 32; ++row)
+      for (int col = 8; col < 32; ++col)
+        corner.cells[static_cast<std::size_t>(row * corner.width + col)] = 0;
+    // NW corner tip cell at (9, 30) — walls immediately north and west.
+    assert(navigation2d::IsWallCornerCell(corner, 9, 30));
+    // Mid-room open cell is not a corner.
+    assert(!navigation2d::IsWallCornerCell(corner, 20, 20));
+    // Mid-wall (south side only) is not a corner.
+    assert(!navigation2d::IsWallCornerCell(corner, 20, 9));
+    // Unknown fringe along the north edge of free space.
+    for (int col = 8; col < 32; ++col)
+      corner.cells[static_cast<std::size_t>(31 * corner.width + col)] = -1;
+    navigation2d::FrontierExplorerConfig ccfg;
+    ccfg.footprint_clearance = .22;
+    ccfg.minimum_frontier_cells = 4;
+    ccfg.minimum_standoff = .10;
+    ccfg.maximum_standoff = 1.20;
+    ccfg.required_frontier_observations = 1;
+    navigation2d::FrontierExplorer cex(ccfg);
+    cex.UpdateMap(corner);
+    const auto goals = cex.SelectGoals(1.0, 1.0);
+    for (const auto& g : goals) {
+      assert(!cex.GoalInWallCorner(g.x, g.y));
+    }
+  }
+
   // Open-wall frontier expansion is not a corridor mouth even when the free
   // span reads large (live gap=1.65 m along a wall → false "easy door").
   {

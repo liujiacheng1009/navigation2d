@@ -188,6 +188,38 @@ int OpeningCells(const ExplorationGrid& grid, int col, int row, int step_col, in
 
 }  // namespace
 
+bool IsWallCornerCell(const ExplorationGrid& map, int col, int row,
+                      double reach_m) {
+  // Concave room corner: occupied wall mass within reach on two perpendicular
+  // cardinal sides. Straight wall feet and mid-gap door cells are not corners —
+  // driving GOAL into these L-tips is pure thrash (UI: path into wall vertex).
+  if (map.resolution <= 0. || col < 0 || row < 0 || col >= map.width ||
+      row >= map.height)
+    return false;
+  if (map.cells[static_cast<std::size_t>(row) * map.width + col] != 0)
+    return false;
+  const int limit =
+      std::max(1, static_cast<int>(std::ceil(reach_m / map.resolution)));
+  auto occupied_along = [&](int step_c, int step_r) {
+    for (int step = 1; step <= limit; ++step) {
+      const int c = col + step * step_c;
+      const int r = row + step * step_r;
+      if (c < 0 || r < 0 || c >= map.width || r >= map.height) return true;
+      const std::int8_t value =
+          map.cells[static_cast<std::size_t>(r) * map.width + c];
+      if (value > 0) return true;
+      if (value < 0) return false;  // unknown breaks the wall ray
+    }
+    return false;
+  };
+  const bool north = occupied_along(0, 1);
+  const bool south = occupied_along(0, -1);
+  const bool east = occupied_along(1, 0);
+  const bool west = occupied_along(-1, 0);
+  return (north && east) || (north && west) || (south && east) ||
+         (south && west);
+}
+
 bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row) {
   if (grid.resolution <= 0. || grid.width <= 2 || grid.height <= 2 ||
       col < 0 || row < 0 || col >= grid.width || row >= grid.height ||
@@ -1146,8 +1178,10 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
                                 representative / map_.width)) continue;
         // Door/alcove standoffs that clear only 0.14 m sit on the jamb and
         // stall at the threshold — require a usable mid-gap clearance.
+        // Never nominate a concave wall corner (UI: GOAL jammed in L-tip).
+        if (IsWallCornerCell(map_, col, row)) continue;
         const double clearance = OccupiedClearanceAt(map_, col, row);
-        if (narrow_viewpoint(col, row) && clearance < .16) continue;
+        if (clearance < (narrow_viewpoint(col, row) ? .16 : .22)) continue;
         const double travel = travel_cells[viewpoint_index] * map_.resolution;
         const double information_gain = std::max(
             visible_unknown_gain(col, row),
@@ -1183,8 +1217,9 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
             return HasFreeLineOfSight(col, row, cell % map_.width, cell / map_.width);
           });
           if (!sees_component) continue;
+          if (IsWallCornerCell(map_, col, row)) continue;
           const double clearance = OccupiedClearanceAt(map_, col, row);
-          if (narrow_viewpoint(col, row) && clearance < .16) continue;
+          if (clearance < (narrow_viewpoint(col, row) ? .16 : .22)) continue;
           const double travel = travel_cells[viewpoint_index] * map_.resolution;
           const double information_gain = std::max(
               visible_unknown_gain(col, row),
@@ -1216,8 +1251,9 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
           if (Blacklisted(x, y)) continue;
           const double standoff = std::hypot(x - frontier_x, y - frontier_y);
           if (standoff < kCloseStandoff || standoff > 1.5) continue;
+          if (IsWallCornerCell(map_, col, row)) continue;
           const double clearance = OccupiedClearanceAt(map_, col, row);
-          if (clearance < .14) continue;
+          if (clearance < .16) continue;
           const double travel = travel_cells[viewpoint_index] * map_.resolution;
           const double information_gain = std::max(
               visible_unknown_gain(col, row),
@@ -1253,7 +1289,11 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
             const auto [target_x, target_y] = CellCenter(target_col, target_row);
             const double standoff = std::hypot(x - target_x, y - target_y);
             if (standoff < kCloseStandoff || standoff > kApproachRadius) continue;
+            // Last-resort used to accept corner tips with no clearance floor
+            // (live: purple path into L-vertex, GOAL on the wall).
+            if (IsWallCornerCell(map_, col, row)) continue;
             const double clearance = OccupiedClearanceAt(map_, col, row);
+            if (clearance < .22) continue;
             const double travel = travel_cells[viewpoint_index] * map_.resolution;
             const double information_gain = std::max(
                 visible_unknown_gain(col, row),
@@ -1421,10 +1461,15 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectLeftoverApproaches(
         if (leftover_suppressed(x, y)) continue;
         const double standoff = std::hypot(x - frontier_x, y - frontier_y);
         if (standoff < kCloseStandoff || standoff > kLeftoverRadius) continue;
+        if (IsWallCornerCell(map_, col, row)) continue;
+        const double clearance = OccupiedClearanceAt(map_, col, row);
+        if (clearance < .20) continue;
         const double travel = travel_cells[viewpoint_index] * map_.resolution;
         ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
                                   frontier_x, frontier_y, 1, map_.resolution,
-                                  ViewpointScore(map_.resolution, travel, standoff, .8), true};
+                                  ViewpointScore(map_.resolution, travel, standoff, .8,
+                                                 clearance),
+                                  true};
         if (!best_for_tip || candidate.score > best_for_tip->score)
           best_for_tip = candidate;
       }
@@ -1789,6 +1834,16 @@ bool FrontierExplorer::IsCorridorMouth(double frontier_x,
   return CorridorMouthAt(map_, frontier_x, frontier_y);
 }
 
+bool FrontierExplorer::GoalInWallCorner(double x, double y,
+                                        double reach_m) const {
+  if (map_.resolution <= 0. || map_.width <= 0 || map_.height <= 0) return false;
+  const int col =
+      static_cast<int>(std::floor((x - map_.origin_x) / map_.resolution));
+  const int row =
+      static_cast<int>(std::floor((y - map_.origin_y) / map_.resolution));
+  return IsWallCornerCell(map_, col, row, reach_m);
+}
+
 double FrontierExplorer::MouthFreeDepth(const ExplorationGoal& frontier_goal,
                                         double robot_x, double robot_y) const {
   if (map_.resolution <= 0. || map_.width <= 2 || map_.height <= 2) return 0.;
@@ -1982,6 +2037,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
       // Do not select a pose that is merely on the approach side of the
       // frontier or an unrelated free cell behind a nearby wall.
       if (std::hypot(relative_x, relative_y) > maximum_depth_m + .20) continue;
+      if (IsWallCornerCell(map_, col, row)) continue;
       const double clearance = OccupiedClearanceAt(map_, col, row);
       if (clearance < .14) continue;
       // Clearance dominates: mid-gap beats a deeper jamb-hugging cell.
