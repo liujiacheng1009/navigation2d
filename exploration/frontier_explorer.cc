@@ -122,7 +122,12 @@ bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row) {
   if (grid.cells[static_cast<std::size_t>(row) * grid.width + col] <= 0) return false;
   const int width = grid.width;
   const int height = grid.height;
-  const int max_thick = std::max(1, static_cast<int>(std::ceil(.20 / grid.resolution)));
+  // Match OpenPassableOpenings: unknown-touching door bleed may be ~0.35 m;
+  // free↔free false walls stay on the thin 0.20 m contract.
+  const int max_thick_free =
+      std::max(1, static_cast<int>(std::ceil(.20 / grid.resolution)));
+  const int max_thick_unknown =
+      std::max(1, static_cast<int>(std::ceil(.35 / grid.resolution)));
   const int min_lat = static_cast<int>(std::ceil(kNarrowMinWidth / grid.resolution));
   const int max_lat = static_cast<int>(std::floor(kNarrowMaxWidth / grid.resolution));
   auto value_at = [&](int c, int r) -> std::int8_t {
@@ -130,7 +135,7 @@ bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row) {
     return grid.cells[static_cast<std::size_t>(r) * width + c];
   };
   auto passable = [&](int c, int r) { return value_at(c, r) <= 0; };
-  auto thickness_ok = [&](int c, int r, int px, int py) {
+  auto thickness_ok = [&](int c, int r, int px, int py, int max_thick) {
     int thick = 1;
     for (int s = 1; s <= max_thick; ++s) {
       if (value_at(c + s * px, r + s * py) <= 0) break;
@@ -142,38 +147,41 @@ bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row) {
     }
     return thick <= max_thick;
   };
-  auto thin_passage_cell = [&](int c, int r, int px, int py) {
+  auto thin_passage_cell = [&](int c, int r, int px, int py, int max_thick) {
     if (c < 0 || r < 0 || c >= width || r >= height) return false;
     if (value_at(c, r) <= 0) return false;
     if (!passable(c - px, r - py) || !passable(c + px, r + py)) return false;
-    return thickness_ok(c, r, px, py);
+    return thickness_ok(c, r, px, py, max_thick);
   };
-  auto door_width_span = [&](int c, int r, int px, int py) {
+  auto door_width_span = [&](int c, int r, int px, int py, int max_thick) {
     const int lx = py, ly = px;
     int span = 1;
     for (int s = 1; s <= max_lat; ++s) {
-      if (!thin_passage_cell(c + s * lx, r + s * ly, px, py)) break;
+      if (!thin_passage_cell(c + s * lx, r + s * ly, px, py, max_thick)) break;
       ++span;
     }
     for (int s = 1; s <= max_lat; ++s) {
-      if (!thin_passage_cell(c - s * lx, r - s * ly, px, py)) break;
+      if (!thin_passage_cell(c - s * lx, r - s * ly, px, py, max_thick)) break;
       ++span;
     }
     return span >= min_lat && span <= max_lat;
   };
-  // Passage axis (px,py); seal runs perpendicular. Every mouth type — including
-  // free↔unknown — needs a door-width lateral bar. Returning true for any
-  // free↔unknown thin cell treated whole exterior walls of unfinished rooms
-  // as openable, so PathCuts accepted through-wall entry probes (then dropped
-  // them mid-track — the yellow GOAL↔CARROT chords through black walls).
+  // Passage axis (px,py); seal runs perpendicular. Door-width lateral span is
+  // required for every mouth type so long exterior walls stay blocked, but
+  // unknown-touching seals must use the same thickness as OpenPassable or
+  // PathCuts rejects real kitchen/alcove doors the planner just carved open.
   auto seal_on_axis = [&](int px, int py) {
-    if (!thin_passage_cell(col, row, px, py)) return false;
+    if (!passable(col - px, row - py) || !passable(col + px, row + py))
+      return false;
     const std::int8_t neg = value_at(col - px, row - py);
     const std::int8_t pos = value_at(col + px, row + py);
     const bool mouth = (neg == 0 && pos < 0) || (neg < 0 && pos == 0) ||
                        (neg < 0 && pos < 0) || (neg == 0 && pos == 0);
     if (!mouth) return false;
-    return door_width_span(col, row, px, py);
+    const int max_thick =
+        (neg < 0 || pos < 0) ? max_thick_unknown : max_thick_free;
+    if (!thin_passage_cell(col, row, px, py, max_thick)) return false;
+    return door_width_span(col, row, px, py, max_thick);
   };
   return seal_on_axis(0, 1) || seal_on_axis(1, 0);
 }
@@ -194,12 +202,18 @@ bool PathCutsLiveOccupied(const ExplorationGrid& live,
       live.cells.size() != static_cast<std::size_t>(live.width) * live.height ||
       path_xy.size() < 2 || body_radius <= 0.)
     return false;
+  // Judge obstacles on the same opened grid the planner uses. Matching only
+  // IsOpenableDoorSealCell missed jambs OpenPassable erodes, so entry into
+  // real rooms was rejected as "path intersects mapped obstacle" while the
+  // threshold stayed white.
+  ExplorationGrid opened = live;
+  OpenPassableOpenings(&opened);
   const double resolution = live.resolution;
   const int width = live.width;
   const int height = live.height;
   const auto occupied = [&](int col, int row) {
     if (col < 0 || row < 0 || col >= width || row >= height) return true;
-    return live.cells[static_cast<std::size_t>(row) * width + col] > 0;
+    return opened.cells[static_cast<std::size_t>(row) * width + col] > 0;
   };
   const auto hits_body = [&](double world_x, double world_y) {
     if (std::hypot(world_x - robot_x, world_y - robot_y) < under_robot_m)
@@ -212,7 +226,6 @@ bool PathCutsLiveOccupied(const ExplorationGrid& live,
       for (int dx = -reach; dx <= reach; ++dx) {
         const int x = col + dx, y = row + dy;
         if (!occupied(x, y)) continue;
-        if (IsOpenableDoorSealCell(live, x, y)) continue;
         const double center_x = live.origin_x + (x + .5) * resolution;
         const double center_y = live.origin_y + (y + .5) * resolution;
         const double half = .5 * resolution;
@@ -229,8 +242,7 @@ bool PathCutsLiveOccupied(const ExplorationGrid& live,
     const int col = static_cast<int>(std::floor((world_x - live.origin_x) / resolution));
     const int row = static_cast<int>(std::floor((world_y - live.origin_y) / resolution));
     if (col < 0 || row < 0 || col >= width || row >= height) return true;
-    if (!occupied(col, row)) return false;
-    return !IsOpenableDoorSealCell(live, col, row);
+    return occupied(col, row);
   };
   for (std::size_t index = 0; index < path_xy.size(); ++index) {
     const double x = path_xy[index].first;

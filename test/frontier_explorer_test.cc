@@ -659,6 +659,18 @@ int main() {
   bpaint(2, 58, 22, 36, -1);   // north kitchen unknown
   bpaint(20, 34, 18, 22, 0);   // 0.70 m mouth
   bpaint(20, 34, 20, 21, 100); // 1-cell occupied bar sealing the mouth
+  // PathCuts must agree with OpenPassable on the raw live seal (not a pre-carved
+  // copy). Using only IsOpenableDoorSealCell missed eroded jambs and left
+  // enterable rooms unvisited.
+  {
+    const double rx = (27 + .5) * barred.resolution;
+    const double ry = (17 + .5) * barred.resolution;
+    const std::vector<std::pair<double, double>> entry = {
+        {rx, ry},
+        {rx, (24 + .5) * barred.resolution},
+    };
+    assert(!navigation2d::PathCutsLiveOccupied(barred, entry, rx, ry));
+  }
   // Before carving, PathCuts must treat the bar as an openable door seal.
   assert(navigation2d::IsOpenableDoorSealCell(barred, 27, 20));
   navigation2d::OpenPassableOpenings(&barred);

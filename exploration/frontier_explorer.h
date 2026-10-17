@@ -28,16 +28,17 @@ struct ExplorationGrid {
 // wider unknown room, and a gap the chassis cannot enter stay as mapped.
 void OpenPassableOpenings(ExplorationGrid* grid);
 
-// True when this occupied cell is a thin door-width SLAM seal (passable on both
-// passage sides, door thickness, lateral span in [0.32, 1.40] m). Long
-// free↔unknown exterior walls are not seals — PathCuts must still reject
-// through-wall chords into unfinished rooms.
+// True when this occupied cell is a door-width SLAM seal (passable on both
+// passage sides, lateral span in [0.32, 1.40] m). Unknown-touching seals may
+// be up to ~0.35 m thick (OpenPassable bleed); free↔free seals stay ≤0.20 m.
+// Long exterior walls are not seals — PathCuts still rejects through-wall
+// chords that are not real door mouths.
 bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row);
 
-// True when a world-frame polyline puts the body on a LIVE occupied cell that
-// is not an openable door seal. Used for entry and mid-tour alike — skipping
-// entry published through-wall GOAL↔CARROT chords. under_robot_m only covers
-// the chassis footprint (SLAM bleed under the base), not a doorway disk.
+// True when a world-frame polyline puts the body on an occupied cell that
+// OpenPassableOpenings would leave lethal. Door seals the planner carves are
+// ignored so entry into real rooms is not rejected; structural through-wall
+// chords still fail. under_robot_m covers chassis SLAM bleed only.
 bool PathCutsLiveOccupied(const ExplorationGrid& live,
                           const std::vector<std::pair<double, double>>& path_xy,
                           double robot_x, double robot_y,

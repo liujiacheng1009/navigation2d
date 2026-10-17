@@ -1651,21 +1651,17 @@ class AutonomousExplorer final : public rclcpp::Node {
     // entry. Demoting here was the hesitation loop (probe A → cut → mouth B → …).
     if (locked_entry_mouth_ || pending_entry_goal_) {
       if (!pending_entry_goal_) pending_entry_goal_ = locked_entry_mouth_;
-      // One banned-chord retry only. Further retreat→retry shuttles are the
-      // red-box back-and-forth; leave the mouth for other unfinished work.
-      if (entry_probe_attempts_ < 2 && StartEntryProbe()) {
+      // Retry deeper probes with the banned chord kept. Do not retreat then
+      // re-probe (red-box shuttle). After the depth budget, demote without an
+      // extra CoolRegion — RecordAttempt already cools the mouth, and stacking
+      // wide cools hid enterable rooms for the rest of the mission.
+      if (entry_probe_attempts_ < 4 && StartEntryProbe()) {
         PublishStatus("COMPLETING", "path cut; retrying locked mouth with banned chord");
         return true;
       }
       explorer_.RecordAttempt(*pending_entry_goal_, false);
       recently_demoted_ = *pending_entry_goal_;
       recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(8.0);
-      if (pose_) {
-        explorer_.CoolRegion(pending_entry_goal_->x, pending_entry_goal_->y, 1.20,
-                             2000u);
-        explorer_.CoolRegion(pending_entry_goal_->frontier_x,
-                             pending_entry_goal_->frontier_y, 1.20, 2000u);
-      }
       ClearEntryMouthLock();
       committed_tour_.clear();
       next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
