@@ -401,6 +401,10 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
     } else {
       soft_unlocked = true;
       constexpr double kSoftUnlockPreferM = 4.0;
+      // When tip-local mouths force a leave, still prefer unfinished rooms in
+      // the local wing (~8 m) over apartment-crossing hops (log: tip at
+      // (-4.8,-2.2) → (-0.3,4.1) while siblings sat a few metres away).
+      constexpr double kSoftUnlockLocalWingM = 8.0;
       std::vector<ExplorationGoal> nearby;
       std::vector<ExplorationGoal> far;
       nearby.reserve(goals.size());
@@ -419,7 +423,16 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
             });
         // Tip-local mouths alone would win the nearby filter forever; leave
         // the exhausted pocket for unfinished rooms elsewhere.
-        goals = nearby_only_tip ? std::move(far) : std::move(nearby);
+        if (nearby_only_tip) {
+          std::vector<ExplorationGoal> wing;
+          for (const auto& g : far) {
+            if (std::hypot(g.x - x, g.y - y) <= kSoftUnlockLocalWingM)
+              wing.push_back(g);
+          }
+          goals = !wing.empty() ? std::move(wing) : std::move(far);
+        } else {
+          goals = std::move(nearby);
+        }
       } else if (!nearby.empty()) {
         goals = std::move(nearby);
       }

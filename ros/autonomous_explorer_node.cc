@@ -739,9 +739,11 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   // Entry budget exhausted or mouth unplannable: short demote so the tour
-  // cannot immediately re-drive the same hall→threshold shuttle. RecordAttempt
-  // already cools the mouth — do not stack a 1.5 m / multi-minute CoolRegion
-  // that hides an enterable kitchen for the rest of the mission.
+  // cannot immediately re-drive the same hall→threshold shuttle. Keep the
+  // remaining tour — clearing it forced BuildTour to hop across the map to a
+  // far sibling while the kitchen mouth was only briefly demoted (冤枉路).
+  // Far mouths that were already queued stay, but local unfinished mouths
+  // are rotated to the front so we do not leave the pocket for a detour.
   void AbandonLockedEntryMouth(const std::string& reason) {
     Goal mouth = pending_entry_goal_.value_or(
         locked_entry_mouth_.value_or(active_goal_));
@@ -749,7 +751,49 @@ class AutonomousExplorer final : public rclcpp::Node {
     recently_demoted_ = mouth;
     recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(8.0);
     ClearEntryMouthLock();
+    constexpr double kLocalHopM = 4.0;
+    const double rx = pose_ ? pose_->pose.position.x : mouth.x;
+    const double ry = pose_ ? pose_->pose.position.y : mouth.y;
+    const auto is_local = [&](const Goal& goal) {
+      return std::hypot(goal.x - rx, goal.y - ry) <= kLocalHopM ||
+             std::hypot(goal.frontier_x - mouth.frontier_x,
+                        goal.frontier_y - mouth.frontier_y) <= kLocalHopM ||
+             explorer_.GoalInActiveRegion(goal);
+    };
+    std::deque<Goal> local;
+    std::deque<Goal> far;
+    for (const auto& goal : committed_tour_) {
+      if (SameEntryMouth(goal, mouth)) continue;
+      if (is_local(goal))
+        local.push_back(goal);
+      else
+        far.push_back(goal);
+    }
+    // Pull in any other executable mouths near the abandoned doorway that
+    // were not yet on the tour (e.g. a second kitchen tip).
+    if (pose_) {
+      auto mouths = explorer_.SelectGoals(rx, ry);
+      mouths = explorer_.OrderByRegion(std::move(mouths), rx, ry,
+                                       Yaw(pose_->pose.orientation));
+      for (const auto& candidate : mouths) {
+        if (SameEntryMouth(candidate, mouth) || !is_local(candidate)) continue;
+        const bool duplicate = std::any_of(
+            local.begin(), local.end(), [&](const Goal& prior) {
+              return SameEntryMouth(prior, candidate);
+            });
+        if (!duplicate) local.push_back(candidate);
+      }
+      if (local.empty()) {
+        for (const auto& candidate : mouths) {
+          if (SameEntryMouth(candidate, mouth)) continue;
+          far.push_back(candidate);
+          break;
+        }
+      }
+    }
     committed_tour_.clear();
+    for (auto& goal : local) committed_tour_.push_back(std::move(goal));
+    for (auto& goal : far) committed_tour_.push_back(std::move(goal));
     next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
     PublishStatus("SELECTING", reason);
   }
@@ -1622,21 +1666,61 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   bool AbandonWallTipAfterPathCut(const char* reason) {
+    // Log showed: tip (-4.79,-2.22) path-cut → CoolRegion(robot, 1.5 m) froze
+    // every local mouth → BuildTour hopped to (-0.33,4.13) across the map.
+    // Cool only the tip itself; keep nearby unfinished siblings on the tour.
     RCLCPP_WARN(get_logger(), "%s", reason);
-    explorer_.RecordAttempt(active_goal_, false);
-    recently_demoted_ = active_goal_;
+    const Goal tip = active_goal_;
+    explorer_.RecordAttempt(tip, false);
+    recently_demoted_ = tip;
     recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(10.0);
-    if (pose_) {
-      explorer_.CoolRegion(active_goal_.x, active_goal_.y, 1.50, 2500u);
-      explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 1.50,
-                           2500u);
-      explorer_.CoolRegion(pose_->pose.position.x, pose_->pose.position.y, 1.50,
-                           2500u);
-    }
+    explorer_.CoolRegion(tip.x, tip.y, 0.80, 1800u);
+    explorer_.CoolRegion(tip.frontier_x, tip.frontier_y, 0.80, 1800u);
     ClearEntryMouthLock();
     navigation_.reset();
     recovery_.Clear();
+    constexpr double kLocalHopM = 4.0;
+    const double rx = pose_ ? pose_->pose.position.x : tip.x;
+    const double ry = pose_ ? pose_->pose.position.y : tip.y;
+    const auto is_local = [&](const Goal& goal) {
+      return std::hypot(goal.x - rx, goal.y - ry) <= kLocalHopM ||
+             std::hypot(goal.frontier_x - tip.frontier_x,
+                        goal.frontier_y - tip.frontier_y) <= kLocalHopM;
+    };
+    std::deque<Goal> local;
+    std::deque<Goal> far;
+    for (const auto& goal : committed_tour_) {
+      if (SameEntryMouth(goal, tip) || RecentlyDemoted(goal)) continue;
+      if (is_local(goal))
+        local.push_back(goal);
+      else
+        far.push_back(goal);
+    }
+    if (pose_) {
+      auto mouths = explorer_.SelectGoals(rx, ry);
+      mouths = explorer_.OrderByRegion(std::move(mouths), rx, ry,
+                                       Yaw(pose_->pose.orientation));
+      for (const auto& candidate : mouths) {
+        if (SameEntryMouth(candidate, tip) || RecentlyDemoted(candidate))
+          continue;
+        if (!is_local(candidate)) continue;
+        const bool duplicate = std::any_of(
+            local.begin(), local.end(),
+            [&](const Goal& prior) { return SameEntryMouth(prior, candidate); });
+        if (!duplicate) local.push_back(candidate);
+      }
+      if (local.empty()) {
+        for (const auto& candidate : mouths) {
+          if (SameEntryMouth(candidate, tip) || RecentlyDemoted(candidate))
+            continue;
+          far.push_back(candidate);
+          break;
+        }
+      }
+    }
     committed_tour_.clear();
+    for (auto& goal : local) committed_tour_.push_back(std::move(goal));
+    for (auto& goal : far) committed_tour_.push_back(std::move(goal));
     cooled_signatures_.clear();
     latest_map_replans_ = 0;
     mapped_obstacle_rejects_ = 0;
