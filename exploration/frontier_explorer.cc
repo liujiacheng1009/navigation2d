@@ -130,17 +130,6 @@ bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row) {
     return grid.cells[static_cast<std::size_t>(r) * width + c];
   };
   auto passable = [&](int c, int r) { return value_at(c, r) <= 0; };
-  auto passage_reaches_unknown = [&](int c, int r, int px, int py, int dir) {
-    for (int step = 1; step <= 4; ++step) {
-      const int nc = c + dir * step * px;
-      const int nr = r + dir * step * py;
-      if (nc < 0 || nr < 0 || nc >= width || nr >= height) return false;
-      const std::int8_t value = value_at(nc, nr);
-      if (value < 0) return true;
-      if (value > 0) return false;
-    }
-    return false;
-  };
   auto thickness_ok = [&](int c, int r, int px, int py) {
     int thick = 1;
     for (int s = 1; s <= max_thick; ++s) {
@@ -167,12 +156,10 @@ bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row) {
     if ((neg == 0 && pos < 0) || (neg < 0 && pos == 0) || (neg < 0 && pos < 0))
       return true;
     if (neg == 0 && pos == 0) {
-      // Still openable after both rooms are explored: require a door-width
-      // lateral bar so PathCuts can re-enter kitchens / return home. Isolated
-      // free↔free speckles (furniture legs) stay blocked.
-      if (passage_reaches_unknown(col, row, px, py, 1) ||
-          passage_reaches_unknown(col, row, px, py, -1))
-        return true;
+      // Match OpenPassableOpenings: free↔free needs a door-width lateral bar.
+      // Unknown in the vestibule alone used to return true here, so structural
+      // walls beside unfinished alcoves were treated as openable seals and
+      // PathCutsLiveOccupied ignored through-wall GOAL↔CARROT chords.
       const int lx = py, ly = px;
       int span = 1;
       for (int s = 1; s <= max_lat; ++s) {

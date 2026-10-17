@@ -871,6 +871,39 @@ int main() {
                                                robot_y));
   }
 
+  // Structural free↔free wall with unknown only a few cells past a short free
+  // vestibule (unfinished alcove). Must NOT count as an openable door seal —
+  // the old unknown-alone branch let PathCuts ignore through-wall chords.
+  {
+    navigation2d::ExplorationGrid alcove_wall;
+    alcove_wall.width = 60;
+    alcove_wall.height = 40;
+    alcove_wall.resolution = .05;
+    alcove_wall.origin_x = 0.;
+    alcove_wall.origin_y = 0.;
+    alcove_wall.cells.assign(
+        static_cast<std::size_t>(alcove_wall.width * alcove_wall.height), 100);
+    const auto apaint = [&](int col0, int col1, int row0, int row1,
+                            std::int8_t value) {
+      for (int row = row0; row < row1; ++row)
+        for (int col = col0; col < col1; ++col)
+          alcove_wall.cells[static_cast<std::size_t>(row * alcove_wall.width +
+                                                     col)] = value;
+    };
+    apaint(2, 58, 4, 18, 0);     // south free
+    apaint(2, 58, 18, 19, 100);  // continuous structural wall
+    apaint(2, 58, 19, 22, 0);    // short free vestibule north of wall
+    apaint(2, 58, 22, 36, -1);   // unfinished unknown within 4 cells of wall
+    assert(!navigation2d::IsOpenableDoorSealCell(alcove_wall, 30, 18));
+    const double rx = (30 + .5) * alcove_wall.resolution;
+    const double ry = (16 + .5) * alcove_wall.resolution;
+    const std::vector<std::pair<double, double>> through = {
+        {rx, ry},
+        {rx, (24 + .5) * alcove_wall.resolution},
+    };
+    assert(navigation2d::PathCutsLiveOccupied(alcove_wall, through, rx, ry));
+  }
+
   // Door-width SLAM seal: entry chord through the seal must stay legal so
   // kitchen entry probes are not rejected as "mapped obstacles".
   {
