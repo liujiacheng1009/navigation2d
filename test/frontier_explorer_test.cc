@@ -1352,6 +1352,54 @@ int main() {
     assert(goals.front().frontier_x > 1.8);
   }
 
+  // Unfinished room that grazes the map crop (touches border) must still
+  // count as useful — only the largest border-touching outdoor blob is
+  // exterior. Marking every border-touching CC zeroed tour candidates.
+  {
+    navigation2d::ExplorationGrid crop;
+    crop.width = 50;
+    crop.height = 40;
+    crop.resolution = .05;
+    crop.cells.assign(static_cast<std::size_t>(crop.width * crop.height), 100);
+    // Large outdoor unknown along the north border.
+    for (int row = 0; row < 6; ++row)
+      for (int col = 0; col < crop.width; ++col)
+        crop.cells[static_cast<std::size_t>(row * crop.width + col)] = -1;
+    for (int row = 6; row < crop.height; ++row)
+      for (int col = 0; col < 4; ++col)
+        crop.cells[static_cast<std::size_t>(row * crop.width + col)] = -1;
+    // Explored hallway.
+    for (int row = 10; row < 30; ++row)
+      for (int col = 8; col < 24; ++col)
+        crop.cells[static_cast<std::size_t>(row * crop.width + col)] = 0;
+    // Unfinished room on the east map edge (touches border) — smaller than
+    // the outdoor blob, so it must remain useful.
+    for (int row = 14; row < 26; ++row)
+      for (int col = 28; col < crop.width; ++col)
+        crop.cells[static_cast<std::size_t>(row * crop.width + col)] = -1;
+    for (int row = 18; row < 22; ++row)
+      for (int col = 24; col < 28; ++col)
+        crop.cells[static_cast<std::size_t>(row * crop.width + col)] = 0;
+    const double room_gain =
+        navigation2d::UsefulVisibleUnknownGain(crop, 25, 20);
+    const double outdoor_tip =
+        navigation2d::UsefulVisibleUnknownGain(crop, 10, 12);
+    assert(room_gain > .12);
+    assert(outdoor_tip < .05);
+    navigation2d::FrontierExplorerConfig ccfg;
+    ccfg.footprint_clearance = .22;
+    ccfg.minimum_frontier_cells = 4;
+    ccfg.minimum_standoff = .10;
+    ccfg.maximum_standoff = 1.20;
+    ccfg.required_frontier_observations = 1;
+    navigation2d::FrontierExplorer cex(ccfg);
+    cex.UpdateMap(crop);
+    const auto crop_goals =
+        cex.SelectGoals((14 + .5) * crop.resolution, (20 + .5) * crop.resolution);
+    assert(!crop_goals.empty());
+    assert(crop_goals.front().frontier_x > 1.2);
+  }
+
   // Open-wall frontier expansion is not a corridor mouth even when the free
   // span reads large (live gap=1.65 m along a wall → false "easy door").
   {

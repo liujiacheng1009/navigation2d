@@ -190,10 +190,10 @@ int OpeningCells(const ExplorationGrid& grid, int col, int row, int step_col, in
 
 namespace {
 
-// Unknown cells in exterior void (4-connected CC that touches the map border).
-// Interior sealed pockets stay clear so NBV can score finishable rooms.
-// "Largest CC" alone is not used: equal-sized sealed rooms and large unfinished
-// wings would be mislabeled as exterior and scored to zero.
+// Exterior void = the single largest unknown CC that also touches the map
+// border (outdoor blob). Marking *every* border-touching CC as exterior was
+// wrong: map crops make unfinished rooms graze the grid edge, useful gain
+// collapsed to ~0, and the robot spun with an empty tour.
 std::vector<unsigned char> ExteriorUnknownMask(const ExplorationGrid& map) {
   const int width = map.width;
   const int height = map.height;
@@ -204,6 +204,7 @@ std::vector<unsigned char> ExteriorUnknownMask(const ExplorationGrid& map) {
       map.resolution <= 0.)
     return exterior;
   std::vector<int> label(static_cast<std::size_t>(n), -1);
+  std::vector<int> sizes;
   std::vector<unsigned char> touches_border;
   constexpr int dx[] = {-1, 1, 0, 0};
   constexpr int dy[] = {0, 0, -1, 1};
@@ -216,10 +217,12 @@ std::vector<unsigned char> ExteriorUnknownMask(const ExplorationGrid& map) {
         continue;
       std::deque<int> queue{seed};
       label[static_cast<std::size_t>(seed)] = next_label;
+      int size = 0;
       bool border = false;
       while (!queue.empty()) {
         const int current = queue.front();
         queue.pop_front();
+        ++size;
         const int r = current / width;
         const int c = current % width;
         if (c == 0 || r == 0 || c == width - 1 || r == height - 1) border = true;
@@ -235,15 +238,24 @@ std::vector<unsigned char> ExteriorUnknownMask(const ExplorationGrid& map) {
           queue.push_back(next);
         }
       }
+      sizes.push_back(size);
       touches_border.push_back(border ? 1 : 0);
       ++next_label;
     }
   }
-  if (touches_border.empty()) return exterior;
+  if (sizes.empty()) return exterior;
+  int exterior_id = -1;
+  int exterior_size = 0;
+  for (int i = 0; i < static_cast<int>(sizes.size()); ++i) {
+    if (!touches_border[static_cast<std::size_t>(i)]) continue;
+    if (sizes[static_cast<std::size_t>(i)] > exterior_size) {
+      exterior_size = sizes[static_cast<std::size_t>(i)];
+      exterior_id = i;
+    }
+  }
+  if (exterior_id < 0) return exterior;
   for (int i = 0; i < n; ++i) {
-    const int id = label[static_cast<std::size_t>(i)];
-    if (id < 0) continue;
-    if (touches_border[static_cast<std::size_t>(id)])
+    if (label[static_cast<std::size_t>(i)] == exterior_id)
       exterior[static_cast<std::size_t>(i)] = 1;
   }
   return exterior;
@@ -268,10 +280,11 @@ double VisibleUnknownGainMasked(const ExplorationGrid& map, int col, int row,
       const int index = y * map.width + x;
       if (map.cells[static_cast<std::size_t>(index)] > 50) break;
       if (map.cells[static_cast<std::size_t>(index)] < 0) {
+        // Do not see "through" outdoor void into unrelated pockets.
         if (exterior != nullptr &&
             index < static_cast<int>(exterior->size()) &&
             (*exterior)[static_cast<std::size_t>(index)])
-          continue;
+          break;
         seen[static_cast<std::size_t>(index)] = 1;
       }
     }
@@ -1083,9 +1096,9 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
     }
   }
   // NBV gain: unique unknown cells before the first occupied hit on each ray.
-  // Exterior void (border-touching unknown CC) is not finishable — score only
-  // sealed interior unknown. Early expansion (no interior unknown yet) falls
-  // back to raw visible unknown so the map can still grow.
+  // Exterior void (largest border-touching unknown CC) is not finishable —
+  // score finishable rooms instead. Early expansion (no non-exterior unknown
+  // yet) falls back to raw visible unknown so the map can still grow.
   const auto exterior_unknown = ExteriorUnknownMask(observation_map_);
   bool has_interior_unknown = false;
   for (std::size_t i = 0; i < observation_map_.cells.size(); ++i) {

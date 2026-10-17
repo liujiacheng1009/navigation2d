@@ -32,9 +32,10 @@ void OpenPassableOpenings(ExplorationGrid* grid);
 // wrap at an end) are not seals.
 bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row);
 
-// Visible unknown area (m²) from (col, row) excluding exterior void: unknown
-// 4-connected components that touch the map border. Sealed interior pockets
-// still count; open-wall fringe into exterior does not.
+// Visible unknown area (m²) from (col, row) excluding exterior void: the
+// largest unknown 4-connected component that also touches the map border.
+// Unfinished rooms that merely graze the map crop stay countable; open-wall
+// fringe into the outdoor blob does not.
 double UsefulVisibleUnknownGain(const ExplorationGrid& map, int col, int row);
 
 // True when a world-frame polyline puts the body on a cell that remains
