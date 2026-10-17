@@ -375,11 +375,12 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
   // may wait here. The navigation planner remains authoritative for safety.
   if (preferred && regions_.at(preferred).state == RegionState::kWaiting &&
       goals.empty()) return {};
-  // Unfinished active room owns the tour while it still has executable mouths
-  // (or child work). When the preferred region is BLOCKED — raw frontiers but
-  // zero in-region candidates — hard-locking discarded large PENDING sibling
-  // rooms. Soft-unlock keeps the stack but only admits nearby forward siblings
-  // so the robot does not U-turn across the apartment.
+  // Unfinished PENDING/ACTIVE rooms hard-lock while they still have executable
+  // mouths. BLOCKED tips (raw frontiers, often unproductive tip thrash) must
+  // soft-unlock: hard-locking them discarded large unfinished sibling rooms
+  // and returned an empty tour (PARTIAL) while white alcoves remained visible.
+  // Soft-unlock prefers nearby siblings, but keeps farther unfinished rooms
+  // when nothing is within range — the old 4 m erase returned {} at ~4–8 m.
   bool soft_unlocked = false;
   if (preferred && regions_.at(preferred).frontier_cells > 0) {
     const bool preferred_has_mouths =
@@ -387,7 +388,10 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
         std::any_of(goals.begin(), goals.end(), [&](const ExplorationGoal& g) {
           return descendant(g.region_id, preferred);
         });
-    if (preferred_has_mouths) {
+    const bool hard_lock =
+        preferred_has_mouths &&
+        regions_.at(preferred).state != RegionState::kBlocked;
+    if (hard_lock) {
       goals.erase(std::remove_if(goals.begin(), goals.end(),
                                  [&](const ExplorationGoal& g) {
                                    return !descendant(g.region_id, preferred);
@@ -396,13 +400,30 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
       if (goals.empty()) return {};
     } else {
       soft_unlocked = true;
-      constexpr double kSoftUnlockMaxM = 4.0;
-      goals.erase(std::remove_if(goals.begin(), goals.end(),
-                                 [&](const ExplorationGoal& g) {
-                                   const double d = std::hypot(g.x - x, g.y - y);
-                                   return d > kSoftUnlockMaxM;
-                                 }),
-                  goals.end());
+      constexpr double kSoftUnlockPreferM = 4.0;
+      std::vector<ExplorationGoal> nearby;
+      std::vector<ExplorationGoal> far;
+      nearby.reserve(goals.size());
+      far.reserve(goals.size());
+      for (const auto& g : goals) {
+        if (std::hypot(g.x - x, g.y - y) <= kSoftUnlockPreferM)
+          nearby.push_back(g);
+        else
+          far.push_back(g);
+      }
+      if (!nearby.empty() && !far.empty() &&
+          regions_.at(preferred).state == RegionState::kBlocked) {
+        const bool nearby_only_tip = std::all_of(
+            nearby.begin(), nearby.end(), [&](const ExplorationGoal& g) {
+              return descendant(g.region_id, preferred);
+            });
+        // Tip-local mouths alone would win the nearby filter forever; leave
+        // the exhausted pocket for unfinished rooms elsewhere.
+        goals = nearby_only_tip ? std::move(far) : std::move(nearby);
+      } else if (!nearby.empty()) {
+        goals = std::move(nearby);
+      }
+      // else: keep all goals (far-only unfinished rooms)
       if (goals.empty()) return {};
     }
   }
@@ -442,10 +463,15 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
     const bool far_pocket =
         std::min(distance, frontier_range) > kLocalPocketM;
     // Soft-unlock: any large reverse is a wasted U-turn; hard-lock keeps the
-    // older "local tip behind OK" contract.
+    // older "local tip behind OK" contract. BLOCKED tip mouths sort after
+    // unfinished sibling rooms so tip thrash cannot starve coverage.
     const bool reverse = use_heading && turn > 1.75 &&
                          (soft_unlocked || far_pocket);
-    return std::tuple(preferred && !descendant(g.region_id, preferred),
+    const bool tip_mouth =
+        soft_unlocked && preferred && descendant(g.region_id, preferred);
+    return std::tuple(tip_mouth,
+                      !soft_unlocked && preferred &&
+                          !descendant(g.region_id, preferred),
                       soft_unlocked && reverse, far_pocket, reverse, turn,
                       depth(g.region_id), distance - .20 * gain_per_meter,
                       -gain_per_meter, g.region_id, g.x, g.y);

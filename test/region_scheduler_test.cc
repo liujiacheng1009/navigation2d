@@ -143,5 +143,27 @@ int main() {
   assert(soft.front().region_id == right);
   assert(finish_first.ActiveRegion() == left);
   assert(finish_first.regions().at(left).frontier_cells > 0);
+
+  // Far unfinished room beyond the old 4 m soft-unlock erase must still be
+  // admitted — returning {} here caused PARTIAL while visible alcoves remained.
+  navigation2d::ExplorationGoal farther = right_high;
+  farther.x = 5.5;
+  farther.y = 1.2;
+  farther.frontier_x = 5.5;
+  farther.frontier_y = 1.2;
+  const auto far_only = finish_first.Order({farther}, .8, 1.2);
+  assert(!far_only.empty());
+  assert(far_only.front().region_id == right);
+  assert(finish_first.ActiveRegion() == left);
+
+  // BLOCKED tip with a local mouth must not starve a large unfinished sibling:
+  // tip thrash ranks after coverage work elsewhere.
+  navigation2d::ExplorationGoal tip_mouth = left_low;
+  tip_mouth.score = 50.;
+  tip_mouth.information_gain = 50.;
+  const auto leave_tip = finish_first.Order({tip_mouth, farther}, .8, 1.2);
+  assert(!leave_tip.empty());
+  assert(leave_tip.front().region_id == right);
+  assert(finish_first.ActiveRegion() == left);
   return 0;
 }
