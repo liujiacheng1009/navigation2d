@@ -717,6 +717,30 @@ int main() {
   assert(wide_hall.cells[20 * wide_hall.width + 37] == 0);
   assert(wide_hall.cells[24 * wide_hall.width + 37] == 0);
 
+  // Structural free↔free wall with unknown only far beyond a deep free room
+  // must NOT be carved — that invented through-wall planner chords.
+  {
+    navigation2d::ExplorationGrid structural;
+    structural.width = 60;
+    structural.height = 40;
+    structural.resolution = .05;
+    structural.cells.assign(
+        static_cast<std::size_t>(structural.width * structural.height), 100);
+    const auto spaint = [&](int col0, int col1, int row0, int row1, std::int8_t value) {
+      for (int row = row0; row < row1; ++row)
+        for (int col = col0; col < col1; ++col)
+          structural.cells[static_cast<std::size_t>(row * structural.width + col)] =
+              value;
+    };
+    spaint(2, 58, 4, 18, 0);      // south room free
+    spaint(2, 58, 19, 30, 0);     // north room free (wall at row 18)
+    spaint(2, 58, 18, 19, 100);   // continuous structural wall
+    spaint(2, 58, 30, 38, -1);    // unknown only deep past free north room
+    navigation2d::OpenPassableOpenings(&structural);
+    // Wall cells must remain occupied (not opened as a fake door).
+    assert(structural.cells[18 * structural.width + 30] == 100);
+  }
+
   // Production open-room config: viewpoints must stay off the wall rim.
   // Mapping observes frontiers from mid-room; min standoff 0.45 m.
   {

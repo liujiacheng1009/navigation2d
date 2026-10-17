@@ -236,10 +236,11 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
           auto cell = [&](int bb) {
             return lx != 0 ? std::pair<int, int>{bb, a} : std::pair<int, int>{a, bb};
           };
-          // Look farther than a short vestibule: rooms often have ~0.5–0.8 m of
-          // free before white unknown, which the old 4-cell look-ahead missed.
+          // Immediate vestibule only. Looking ~0.6 m through free space past a
+          // real wall found distant unknown and carved structural walls into
+          // "doors" (cyan chords through black walls on the live map).
           auto passage_reaches_unknown = [&](int c, int r, int dir) {
-            for (int step = 1; step <= 12; ++step) {
+            for (int step = 1; step <= 4; ++step) {
               const int nc = c + dir * step * px;
               const int nr = r + dir * step * py;
               if (nc < 0 || nr < 0 || nc >= width || nr >= height) return false;
@@ -248,6 +249,25 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
               if (value > 0) return false;
             }
             return false;
+          };
+          auto door_width_span_at = [&](int c, int r) {
+            const int lx = py, ly = px;
+            int span = 1;
+            for (int s = 1; s <= max_lat; ++s) {
+              const int nc = c + s * lx, nr = r + s * ly;
+              if (nc < 0 || nr < 0 || nc >= width || nr >= height) break;
+              if (value_at(nc, nr) <= 0) break;
+              if (!passable(nc - px, nr - py) || !passable(nc + px, nr + py)) break;
+              ++span;
+            }
+            for (int s = 1; s <= max_lat; ++s) {
+              const int nc = c - s * lx, nr = r - s * ly;
+              if (nc < 0 || nr < 0 || nc >= width || nr >= height) break;
+              if (value_at(nc, nr) <= 0) break;
+              if (!passable(nc - px, nr - py) || !passable(nc + px, nr + py)) break;
+              ++span;
+            }
+            return span >= min_lat && span <= max_lat;
           };
           auto seal_cell = [&](int bb) {
             const auto [c, r] = cell(bb);
@@ -259,12 +279,12 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
             if ((neg == 0 && pos < 0) || (neg < 0 && pos == 0) ||
                 (neg < 0 && pos < 0))
               return true;
-            // free↔free only when unknown sits just beyond the vestibule.
-            // Carving free↔free walls between explored rooms invented chords
-            // that PathCutsMappedObstacle then rejected in a stuck loop.
+            // free↔free: only thin door-width bars with unknown immediately
+            // beyond a short vestibule. Never carve long structural walls.
             if (neg == 0 && pos == 0)
-              return passage_reaches_unknown(c, r, 1) ||
-                     passage_reaches_unknown(c, r, -1);
+              return door_width_span_at(c, r) &&
+                     (passage_reaches_unknown(c, r, 1) ||
+                      passage_reaches_unknown(c, r, -1));
             return false;
           };
           if (!seal_cell(b)) { ++b; continue; }

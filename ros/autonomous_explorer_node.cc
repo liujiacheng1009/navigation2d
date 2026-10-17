@@ -1948,10 +1948,10 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   bool PathCutsMappedObstacle() const {
-    // Align with the planner snapshot: reject only cells that remain occupied
-    // AFTER the same OpenPassableOpenings carve (+ driven trail). Checking the
-    // raw live map against a path planned on the carved copy caused kitchen /
-    // return thrash (plan OK → PathCuts drop → replan forever).
+    // Validate against the LIVE occupancy grid. Full OpenPassable carve here
+    // previously let falsely opened structural walls look free, so theta*
+    // chords through black walls were accepted. Thin door bars remain
+    // crossable via IsOpenableDoorSealCell; entry/return skip this check.
     if (pending_entry_goal_ || returning_) return false;
     if (!navigation_ || !map_ || map_->info.resolution <= 0.) return false;
     const auto& route = navigation_->path();
@@ -1961,39 +1961,20 @@ class AutonomousExplorer final : public rclcpp::Node {
     const double origin_y = map_->info.origin.position.y;
     const int width = static_cast<int>(map_->info.width);
     const int height = static_cast<int>(map_->info.height);
-    navigation2d::ExplorationGrid planning;
-    planning.width = width;
-    planning.height = height;
-    planning.resolution = resolution;
-    planning.origin_x = origin_x;
-    planning.origin_y = origin_y;
-    planning.cells.resize(static_cast<std::size_t>(width * height));
+    navigation2d::ExplorationGrid seal_grid;
+    seal_grid.width = width;
+    seal_grid.height = height;
+    seal_grid.resolution = resolution;
+    seal_grid.origin_x = origin_x;
+    seal_grid.origin_y = origin_y;
+    seal_grid.cells.resize(static_cast<std::size_t>(width * height));
     for (int row = 0; row < height; ++row) {
       for (int col = 0; col < width; ++col) {
         const auto cell = map_->data[static_cast<std::size_t>(row) * map_->info.width + col];
         std::int8_t value = 0;
         if (cell < 0) value = -1;
         else if (cell >= 50) value = 100;
-        planning.cells[static_cast<std::size_t>(row) * width + col] = value;
-      }
-    }
-    navigation2d::OpenPassableOpenings(&planning);
-    // Driven trail is physically free even if SLAM still paints speckles.
-    if (resolution > 0. && !trajectory_.empty()) {
-      const int radius = static_cast<int>(std::ceil(.28 / resolution));
-      for (const auto& sample : trajectory_) {
-        const int trail_col =
-            static_cast<int>(std::floor((sample.first - origin_x) / resolution));
-        const int trail_row =
-            static_cast<int>(std::floor((sample.second - origin_y) / resolution));
-        for (int dy = -radius; dy <= radius; ++dy) {
-          for (int dx = -radius; dx <= radius; ++dx) {
-            if (dx * dx + dy * dy > radius * radius) continue;
-            const int x = trail_col + dx, y = trail_row + dy;
-            if (x < 0 || y < 0 || x >= width || y >= height) continue;
-            planning.cells[static_cast<std::size_t>(y) * width + x] = 0;
-          }
-        }
+        seal_grid.cells[static_cast<std::size_t>(row) * width + col] = value;
       }
     }
     constexpr double kBodyRadius = .22;
@@ -2010,7 +1991,10 @@ class AutonomousExplorer final : public rclcpp::Node {
         for (int dx = -reach; dx <= reach; ++dx) {
           const int x = col + dx, y = row + dy;
           if (x < 0 || y < 0 || x >= width || y >= height) continue;
-          if (planning.cells[static_cast<std::size_t>(y) * width + x] <= 0) continue;
+          const auto cell = map_->data[static_cast<std::size_t>(y) * map_->info.width + x];
+          if (cell < 50) continue;
+          // Thin door bars OpenPassable would open remain legal to cross.
+          if (navigation2d::IsOpenableDoorSealCell(seal_grid, x, y)) continue;
           const double center_x = origin_x + (x + .5) * resolution;
           const double center_y = origin_y + (y + .5) * resolution;
           const double half = .5 * resolution;
@@ -2034,6 +2018,28 @@ class AutonomousExplorer final : public rclcpp::Node {
         const double ratio = static_cast<double>(sample) / samples;
         if (hits(x0 + ratio * (x - x0), y0 + ratio * (y - y0))) return true;
       }
+    }
+    return false;
+  }
+
+  bool TourSegmentCutsWall(double x0, double y0, double x1, double y1) const {
+    if (!map_ || map_->info.resolution <= 0.) return false;
+    const double resolution = map_->info.resolution;
+    const double origin_x = map_->info.origin.position.x;
+    const double origin_y = map_->info.origin.position.y;
+    const int width = static_cast<int>(map_->info.width);
+    const int height = static_cast<int>(map_->info.height);
+    const double length = std::hypot(x1 - x0, y1 - y0);
+    const int samples = std::max(2, static_cast<int>(std::ceil(length / std::max(.02, .5 * resolution))));
+    for (int sample = 0; sample <= samples; ++sample) {
+      const double ratio = static_cast<double>(sample) / samples;
+      const double wx = x0 + ratio * (x1 - x0);
+      const double wy = y0 + ratio * (y1 - y0);
+      const int col = static_cast<int>(std::floor((wx - origin_x) / resolution));
+      const int row = static_cast<int>(std::floor((wy - origin_y) / resolution));
+      if (col < 0 || row < 0 || col >= width || row >= height) return true;
+      if (map_->data[static_cast<std::size_t>(row) * map_->info.width + col] >= 50)
+        return true;
     }
     return false;
   }
@@ -2103,16 +2109,19 @@ class AutonomousExplorer final : public rclcpp::Node {
     tour.header = global.header;
     geometry_msgs::msg::PoseArray frontiers;
     frontiers.header = global.header;
-    // committed_tour_ keeps the active goal at the front for bookkeeping.
-    // Publishing both active_goal_ and the full queue duplicated the current
-    // mouth as T0+T1. Frontier markers are only the active mouth — publishing
-    // every queued frontier_xy stacked another cyan pile on the boundary.
+    // Tour is a Path message, so the UI draws straight edges between poses.
+    // Never chain goals that cut a live mapped wall — that looked like a
+    // through-wall global plan even when Navigation2D routed around.
     bool published_active = false;
+    double prev_x = pose_->pose.position.x;
+    double prev_y = pose_->pose.position.y;
     if (std::isfinite(active_goal_.x) && std::isfinite(active_goal_.y)) {
       geometry_msgs::msg::PoseStamped stamped;
       stamped.header = tour.header;
       stamped.pose = PoseFromXyYaw(active_goal_.x, active_goal_.y, active_goal_.yaw);
       tour.poses.push_back(stamped);
+      prev_x = active_goal_.x;
+      prev_y = active_goal_.y;
       frontiers.poses.push_back(
           PoseFromXyYaw(active_goal_.frontier_x, active_goal_.frontier_y, active_goal_.yaw));
       published_active = true;
@@ -2125,10 +2134,13 @@ class AutonomousExplorer final : public rclcpp::Node {
         published_active = false;  // skip only the matching front entry once
         continue;
       }
+      if (TourSegmentCutsWall(prev_x, prev_y, goal.x, goal.y)) break;
       geometry_msgs::msg::PoseStamped stamped;
       stamped.header = tour.header;
       stamped.pose = PoseFromXyYaw(goal.x, goal.y, goal.yaw);
       tour.poses.push_back(stamped);
+      prev_x = goal.x;
+      prev_y = goal.y;
     }
     tour_publisher_->publish(tour);
     frontiers_publisher_->publish(frontiers);

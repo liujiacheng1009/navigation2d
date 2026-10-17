@@ -378,8 +378,9 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
   // Unfinished active room owns the tour while it still has executable mouths
   // (or child work). When the preferred region is BLOCKED — raw frontiers but
   // zero in-region candidates — hard-locking discarded large PENDING sibling
-  // rooms and forced PARTIAL with the map still white. Soft-unlock: keep the
-  // preferred region on the DFS stack, but let sibling candidates run.
+  // rooms. Soft-unlock keeps the stack but only admits nearby forward siblings
+  // so the robot does not U-turn across the apartment.
+  bool soft_unlocked = false;
   if (preferred && regions_.at(preferred).frontier_cells > 0) {
     const bool preferred_has_mouths =
         regions_.at(preferred).candidates > 0 ||
@@ -393,8 +394,17 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
                                  }),
                   goals.end());
       if (goals.empty()) return {};
+    } else {
+      soft_unlocked = true;
+      constexpr double kSoftUnlockMaxM = 4.0;
+      goals.erase(std::remove_if(goals.begin(), goals.end(),
+                                 [&](const ExplorationGoal& g) {
+                                   const double d = std::hypot(g.x - x, g.y - y);
+                                   return d > kSoftUnlockMaxM;
+                                 }),
+                  goals.end());
+      if (goals.empty()) return {};
     }
-    // else: preferred blocked with no offered mouths — keep stack, rank all
   }
   RegionId origin = last_region_;
   if (!origin || !regions_.at(origin).visible) origin = RegionAt(x, y);
@@ -431,12 +441,14 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
     constexpr double kLocalPocketM = 2.5;
     const bool far_pocket =
         std::min(distance, frontier_range) > kLocalPocketM;
-    // >~100° reverse only after local pocket work is gone.
-    const bool reverse = use_heading && turn > 1.75 && far_pocket;
+    // Soft-unlock: any large reverse is a wasted U-turn; hard-lock keeps the
+    // older "local tip behind OK" contract.
+    const bool reverse = use_heading && turn > 1.75 &&
+                         (soft_unlocked || far_pocket);
     return std::tuple(preferred && !descendant(g.region_id, preferred),
-                      far_pocket, reverse, turn, depth(g.region_id),
-                      distance - .20 * gain_per_meter, -gain_per_meter,
-                      g.region_id, g.x, g.y);
+                      soft_unlocked && reverse, far_pocket, reverse, turn,
+                      depth(g.region_id), distance - .20 * gain_per_meter,
+                      -gain_per_meter, g.region_id, g.x, g.y);
   };
   std::stable_sort(goals.begin(), goals.end(), [&](const auto& a, const auto& b) {
     return rank(a) < rank(b);

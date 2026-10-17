@@ -50,11 +50,12 @@ int main() {
   assert(again.front().region_id == left);
   // Merely inspecting another region's candidates must not steal the DFS
   // context. Only successful dispatch is allowed to commit that transition.
-  // While the active room still has raw frontiers, sibling-only offers are
-  // rejected (empty) so the robot cannot flee an unfinished tip.
+  // BLOCKED preferred (raw frontiers, 0 candidates) soft-unlocks a nearby
+  // sibling but keeps the active region on the stack.
   scheduler.Enter(again.front());
   const auto offered = scheduler.Order({far}, .8, 1.2);
-  assert(offered.empty());
+  assert(!offered.empty());
+  assert(offered.front().region_id == right);
   assert(scheduler.ActiveRegion() == left);
   assert(scheduler.RegionAt(.8, 1.2) != 0);
   scheduler.Enter(again.front());
