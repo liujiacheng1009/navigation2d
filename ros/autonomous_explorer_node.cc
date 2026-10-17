@@ -1390,32 +1390,72 @@ class AutonomousExplorer final : public rclcpp::Node {
     return false;
   }
 
-  // Open room with one tight flank + a wall-foot path: peel/resume of the same
-  // signature is the red-box zig-zag. Cool the chord, replan once off the wall,
-  // then demote — never resume the scrape.
-  bool IsOpenWallScrape(double path_clearance_m, double side_range,
-                        bool forward_clearly_open) const {
-    if (pending_entry_goal_ || locked_entry_mouth_ || returning_) return false;
-    if (!forward_clearly_open) return false;
-    if (side_range >= .40) return false;
-    // Door throats legitimately sit near ~0.10 m clearance; open-room wall
-    // feet report the same while the opposite flank is free.
-    return path_clearance_m > 0. && path_clearance_m < .16;
-  }
-
-  // Convex partition tip mid-route: GLOBAL hugs the tip so CARROT sits on it
-  // while GOAL is still metres away. Forward is often 0.30–0.55 m — neither
-  // the open-wall-scrape gate (>=0.70) nor forward-blocked (<0.28) fires, so
-  // peel/resume parked the robot on the tip forever (UI red box).
-  bool IsCornerTipStall(double path_clearance_m, double front_range,
-                        double side_range) const {
+  // Unified pinch / doorway-jamb / corner-tip geometry. One detector for the
+  // family of "wedged on a wall edge" failures instead of separate open-scrape
+  // vs corner-tip vs room-side gates that disagreed and looped.
+  bool IsPinchGeometryStall(double path_clearance_m, double front_range,
+                            double side_range) const {
     if (pending_entry_goal_ || locked_entry_mouth_ || returning_ || retreat_goal_)
       return false;
-    if (path_clearance_m <= 0. || path_clearance_m >= .22) return false;
     const bool tip_close =
         (front_range > 0. && front_range < .55 && side_range < .50) ||
-        (side_range < .28 && front_range > 0. && front_range < .70);
-    return tip_close;
+        (side_range < .30 && front_range > 0. && front_range < .70) ||
+        (side_range < .40 && front_range >= .70);  // open-forward wall foot
+    if (!tip_close) return false;
+    // clearance==0 (no path / goal occupied) still counts — that was the
+    // live doorway thrash: IsCornerTipStall rejected <=0 and never demoted.
+    if (path_clearance_m > 0. && path_clearance_m >= .20) return false;
+    return true;
+  }
+
+  bool IsOpenWallScrape(double path_clearance_m, double side_range,
+                        bool forward_clearly_open) const {
+    return forward_clearly_open &&
+           IsPinchGeometryStall(path_clearance_m, 1.0, side_range);
+  }
+
+  bool IsCornerTipStall(double path_clearance_m, double front_range,
+                        double side_range) const {
+    return IsPinchGeometryStall(path_clearance_m, front_range, side_range);
+  }
+
+  // Peel off the jamb, cool the viewpoint, pick something else. Do not
+  // replan-in-place while the chassis sits on the threshold (live: scrapes
+  // counter Cleared every tick → forever wall_scrapes=1).
+  bool UnstickFromPinch(const char* reason) {
+    if (last_path_signature_ != 0)
+      cooled_signatures_.insert(last_path_signature_);
+    RCLCPP_WARN(get_logger(),
+                "Pinch unstick: %s clearance=%.3f scrapes=%d pose=(%.2f,%.2f)",
+                reason, last_path_min_clearance_m_, recovery_.wall_scrapes,
+                pose_ ? pose_->pose.position.x : 0.,
+                pose_ ? pose_->pose.position.y : 0.);
+    geometry_msgs::msg::Twist stop;
+    command_publisher_->publish(stop);
+    if (phase_ != MissionPhase::kReturning && !returning_ &&
+        std::isfinite(active_goal_.x) && std::isfinite(active_goal_.y)) {
+      explorer_.RecordAttempt(pending_entry_goal_.value_or(active_goal_), false);
+      recently_demoted_ = pending_entry_goal_.value_or(active_goal_);
+      recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(20.0);
+      explorer_.CoolRegion(active_goal_.x, active_goal_.y, 0.70, 1500u);
+      explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 0.70,
+                           1500u);
+    }
+    ClearEntryMouthLock();
+    navigation_.reset();
+    ClearPublishedNavPaths();
+    ClearDisplayedGoal();
+    if (!committed_tour_.empty()) committed_tour_.pop_front();
+    recovery_.Clear();
+    retreat_attempted_ = false;
+    if (EscapeOrShortRetreat("pinch unstick; peel into free",
+                             "pinch unstick; short trail retreat")) {
+      PublishStatus("RECOVERING", reason);
+      return true;
+    }
+    next_selection_ = now() + rclcpp::Duration::from_seconds(0.8);
+    PublishStatus("SELECTING", reason);
+    return true;
   }
 
   bool BreakWallScrapeThrash(const char* reason) {
@@ -1427,24 +1467,25 @@ class AutonomousExplorer final : public rclcpp::Node {
                 "%s; wall_scrapes=%d clearance=%.3f signature=%llu", reason,
                 recovery_.wall_scrapes, last_path_min_clearance_m_,
                 static_cast<unsigned long long>(last_path_signature_));
-    if (recovery_.wall_scrapes >= 2) {
-      DemoteActiveGoal("wall-scrape thrash; demoting viewpoint");
-      return true;
+    // Second scrape, zero-clearance (goal occupied / no path), or already
+    // peeled once → leave the pocket. One centered replan only.
+    if (recovery_.wall_scrapes >= 2 || last_path_min_clearance_m_ < .05 ||
+        recovery_.side_peels > 0) {
+      return UnstickFromPinch(reason);
     }
     latest_map_replans_ = 0;
+    const int scrapes = recovery_.wall_scrapes;
     if (StartNavigation(active_goal_, false, true)) {
-      // Fresh plan still on the rim → leave this viewpoint.
+      recovery_.wall_scrapes = scrapes;  // Begin must not erase the budget
       if (last_path_min_clearance_m_ > 0. && last_path_min_clearance_m_ < .16) {
         if (last_path_signature_ != 0)
           cooled_signatures_.insert(last_path_signature_);
-        DemoteActiveGoal("replanned path still wall-scrape; demoting");
-        return true;
+        return UnstickFromPinch("replanned path still pinch-scrape");
       }
       PublishStatus("NAVIGATING", "replanned off wall after scrape stop");
       return true;
     }
-    DemoteActiveGoal("wall-scrape replan failed; demoting viewpoint");
-    return true;
+    return UnstickFromPinch("pinch replan failed");
   }
 
   bool BreakWallScrapeAfterPeel() {
@@ -1452,7 +1493,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         recovery_.side_peels > 0 || recovery_.wall_scrapes > 0 ||
         (last_path_min_clearance_m_ > 0. && last_path_min_clearance_m_ < .22);
     if (!scrape) return false;
-    return BreakWallScrapeThrash("after wall peel; ban scrape chord");
+    return UnstickFromPinch("after wall peel; leave pinch pocket");
   }
 
   // Goal lies on the outbound trail behind the robot — picking it after a
@@ -3585,17 +3626,22 @@ class AutonomousExplorer final : public rclcpp::Node {
             next_selection_ = now();
             return;
           }
+          // Do NOT recovery_.Clear() here — that zeroed wall_scrapes every
+          // tick so room-side stall forever saw scrapes=1 and never left the
+          // doorway jamb (live thrash at threshold corner).
           explorer_.RecordAttempt(active_goal_, false);
           recently_demoted_ = active_goal_;
           recently_demoted_until_ =
               now() + rclcpp::Duration::from_seconds(25.0);
-          recovery_.Clear();
         }
-        // Open-forward + side wall: peel→resume same chord is the sawtooth.
-        // Ban the scrape and replan/demote instead of micro-peeling in place.
+        // Unified pinch exit: doorway jamb / corner tip / open wall foot.
         if (phase_ != MissionPhase::kReturning && !returning_ &&
-            forward_clearly_open && side_range < .40) {
-          BreakWallScrapeThrash("room-side wall stall");
+            IsPinchGeometryStall(
+                state.global_planning.path_min_clearance_m > 0.
+                    ? state.global_planning.path_min_clearance_m
+                    : last_path_min_clearance_m_,
+                front_range, side_range)) {
+          BreakWallScrapeThrash("room-side / doorway pinch stall");
           return;
         }
         // Returning already owns the home path.  A short clearance jiggle
