@@ -123,6 +123,8 @@ bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row) {
   const int width = grid.width;
   const int height = grid.height;
   const int max_thick = std::max(1, static_cast<int>(std::ceil(.20 / grid.resolution)));
+  const int min_lat = static_cast<int>(std::ceil(kNarrowMinWidth / grid.resolution));
+  const int max_lat = static_cast<int>(std::floor(kNarrowMaxWidth / grid.resolution));
   auto value_at = [&](int c, int r) -> std::int8_t {
     if (c < 0 || r < 0 || c >= width || r >= height) return 100;
     return grid.cells[static_cast<std::size_t>(r) * width + c];
@@ -151,17 +153,38 @@ bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row) {
     }
     return thick <= max_thick;
   };
+  auto thin_passage_cell = [&](int c, int r, int px, int py) {
+    if (c < 0 || r < 0 || c >= width || r >= height) return false;
+    if (value_at(c, r) <= 0) return false;
+    if (!passable(c - px, r - py) || !passable(c + px, r + py)) return false;
+    return thickness_ok(c, r, px, py);
+  };
   // Passage axis (px,py); seal runs perpendicular.
   auto seal_on_axis = [&](int px, int py) {
-    if (!passable(col - px, row - py) || !passable(col + px, row + py)) return false;
-    if (!thickness_ok(col, row, px, py)) return false;
+    if (!thin_passage_cell(col, row, px, py)) return false;
     const std::int8_t neg = value_at(col - px, row - py);
     const std::int8_t pos = value_at(col + px, row + py);
     if ((neg == 0 && pos < 0) || (neg < 0 && pos == 0) || (neg < 0 && pos < 0))
       return true;
-    if (neg == 0 && pos == 0)
-      return passage_reaches_unknown(col, row, px, py, 1) ||
-             passage_reaches_unknown(col, row, px, py, -1);
+    if (neg == 0 && pos == 0) {
+      // Still openable after both rooms are explored: require a door-width
+      // lateral bar so PathCuts can re-enter kitchens / return home. Isolated
+      // free↔free speckles (furniture legs) stay blocked.
+      if (passage_reaches_unknown(col, row, px, py, 1) ||
+          passage_reaches_unknown(col, row, px, py, -1))
+        return true;
+      const int lx = py, ly = px;
+      int span = 1;
+      for (int s = 1; s <= max_lat; ++s) {
+        if (!thin_passage_cell(col + s * lx, row + s * ly, px, py)) break;
+        ++span;
+      }
+      for (int s = 1; s <= max_lat; ++s) {
+        if (!thin_passage_cell(col - s * lx, row - s * ly, px, py)) break;
+        ++span;
+      }
+      return span >= min_lat && span <= max_lat;
+    }
     return false;
   };
   return seal_on_axis(0, 1) || seal_on_axis(1, 0);

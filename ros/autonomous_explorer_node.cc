@@ -1289,6 +1289,61 @@ class AutonomousExplorer final : public rclcpp::Node {
     return false;
   }
 
+  Goal MakeHomeGoal() const {
+    Goal home{start_pose_->pose.position.x, start_pose_->pose.position.y,
+              Yaw(start_pose_->pose.orientation)};
+    if (!map_ || map_->info.resolution <= 0.) return home;
+    const double resolution = map_->info.resolution;
+    const double origin_x = map_->info.origin.position.x;
+    const double origin_y = map_->info.origin.position.y;
+    const int width = static_cast<int>(map_->info.width);
+    const int height = static_cast<int>(map_->info.height);
+    auto clear_at = [&](double wx, double wy, double clearance) {
+      const int col = static_cast<int>(std::floor((wx - origin_x) / resolution));
+      const int row = static_cast<int>(std::floor((wy - origin_y) / resolution));
+      const int reach = static_cast<int>(std::ceil(clearance / resolution));
+      for (int dy = -reach; dy <= reach; ++dy) {
+        for (int dx = -reach; dx <= reach; ++dx) {
+          if (dx * dx + dy * dy > reach * reach) continue;
+          const int x = col + dx, y = row + dy;
+          if (x < 0 || y < 0 || x >= width || y >= height) return false;
+          if (map_->data[static_cast<std::size_t>(y) * map_->info.width + x] >= 50)
+            return false;
+        }
+      }
+      return true;
+    };
+    constexpr double kHomeClearance = .30;
+    if (clear_at(home.x, home.y, kHomeClearance)) return home;
+    // Spawn often sits beside a mapped wall. Snap to the nearest clear cell
+    // inside 1 m so return planning is not rejected as goal-occupied.
+    double best_x = home.x, best_y = home.y;
+    double best_d = std::numeric_limits<double>::infinity();
+    const int search = static_cast<int>(std::ceil(1.0 / resolution));
+    const int home_col = static_cast<int>(std::floor((home.x - origin_x) / resolution));
+    const int home_row = static_cast<int>(std::floor((home.y - origin_y) / resolution));
+    for (int dy = -search; dy <= search; ++dy) {
+      for (int dx = -search; dx <= search; ++dx) {
+        const int x = home_col + dx, y = home_row + dy;
+        if (x < 0 || y < 0 || x >= width || y >= height) continue;
+        const double wx = origin_x + (x + .5) * resolution;
+        const double wy = origin_y + (y + .5) * resolution;
+        if (!clear_at(wx, wy, kHomeClearance)) continue;
+        const double d = std::hypot(wx - home.x, wy - home.y);
+        if (d < best_d) {
+          best_d = d;
+          best_x = wx;
+          best_y = wy;
+        }
+      }
+    }
+    if (best_d < std::numeric_limits<double>::infinity()) {
+      home.x = best_x;
+      home.y = best_y;
+    }
+    return home;
+  }
+
   void BeginReturn(bool force_return = false) {
     if (!start_pose_) return;
     if (phase_ == MissionPhase::kReturning && navigation_) return;
@@ -1302,11 +1357,11 @@ class AutonomousExplorer final : public rclcpp::Node {
     } else if (!explorer_.CompletionEligible(initial_known_cells_))
       RCLCPP_WARN(get_logger(),
                   "No frontier survived a stable completion window; returning with reachable map coverage");
-    // Return is a fresh global query on the final online map. Unknown remains
-    // lethal and historical robot positions are never replayed as a route.
-    const Goal home{start_pose_->pose.position.x, start_pose_->pose.position.y,
-                    Yaw(start_pose_->pose.orientation)};
+    // Return on the final online map, with the driven trail painted free so
+    // SLAM door seals / speckles on the outbound path cannot block home.
+    const Goal home = MakeHomeGoal();
     cooled_signatures_.clear();
+    paint_driven_corridor_ = true;
     if (StartNavigation(home, true)) {
       return_escape_attempts_ = 0;
       RCLCPP_INFO(get_logger(), "Final online-map return path accepted; tracking with RPP");
@@ -1316,13 +1371,21 @@ class AutonomousExplorer final : public rclcpp::Node {
     // Cap escape→return retries. An uncapped loop (escape 1.8s → BeginReturn
     // fails → escape again) thrashed for hundreds of cycles, disagreed scan
     // vs odometry, and blew localization by >1 m / 180°.
-    constexpr int kMaxReturnEscapes = 3;
+    constexpr int kMaxReturnEscapes = 5;
     if (return_escape_attempts_ < kMaxReturnEscapes && TryStartEscape()) {
       ++return_escape_attempts_;
       escape_then_return_ = true;
       return;
     }
-    Finish(true, "return path unavailable; stopping to protect localization");
+    // Last attempt: trail paint again after escapes may have moved the pose.
+    paint_driven_corridor_ = true;
+    if (StartNavigation(MakeHomeGoal(), true)) {
+      return_escape_attempts_ = 0;
+      RCLCPP_INFO(get_logger(), "Final online-map return path accepted after escape; tracking with RPP");
+      PublishStatus("RETURNING", "tracking shortest route home on final observed map");
+      return;
+    }
+    Finish(false, "return path unavailable; stopping to protect localization");
   }
 
   bool ReplanActiveGoalOnLatestMap(const char* reason) {
@@ -1375,9 +1438,16 @@ class AutonomousExplorer final : public rclcpp::Node {
     command_publisher_->publish(stop);
     std::string final_message = message;
     double return_error = std::numeric_limits<double>::infinity();
-    if (pose_ && start_pose_)
+    if (pose_ && start_pose_) {
       return_error = std::hypot(pose_->pose.position.x - start_pose_->pose.position.x,
                                 pose_->pose.position.y - start_pose_->pose.position.y);
+      // Docking may use a cleared snap of spawn when the recorded start sits
+      // inside mapped inflation; accept either the raw start or that snap.
+      const Goal dock = MakeHomeGoal();
+      const double dock_error =
+          std::hypot(pose_->pose.position.x - dock.x, pose_->pose.position.y - dock.y);
+      return_error = std::min(return_error, dock_error);
+    }
     if (success && return_error > .35) {
       success = false;
       final_message = "return ended outside the home tolerance";
@@ -1609,7 +1679,9 @@ class AutonomousExplorer final : public rclcpp::Node {
     // Entry probes intentionally cross OpenPassable-carved door seals. The
     // live map still draws those bars as occupied; rejecting them left rooms
     // unentered forever (PARTIAL with hundreds of raw frontiers).
-    if (pending_entry_goal_) return false;
+    // Return home uses the same seals (and the driven trail); PathCuts here
+    // aborted docking ~3 m from spawn after "path intersects mapped obstacle".
+    if (pending_entry_goal_ || returning_) return false;
     if (!navigation_ || !map_ || map_->info.resolution <= 0.) return false;
     const auto& route = navigation_->path();
     if (route.size() < 2) return false;

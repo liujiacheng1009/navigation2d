@@ -637,6 +637,32 @@ int main() {
   assert(barred.cells[24 * barred.width + 27] == 0);
   assert(!navigation2d::IsOpenableDoorSealCell(barred, 27, 20));
 
+  // After both sides of a kitchen mouth are explored free, the live SLAM bar
+  // remains occupied. PathCuts must still treat that door-width free↔free
+  // seal as crossable (return home / re-enter kitchen).
+  {
+    navigation2d::ExplorationGrid both_free;
+    both_free.width = 60;
+    both_free.height = 40;
+    both_free.resolution = .05;
+    both_free.cells.assign(
+        static_cast<std::size_t>(both_free.width * both_free.height), 100);
+    const auto fpaint = [&](int col0, int col1, int row0, int row1, std::int8_t value) {
+      for (int row = row0; row < row1; ++row)
+        for (int col = col0; col < col1; ++col)
+          both_free.cells[static_cast<std::size_t>(row * both_free.width + col)] =
+              value;
+    };
+    fpaint(2, 58, 4, 18, 0);      // south hall
+    fpaint(2, 58, 22, 36, 0);     // north kitchen now explored
+    fpaint(20, 34, 18, 22, 0);    // 0.70 m mouth vestibule
+    fpaint(20, 34, 20, 21, 100);  // door-width SLAM bar
+    assert(navigation2d::IsOpenableDoorSealCell(both_free, 27, 20));
+    // Isolated free↔free speck must not count as a door.
+    both_free.cells[10 * both_free.width + 10] = 100;
+    assert(!navigation2d::IsOpenableDoorSealCell(both_free, 10, 10));
+  }
+
   // Vestibule: both free runs are door-width (~0.50 m). SafeViewpoint must
   // still accept the center with planning radius (.22); the old XOR treated
   // both-narrow as open space and demanded footprint_clearance (.30).
