@@ -428,8 +428,8 @@ class AutonomousExplorer final : public rclcpp::Node {
     navigation2d::OpenPassableOpenings(&planning_grid);
     // Locked-mouth entry: paint a narrow unknown centerline past the frontier
     // so theta* can step into still-white space. Wide lateral paint used to
-    // invent chords that clipped live jambs and PathCuts then abandoned the
-    // door. Occupied stays lethal — only unknown is temporarily free.
+    // invent chords that clipped live jambs. OpenPassable already carved
+    // door-width SLAM seals; only unknown is painted here.
     if (pending_entry_goal_ && map_->info.resolution > 0.) {
       const double ax =
           pending_entry_goal_->frontier_x - pending_entry_goal_->x;
@@ -569,9 +569,8 @@ class AutonomousExplorer final : public rclcpp::Node {
         navigation_.reset();
         return false;
       }
-      // The planner snapshot opens thin SLAM seals. A chord that is legal on
-      // that copy can still put the 0.22 m body on cells the live map draws
-      // as occupied. Reject it before it is published or tracked.
+      // Reject chords that remain lethal after OpenPassable (structural walls).
+      // Door-width SLAM seals are opened on both planner and PathCuts grids.
       if (PathCutsMappedObstacle()) {
         last_planning_failure_ = "path intersects mapped obstacle";
         RCLCPP_WARN(get_logger(),
@@ -739,16 +738,16 @@ class AutonomousExplorer final : public rclcpp::Node {
     entry_probe_attempts_ = 0;
   }
 
-  // Entry budget exhausted or mouth unplannable: cool the doorway so the tour
-  // cannot immediately re-drive the same hall→threshold shuttle.
+  // Entry budget exhausted or mouth unplannable: short demote so the tour
+  // cannot immediately re-drive the same hall→threshold shuttle. RecordAttempt
+  // already cools the mouth — do not stack a 1.5 m / multi-minute CoolRegion
+  // that hides an enterable kitchen for the rest of the mission.
   void AbandonLockedEntryMouth(const std::string& reason) {
     Goal mouth = pending_entry_goal_.value_or(
         locked_entry_mouth_.value_or(active_goal_));
     explorer_.RecordAttempt(mouth, false);
-    explorer_.CoolRegion(mouth.frontier_x, mouth.frontier_y, 1.50, 8000u);
-    explorer_.CoolRegion(mouth.x, mouth.y, 1.00, 5000u);
     recently_demoted_ = mouth;
-    recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(25.0);
+    recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(8.0);
     ClearEntryMouthLock();
     committed_tour_.clear();
     next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
@@ -2081,8 +2080,9 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   bool PathCutsMappedObstacle() const {
-    // Live-map check always runs (including entry/return). Occupied cells are
-    // walls — never exempted as "door seals".
+    // Live-map check always runs (including entry/return). PathCutsLiveOccupied
+    // judges the OpenPassable-opened grid so door-width SLAM seals match the
+    // planner; thick structural walls stay lethal.
     if (!navigation_ || !map_ || map_->info.resolution <= 0.) return false;
     const auto& route = navigation_->path();
     if (route.size() < 2) return false;

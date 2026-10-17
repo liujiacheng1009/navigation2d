@@ -20,16 +20,20 @@ struct ExplorationGrid {
   std::vector<std::int8_t> cells;
 };
 
-// Flood unknown through an already-free wall-to-wall gap so planning can step
-// into a still-white room. Occupied cells are walls and are never cleared.
+// Open thin door-width SLAM seals and flood unknown through free gaps so
+// planning can enter still-white rooms. Thick structural walls stay lethal.
 void OpenPassableOpenings(ExplorationGrid* grid);
 
-// Diagnostic: door-width occupied seal geometry. Not used to exempt walls from
-// PathCuts — occupied is always impassable there.
+// True when this occupied cell is a door-width SLAM seal (passable on both
+// passage sides, lateral span in [0.32, 1.40] m). Unknown-touching seals may
+// be up to ~0.35 m thick; free↔free seals stay ≤0.20 m. Long exterior walls
+// are not seals.
 bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row);
 
-// True when a world-frame polyline puts the body on a live occupied cell.
-// Occupied = wall = impassable. under_robot_m covers chassis SLAM bleed only.
+// True when a world-frame polyline puts the body on an occupied cell that
+// OpenPassableOpenings would leave lethal. Door seals the planner carves are
+// ignored so kitchen/alcove entry is not rejected; structural through-wall
+// chords still fail. under_robot_m covers chassis SLAM bleed only.
 bool PathCutsLiveOccupied(const ExplorationGrid& live,
                           const std::vector<std::pair<double, double>>& path_xy,
                           double robot_x, double robot_y,
