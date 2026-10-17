@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -31,8 +32,12 @@ class RegionScheduler {
   // Keeps a DFS context until all its executable observations are consumed.
   // When blocked/completed, pop and use graph BFS to prefer adjacent regions.
   // Returns every candidate (ordered), never a filtered local-only queue.
+  // `robot_yaw` (rad) ranks reverse U-turn goals after forward ones inside the
+  // same DFS region. Pass NaN when heading is unknown.
   std::vector<ExplorationGoal> Order(std::vector<ExplorationGoal> goals,
-                                     double robot_x, double robot_y);
+                                     double robot_x, double robot_y,
+                                     double robot_yaw =
+                                         std::numeric_limits<double>::quiet_NaN());
   void Enter(double x, double y);
   void Enter(const ExplorationGoal& goal);
   // True when `id` is the active DFS region or a child of it. Empty stack

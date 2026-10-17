@@ -663,7 +663,10 @@ class AutonomousExplorer final : public rclcpp::Node {
 
   void BuildTour() {
     committed_tour_.clear();
-    const auto goals = explorer_.BuildTour(pose_->pose.position.x, pose_->pose.position.y);
+    const double yaw = pose_ ? Yaw(pose_->pose.orientation)
+                             : std::numeric_limits<double>::quiet_NaN();
+    const auto goals = explorer_.BuildTour(pose_->pose.position.x,
+                                           pose_->pose.position.y, yaw);
     for (const auto& goal : goals) committed_tour_.push_back(goal);
     ++tour_revision_;
     RCLCPP_INFO(get_logger(),
@@ -885,7 +888,8 @@ class AutonomousExplorer final : public rclcpp::Node {
     auto leftovers = explorer_.SelectLeftoverApproaches(
         pose_->pose.position.x, pose_->pose.position.y, 3);
     leftovers = explorer_.OrderByRegion(
-        std::move(leftovers), pose_->pose.position.x, pose_->pose.position.y);
+        std::move(leftovers), pose_->pose.position.x, pose_->pose.position.y,
+        Yaw(pose_->pose.orientation));
     if (leftovers.empty()) {
       RCLCPP_WARN(get_logger(),
                   "Completing probe found no leftover approach: raw_cells=%zu rounds=%d",
@@ -1036,21 +1040,14 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (committed_tour_.empty()) {
       BuildTour();
       // BuildTour can be empty while mouths still exist (pinched kitchen graph).
-      // Take only the nearest mouth — one commitment, not a reject ping-pong.
+      // Take only the nearest forward mouth — never a reverse U-turn crumb.
       if (committed_tour_.empty() && explorer_.candidate_frontier_goals() > 0) {
         auto mouths = explorer_.SelectGoals(
             pose_->pose.position.x, pose_->pose.position.y);
-        if (!mouths.empty()) {
-          auto nearest = std::min_element(
-              mouths.begin(), mouths.end(), [&](const Goal& a, const Goal& b) {
-                const double da = std::hypot(a.x - pose_->pose.position.x,
-                                             a.y - pose_->pose.position.y);
-                const double db = std::hypot(b.x - pose_->pose.position.x,
-                                             b.y - pose_->pose.position.y);
-                return da < db;
-              });
-          committed_tour_.push_back(*nearest);
-        }
+        mouths = explorer_.OrderByRegion(
+            std::move(mouths), pose_->pose.position.x, pose_->pose.position.y,
+            Yaw(pose_->pose.orientation));
+        if (!mouths.empty()) committed_tour_.push_back(mouths.front());
       }
     }
     // A frontier extractor can emit many viewpoints around one wall.  Do not
@@ -1061,6 +1058,8 @@ class AutonomousExplorer final : public rclcpp::Node {
     // small, diverse budget, then yield to new sensor/map evidence.
     constexpr int kCandidatePlanBudget = 3;
     int attempted = 0;
+    int rotated_reverse = 0;
+    const double yaw = Yaw(pose_->pose.orientation);
     while (!committed_tour_.empty() && attempted < kCandidatePlanBudget) {
       const Goal goal = committed_tour_.front();
       if (!explorer_.GoalRegionStillFrontier(goal)) {
@@ -1073,6 +1072,17 @@ class AutonomousExplorer final : public rclcpp::Node {
                     "Skipping recently demoted viewpoint (%.2f, %.2f)", goal.x,
                     goal.y);
         committed_tour_.pop_front();
+        continue;
+      }
+      // Keep reverse goals at the back while a forward alternative remains.
+      // Demote→rebuild used to U-turn across the living room every few seconds.
+      const double bearing = std::atan2(goal.y - pose_->pose.position.y,
+                                        goal.x - pose_->pose.position.x);
+      const double turn = std::abs(NormalizeAngle(bearing - yaw));
+      if (turn > 1.75 && rotated_reverse < static_cast<int>(committed_tour_.size())) {
+        committed_tour_.pop_front();
+        committed_tour_.push_back(goal);
+        ++rotated_reverse;
         continue;
       }
       if (StartNavigation(goal, false)) {
@@ -1257,86 +1267,11 @@ class AutonomousExplorer final : public rclcpp::Node {
     return false;
   }
 
-  bool MaybePreemptForNearerMouth(double path_remaining_m) {
-    if (phase_ != MissionPhase::kExploring || returning_ || !navigation_ ||
-        !pose_ || pending_entry_goal_) return false;
-    // Do not preempt while a goal recovery session is spending peel/replan
-    // budget; that raced with side-speck resume and rebuilt the tour.
-    if (recovery_.active &&
-        (recovery_.side_peels > 0 || recovery_.open_replans > 0 ||
-         recovery_.resume_after_escape))
-      return false;
-    // Already on a short doorway approach — do not yank the robot away to a
-    // different mouth (that abandoned the kitchen threshold mid-crossing).
-    if (path_remaining_m > 0. && path_remaining_m < 5.0) return false;
-    const double goal_range = std::hypot(active_goal_.x - pose_->pose.position.x,
-                                         active_goal_.y - pose_->pose.position.y);
-    if (goal_range < 2.5) return false;
-    const auto now_t = now();
-    // Absolute cooldown. Map revision used to reset every scan and re-fire
-    // preempt on the same far goal (tour rebuild → same T-label → stutter).
-    if (last_preempt_exec_.nanoseconds() > 0 &&
-        (now_t - last_preempt_exec_).seconds() < 8.0)
-      return false;
-    if (last_preempt_check_.nanoseconds() > 0 &&
-        (now_t - last_preempt_check_).seconds() < 3.0)
-      return false;
-    last_preempt_check_ = now_t;
-    if (!explorer_.ShouldPreemptForNearerMouth(
-            pose_->pose.position.x, pose_->pose.position.y, active_goal_,
-            path_remaining_m))
-      return false;
-    // Commit to a concrete nearer mouth ahead of the robot. Rebuilding the
-    // whole tour often re-picked the same far active goal and just restarted
-    // Navigation2D (visible as goal flicker / open-space stutter).
-    const double yaw = Yaw(pose_->pose.orientation);
-    const auto mouths = explorer_.SelectGoals(
-        pose_->pose.position.x, pose_->pose.position.y);
-    std::optional<Goal> nearer;
-    double nearer_range = std::numeric_limits<double>::infinity();
-    for (const auto& mouth : mouths) {
-      if (std::hypot(mouth.x - active_goal_.x, mouth.y - active_goal_.y) < .80 ||
-          std::hypot(mouth.frontier_x - active_goal_.frontier_x,
-                     mouth.frontier_y - active_goal_.frontier_y) < .80)
-        continue;
-      if (!explorer_.GoalInActiveRegion(mouth)) continue;
-      const double range = std::hypot(mouth.x - pose_->pose.position.x,
-                                      mouth.y - pose_->pose.position.y);
-      if (range + 1.5 >= goal_range || range > 2.5) continue;
-      const double bearing = std::atan2(mouth.y - pose_->pose.position.y,
-                                        mouth.x - pose_->pose.position.x);
-      if (std::abs(NormalizeAngle(bearing - yaw)) > .70) continue;
-      if (range < nearer_range) {
-        nearer_range = range;
-        nearer = mouth;
-      }
-    }
-    if (!nearer) return false;
-    auto previous = std::move(navigation_);
-    const Goal previous_goal = active_goal_;
-    if (!StartNavigation(*nearer, false)) {
-      navigation_ = std::move(previous);
-      active_goal_ = previous_goal;
-      return false;
-    }
-    last_preempt_exec_ = now_t;
-    // Keep the committed tour; just move the adopted mouth to the front.
-    committed_tour_.erase(
-        std::remove_if(committed_tour_.begin(), committed_tour_.end(),
-                       [&](const Goal& goal) {
-                         return std::hypot(goal.x - nearer->x, goal.y - nearer->y) < .80 ||
-                                std::hypot(goal.frontier_x - nearer->frontier_x,
-                                           goal.frontier_y - nearer->frontier_y) < .80;
-                       }),
-        committed_tour_.end());
-    committed_tour_.push_front(*nearer);
-    RCLCPP_WARN(get_logger(),
-                "Preempting far transit for nearer mouth: active=(%.2f,%.2f)->"
-                "(%.2f,%.2f) path_remaining=%.2f",
-                previous_goal.x, previous_goal.y, nearer->x, nearer->y,
-                path_remaining_m);
-    PublishStatus("NAVIGATING", "nearer forward mouth; continuing without tour rebuild");
-    return true;
+  bool MaybePreemptForNearerMouth(double /*path_remaining_m*/) {
+    // Mid-drive preempt yanked Navigation2D onto another mouth and caused
+    // goal flicker / crossed paths — wasted meters. Region-ordered tours
+    // already finish the active room; keep the committed transit.
+    return false;
   }
 
   void BeginReturn(bool force_return = false) {
@@ -1630,26 +1565,19 @@ class AutonomousExplorer final : public rclcpp::Node {
   bool BreakMappedObstacleThrash() {
     if (mapped_obstacle_rejects_ < 3) return false;
     RCLCPP_WARN(get_logger(),
-                "mapped-obstacle reject thrash (%d); leave pinch, keep room mouths",
+                "mapped-obstacle reject thrash (%d); keep tour, retreat only",
                 mapped_obstacle_rejects_);
     mapped_obstacle_rejects_ = 0;
-    committed_tour_.clear();
     pending_entry_goal_.reset();
     entry_probe_attempts_ = 0;
     navigation_.reset();
     recovery_.Clear();
-    if (phase_ == MissionPhase::kCompleting) {
-      phase_ = MissionPhase::kExploring;
-    }
+    // Do not clear committed_tour_ or jump into Completing — that rebuilt a
+    // reverse tour across the apartment after every through-wall reject.
     PublishStatus("SELECTING", "leaving pinch after mapped-obstacle rejects");
     if (StartRetreat()) return true;
-    // Unfinished rooms first — not open-space escape ping-pong in the living room.
-    if (explorer_.raw_frontier_cells() > 0 && completing_probe_rounds_ < 5) {
-      StartCompletingProbe();
-      return true;
-    }
     if (TryStartEscape()) return true;
-    next_selection_ = now() + rclcpp::Duration::from_seconds(2.0);
+    next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
     return true;
   }
 
@@ -1984,18 +1912,18 @@ class AutonomousExplorer final : public rclcpp::Node {
                          : "frontiers exhausted and robot returned through final-map global path");
       } else if (phase_ == MissionPhase::kCompleting) {
         explorer_.RecordAttempt(active_goal_, true);
-        // Arrival pose owns the room lock — finish this region before siblings.
-        explorer_.CommitRegion(pose_->pose.position.x, pose_->pose.position.y);
         FinishCompleting();
       } else if (retreat_goal_) {
         retreat_goal_ = false;
         reject_streak_ = 0;
-        committed_tour_.clear();
+        // Keep the committed tour; retreat is not a license to rebuild reverse.
         next_selection_ = now();
         PublishStatus("SELECTING", "left the pinched corridor");
       } else if (pending_entry_goal_) {
         if (EntryProbeSatisfied()) {
           explorer_.RecordAttempt(*pending_entry_goal_, true, false);
+          // Only a real doorway crossing may push the entered room onto the DFS
+          // stack. CommitRegion(living-room pose) used to pop kitchen/bedroom.
           explorer_.CommitRegion(pose_->pose.position.x, pose_->pose.position.y);
           pending_entry_goal_.reset();
           entry_probe_attempts_ = 0;
@@ -2013,17 +1941,16 @@ class AutonomousExplorer final : public rclcpp::Node {
           explorer_.RecordAttempt(*pending_entry_goal_, false);
           pending_entry_goal_.reset();
           entry_probe_attempts_ = 0;
-          committed_tour_.clear();
           next_selection_ = now();
           PublishStatus("SELECTING", "frontier entry blocked; unresolved boundary retained");
         }
       } else if (explorer_.GoalRegionStillFrontier(active_goal_)) {
         // Hallway arrival with the mouth still open — cross into the room.
+        // Keep the tour; clearing it forced a reverse rebuild every doorway.
         pending_entry_goal_ = active_goal_;
         entry_probe_attempts_ = 0;
         entry_probe_initial_known_cells_ = KnownCells();
         entry_probe_initial_map_revision_ = map_revision_;
-        committed_tour_.clear();
         if (StartEntryProbe()) return;
         RCLCPP_WARN(get_logger(),
                     "Frontier reached but no safe entry probe: frontier=(%.2f,%.2f)",
@@ -2031,11 +1958,13 @@ class AutonomousExplorer final : public rclcpp::Node {
         explorer_.RecordAttempt(*pending_entry_goal_, false);
         pending_entry_goal_.reset();
         entry_probe_attempts_ = 0;
+        if (!committed_tour_.empty()) committed_tour_.pop_front();
         next_selection_ = now();
         PublishStatus("SELECTING", "frontier entry unavailable; unresolved boundary retained");
       } else {
         explorer_.RecordAttempt(active_goal_, true);
-        explorer_.CommitRegion(pose_->pose.position.x, pose_->pose.position.y);
+        // Goal dispatch already CommitRegion'd; do not re-Enter the robot cell
+        // (often still the hallway parent) or the room stack collapses.
         if (!committed_tour_.empty()) committed_tour_.pop_front();
         next_selection_ = now();
         PublishStatus("SELECTING", "frontier reached; continuing active region tour");
@@ -2331,8 +2260,6 @@ class AutonomousExplorer final : public rclcpp::Node {
   int entry_probe_attempts_ = 0;
   std::size_t entry_probe_initial_known_cells_ = 0;
   std::uint64_t entry_probe_initial_map_revision_ = 0;
-  rclcpp::Time last_preempt_check_{0, 0, RCL_ROS_TIME};
-  rclcpp::Time last_preempt_exec_{0, 0, RCL_ROS_TIME};
   GoalRecoverySession recovery_;
   std::optional<Goal> recently_demoted_;
   rclcpp::Time recently_demoted_until_{0, 0, RCL_ROS_TIME};

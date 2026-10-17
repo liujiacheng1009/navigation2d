@@ -3,6 +3,7 @@
 #include "navigation2d/exploration/region_scheduler.h"
 
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
@@ -90,10 +91,14 @@ class FrontierExplorer {
   // Order SelectGoals by RegionScheduler: finish the active topological
   // region (and its children) before crossing to a sibling room. Geometry
   // only ranks observations; it never relaxes planning obstacles.
-  std::vector<ExplorationGoal> BuildTour(double robot_x, double robot_y);
+  std::vector<ExplorationGoal> BuildTour(double robot_x, double robot_y,
+                                         double robot_yaw =
+                                             std::numeric_limits<double>::quiet_NaN());
   // Same region DFS ordering for leftover completing approaches.
   std::vector<ExplorationGoal> OrderByRegion(std::vector<ExplorationGoal> goals,
-                                             double robot_x, double robot_y);
+                                             double robot_x, double robot_y,
+                                             double robot_yaw =
+                                                 std::numeric_limits<double>::quiet_NaN());
   // Commit DFS context when a goal is accepted for execution (not on inspect).
   void CommitRegion(const ExplorationGoal& goal);
   void CommitRegion(double x, double y);

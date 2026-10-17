@@ -1326,19 +1326,20 @@ std::vector<ExplorationGoal> FrontierExplorer::OneGoalPerMouth(
 }
 
 std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
-    double robot_x, double robot_y) {
+    double robot_x, double robot_y, double robot_yaw) {
   // Mouth collapse / entry posing already happened in SelectGoals. Region
   // scheduling owns inter-room order: stay in the active room until its
   // executable observations are gone, then BFS to an adjacent unfinished room.
   auto remaining = SelectGoals(robot_x, robot_y);
   if (remaining.empty()) return {};
-  return regions_.Order(std::move(remaining), robot_x, robot_y);
+  return regions_.Order(std::move(remaining), robot_x, robot_y, robot_yaw);
 }
 
 std::vector<ExplorationGoal> FrontierExplorer::OrderByRegion(
-    std::vector<ExplorationGoal> goals, double robot_x, double robot_y) {
+    std::vector<ExplorationGoal> goals, double robot_x, double robot_y,
+    double robot_yaw) {
   if (goals.empty()) return goals;
-  return regions_.Order(std::move(goals), robot_x, robot_y);
+  return regions_.Order(std::move(goals), robot_x, robot_y, robot_yaw);
 }
 
 void FrontierExplorer::CommitRegion(const ExplorationGoal& goal) {

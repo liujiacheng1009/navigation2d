@@ -326,7 +326,7 @@ bool RegionScheduler::InActiveContext(RegionId id) const {
 }
 
 std::vector<ExplorationGoal> RegionScheduler::Order(
-    std::vector<ExplorationGoal> goals, double x, double y) {
+    std::vector<ExplorationGoal> goals, double x, double y, double robot_yaw) {
   for (auto& [id, r] : regions_) { (void)id; r.candidates = 0; }
   for (auto& g : goals) {
     g.region_id = RegionAt(g.frontier_x, g.frontier_y);
@@ -385,20 +385,26 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
     auto it = hops.find(id);
     return it == hops.end() ? std::numeric_limits<int>::max() : it->second;
   };
+  const bool use_heading = std::isfinite(robot_yaw);
   auto rank = [&](const ExplorationGoal& g) {
-    // Complete the active connected region before crossing a doorway. Within
-    // that region, choose the nearest viewpoint first: a large information
-    // gain does not justify repeatedly crossing the same corridor. BFS depth
-    // then gives adjacent regions priority over distant ones, and score is a
-    // final tie-breaker among similarly placed views.
+    // Finish the active room before crossing a doorway (coverage + fewer
+    // revisits). Within that room prefer forward viewpoints so a demote does
+    // not U-turn across the apartment and burn path length. BFS depth then
+    // ranks adjacent rooms.
     const double distance = std::hypot(g.x - x, g.y - y);
-    // Stay in the current connected region and prefer nearby viewpoints, but
-    // let a materially larger information gain win instead of treating all
-    // candidates as equal-distance doorway retries.
     const double gain_per_meter = g.information_gain / (0.45 + distance);
+    double turn = 0.;
+    if (use_heading) {
+      const double bearing = std::atan2(g.y - y, g.x - x);
+      turn = std::abs(std::atan2(std::sin(bearing - robot_yaw),
+                                 std::cos(bearing - robot_yaw)));
+    }
+    // >~100° is a reverse commitment; keep it after forward work in-region.
+    const bool reverse = use_heading && turn > 1.75;
     return std::tuple(preferred && !descendant(g.region_id, preferred),
-                      depth(g.region_id), distance - .20 * gain_per_meter,
-                      -gain_per_meter, g.region_id, g.x, g.y);
+                      reverse, turn, depth(g.region_id),
+                      distance - .20 * gain_per_meter, -gain_per_meter,
+                      g.region_id, g.x, g.y);
   };
   std::stable_sort(goals.begin(), goals.end(), [&](const auto& a, const auto& b) {
     return rank(a) < rank(b);
