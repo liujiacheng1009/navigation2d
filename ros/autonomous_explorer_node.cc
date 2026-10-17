@@ -2080,9 +2080,9 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   bool PathCutsMappedObstacle() const {
-    // Live-map check always runs (including entry/return). PathCutsLiveOccupied
-    // judges the OpenPassable-opened grid so door-width SLAM seals match the
-    // planner; thick structural walls stay lethal.
+    // Live-map check always runs (including entry/return). Door-width SLAM
+    // seals are exempt; structural occupied stays lethal (no OpenPassable
+    // hide-the-wall).
     if (!navigation_ || !map_ || map_->info.resolution <= 0.) return false;
     const auto& route = navigation_->path();
     if (route.size() < 2) return false;

@@ -654,8 +654,8 @@ int main() {
   assert(pinched.cells[20 * pinched.width + 40] == 0);
 
   // Door-width occupied bar across a kitchen mouth is a SLAM seal: OpenPassable
-  // carves it and PathCuts (on the opened grid) allows the entry chord.
-  // Thick structural walls remain lethal (covered by through-wall tests below).
+  // carves it and PathCuts (seal-exempt on the live map) allows the entry
+  // chord. Thick structural walls remain lethal (through-wall tests below).
   navigation2d::ExplorationGrid barred;
   barred.width = 60;
   barred.height = 40;
@@ -960,6 +960,9 @@ int main() {
         {rx, (24 + .5) * exterior.resolution},
     };
     assert(navigation2d::PathCutsLiveOccupied(exterior, through, rx, ry));
+    // OpenPassable must not carve the structural wall into a free chord.
+    navigation2d::OpenPassableOpenings(&exterior);
+    assert(exterior.cells[18 * exterior.width + 30] == 100);
   }
 
   // Occupied door-width kitchen bar: OpenPassable carves it; PathCuts allows
