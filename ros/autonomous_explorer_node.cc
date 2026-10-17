@@ -739,6 +739,22 @@ class AutonomousExplorer final : public rclcpp::Node {
     entry_probe_attempts_ = 0;
   }
 
+  // Entry budget exhausted or mouth unplannable: cool the doorway so the tour
+  // cannot immediately re-drive the same hall→threshold shuttle.
+  void AbandonLockedEntryMouth(const std::string& reason) {
+    Goal mouth = pending_entry_goal_.value_or(
+        locked_entry_mouth_.value_or(active_goal_));
+    explorer_.RecordAttempt(mouth, false);
+    explorer_.CoolRegion(mouth.frontier_x, mouth.frontier_y, 1.50, 8000u);
+    explorer_.CoolRegion(mouth.x, mouth.y, 1.00, 5000u);
+    recently_demoted_ = mouth;
+    recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(25.0);
+    ClearEntryMouthLock();
+    committed_tour_.clear();
+    next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
+    PublishStatus("SELECTING", reason);
+  }
+
   bool SameEntryMouth(const Goal& a, const Goal& b) const {
     return std::hypot(a.frontier_x - b.frontier_x, a.frontier_y - b.frontier_y) <
                .75 ||
@@ -1242,23 +1258,15 @@ class AutonomousExplorer final : public rclcpp::Node {
       LockEntryMouth(goal);
       if (StartEntryProbe()) return;
       // Hallway reject + failed entry: keep the lock for a few SelectNextGoal
-      // retries; only cool after the attempt budget is exhausted.
+      // retries; abandon (wide cool) after the attempt budget is exhausted.
       if (entry_probe_attempts_ >= 4) {
-        explorer_.RecordAttempt(goal, false);
-        ClearEntryMouthLock();
-      } else {
-        pending_entry_goal_.reset();  // lock retained
-        next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
-        return;
+        AbandonLockedEntryMouth(
+            "hallway reject; entry probe exhausted, leaving mouth");
+        continue;
       }
-      const auto cell = PoseCell();
-      if (!reject_pose_valid_ || cell.first != reject_cell_x_ || cell.second != reject_cell_y_) {
-        reject_pose_valid_ = true;
-        reject_cell_x_ = cell.first;
-        reject_cell_y_ = cell.second;
-        reject_streak_ = 0;
-      }
-      ++reject_streak_;
+      pending_entry_goal_.reset();  // lock retained
+      next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+      return;
     }
     // Same pose keeps rejecting every queued frontier (often cooled first-
     // segment signatures while pinched in an alcove). Retreat along the
@@ -1660,14 +1668,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         PublishStatus("COMPLETING", "path cut; retrying locked mouth with banned chord");
         return true;
       }
-      explorer_.RecordAttempt(*pending_entry_goal_, false);
-      recently_demoted_ = *pending_entry_goal_;
-      recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(8.0);
-      ClearEntryMouthLock();
-      committed_tour_.clear();
-      next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
-      PublishStatus("SELECTING",
-                    "locked mouth path cut exhausted; leaving mouth");
+      AbandonLockedEntryMouth("locked mouth path cut exhausted; leaving mouth");
       return true;
     }
     const double clearance = state.global_planning.path_min_clearance_m > 0.
@@ -1801,10 +1802,12 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (!recently_demoted_ || recently_demoted_until_.nanoseconds() == 0)
       return false;
     if (now() >= recently_demoted_until_) return false;
+    // Mouth match must cover the whole doorway cluster, not just one cell —
+    // 0.5 m let adjacent hall standoffs re-queue the same shuttle.
     return std::hypot(goal.x - recently_demoted_->x,
-                      goal.y - recently_demoted_->y) < 0.5 ||
+                      goal.y - recently_demoted_->y) < 1.20 ||
            std::hypot(goal.frontier_x - recently_demoted_->frontier_x,
-                      goal.frontier_y - recently_demoted_->frontier_y) < 0.5;
+                      goal.frontier_y - recently_demoted_->frontier_y) < 1.50;
   }
 
   void Finish(bool success, const std::string& message) {
@@ -2320,14 +2323,10 @@ class AutonomousExplorer final : public rclcpp::Node {
             return;
           }
           if (entry_probe_attempts_ < 4 && StartEntryProbe()) return;
-          // Still on the threshold with the room open — never mark success or
-          // hop mouths; that left CARROT inside while the robot walked away.
-          explorer_.RecordAttempt(*pending_entry_goal_, false);
-          recently_demoted_ = *pending_entry_goal_;
-          recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(4.0);
-          next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
-          PublishStatus("SELECTING",
-                        "at doorway; entry incomplete, keeping locked mouth");
+          // Budget spent on the threshold: cool the mouth. Keeping the lock
+          // here re-drove hall→door→fail→hall (red-box shuttle).
+          AbandonLockedEntryMouth(
+              "at doorway; entry incomplete, leaving mouth");
           return;
         }
         explorer_.RecordAttempt(active_goal_, true);
@@ -2642,7 +2641,8 @@ class AutonomousExplorer final : public rclcpp::Node {
           if (last_goal_path_progress_time_.nanoseconds() > 0 &&
               (now() - last_goal_path_progress_time_).seconds() > 4.0) {
             navigation_.reset();
-            cooled_signatures_.clear();
+            // Keep cooled_signatures_: clearing re-enabled the banned chord
+            // and restarted the probe↔retreat shuttle.
             paint_driven_corridor_ = true;
             paint_trail_budget_m_ = 8.0;
             if (entry_probe_attempts_ < 4 && StartEntryProbe()) {
@@ -2650,12 +2650,10 @@ class AutonomousExplorer final : public rclcpp::Node {
                             "doorjamb STOP; retrying locked mouth entry");
               return;
             }
-            if (TryStartEscape()) {
-              recovery_.resume_after_escape = true;
-              PublishStatus("RECOVERING",
-                            "doorjamb STOP; peel then resume locked mouth");
-              return;
-            }
+            AbandonLockedEntryMouth(
+                "doorjamb STOP; entry exhausted, leaving mouth");
+            if (StartRetreat()) return;
+            return;
           }
           return;
         }
@@ -2677,7 +2675,6 @@ class AutonomousExplorer final : public rclcpp::Node {
         if (locked_entry_mouth_ || pending_entry_goal_) {
           if (!pending_entry_goal_) pending_entry_goal_ = locked_entry_mouth_;
           navigation_.reset();
-          cooled_signatures_.clear();
           paint_driven_corridor_ = true;
           paint_trail_budget_m_ = 8.0;
           if (entry_probe_attempts_ < 4 && StartEntryProbe()) {
@@ -2685,12 +2682,9 @@ class AutonomousExplorer final : public rclcpp::Node {
                           "side clearance at mouth; deeper entry probe");
             return;
           }
-          if (TryStartEscape()) {
-            recovery_.resume_after_escape = true;
-            PublishStatus("RECOVERING",
-                          "side clearance at mouth; peel then resume entry");
-            return;
-          }
+          AbandonLockedEntryMouth(
+              "side clearance at mouth; entry exhausted, leaving mouth");
+          if (StartRetreat()) return;
           return;
         }
         if (recovery_.side_peels < 2 && TryStartEscape()) {
@@ -2796,26 +2790,23 @@ class AutonomousExplorer final : public rclcpp::Node {
             return;
           }
         } else {
-          // Locked entry: do not demote the kitchen mouth on one stall.
+          // Locked entry: retry within budget; otherwise abandon the mouth so
+          // the tour cannot shuttle hall→threshold again.
           if (locked_entry_mouth_ || pending_entry_goal_) {
             if (!pending_entry_goal_) pending_entry_goal_ = locked_entry_mouth_;
             retreat_attempted_ = false;
             navigation_.reset();
-            if (StartRetreat()) {
-              PublishStatus("NAVIGATING",
-                            "entry stall; trail retreat then retry locked mouth");
-              return;
-            }
             if (entry_probe_attempts_ < 4 && StartEntryProbe()) return;
+            AbandonLockedEntryMouth(
+                "entry stall; probe exhausted, leaving mouth");
+            recovery_.Clear();
+            if (StartRetreat()) return;
+            return;
           }
-          // One failed execution cools that mouth via the explorer policy —
-          // do not soft-cool and immediately reselect the same doorway.
-          explorer_.RecordAttempt(
-              pending_entry_goal_.value_or(active_goal_), false);
-          recently_demoted_ = pending_entry_goal_.value_or(active_goal_);
+          explorer_.RecordAttempt(active_goal_, false);
+          recently_demoted_ = active_goal_;
           recently_demoted_until_ =
-              now() + rclcpp::Duration::from_seconds(8.0);
-          ClearEntryMouthLock();
+              now() + rclcpp::Duration::from_seconds(25.0);
           recovery_.Clear();
         }
         // Open-forward + side wall: micro-peels spin in place. Trail retreat
