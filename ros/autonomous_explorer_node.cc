@@ -776,7 +776,9 @@ class AutonomousExplorer final : public rclcpp::Node {
     // mouth cannot reject the only path into the pocket.
     paint_driven_corridor_ = true;
     paint_trail_budget_m_ = 8.0;
-    cooled_signatures_.clear();
+    // Do not clear cooled_signatures_: PathCuts bans the through-wall chord,
+    // then clearing here re-enabled it and the robot shuttled probe↔retreat
+    // in the red box (frontier_cells=0 retreat goals interleaved with entry).
     if (!StartNavigation(*probe, false)) {
       RCLCPP_WARN(get_logger(),
                   "Entry probe rejected: target=(%.2f,%.2f) depth=%.2f attempt=%d "
@@ -1649,21 +1651,26 @@ class AutonomousExplorer final : public rclcpp::Node {
     // entry. Demoting here was the hesitation loop (probe A → cut → mouth B → …).
     if (locked_entry_mouth_ || pending_entry_goal_) {
       if (!pending_entry_goal_) pending_entry_goal_ = locked_entry_mouth_;
-      if (entry_probe_attempts_ < 4 && StartEntryProbe()) {
+      // One banned-chord retry only. Further retreat→retry shuttles are the
+      // red-box back-and-forth; leave the mouth for other unfinished work.
+      if (entry_probe_attempts_ < 2 && StartEntryProbe()) {
         PublishStatus("COMPLETING", "path cut; retrying locked mouth with banned chord");
-        return true;
-      }
-      retreat_attempted_ = false;
-      if (StartRetreat()) {
-        PublishStatus("NAVIGATING", "path cut at locked mouth; retreat then retry");
         return true;
       }
       explorer_.RecordAttempt(*pending_entry_goal_, false);
       recently_demoted_ = *pending_entry_goal_;
       recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(8.0);
+      if (pose_) {
+        explorer_.CoolRegion(pending_entry_goal_->x, pending_entry_goal_->y, 1.20,
+                             2000u);
+        explorer_.CoolRegion(pending_entry_goal_->frontier_x,
+                             pending_entry_goal_->frontier_y, 1.20, 2000u);
+      }
       ClearEntryMouthLock();
-      next_selection_ = now() + rclcpp::Duration::from_seconds(2.0);
-      PublishStatus("SELECTING", "locked mouth path cut exhausted");
+      committed_tour_.clear();
+      next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
+      PublishStatus("SELECTING",
+                    "locked mouth path cut exhausted; leaving mouth");
       return true;
     }
     const double clearance = state.global_planning.path_min_clearance_m > 0.
