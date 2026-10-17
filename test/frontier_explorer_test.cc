@@ -619,8 +619,8 @@ int main() {
   assert(lateral_probe.has_value());
   assert(lateral_probe->x > kg.frontier_x + .10);
 
-  // SLAM-pinched kitchen: free throat shrinks to 0.20 m with unknown beyond.
-  // OpenPassableOpenings must erode jamb bleed and open a plannable nose.
+  // Pinched kitchen mouth: free speck in a 0.20 m unknown throat. Flood unknown
+  // through the free gap; never clear occupied jambs.
   navigation2d::ExplorationGrid pinched;
   pinched.width = 60;
   pinched.height = 40;
@@ -644,7 +644,8 @@ int main() {
   assert(free_in_throat >= 10);
   assert(pinched.cells[20 * pinched.width + 40] == 0);
 
-  // Horizontal SLAM door bar across a 0.70 m kitchen mouth.
+  // Occupied bar across a mouth is a wall: PathCuts rejects the chord, and
+  // OpenPassable must not carve the bar into free.
   navigation2d::ExplorationGrid barred;
   barred.width = 60;
   barred.height = 40;
@@ -659,9 +660,6 @@ int main() {
   bpaint(2, 58, 22, 36, -1);   // north kitchen unknown
   bpaint(20, 34, 18, 22, 0);   // 0.70 m mouth
   bpaint(20, 34, 20, 21, 100); // 1-cell occupied bar sealing the mouth
-  // PathCuts must agree with OpenPassable on the raw live seal (not a pre-carved
-  // copy). Using only IsOpenableDoorSealCell missed eroded jambs and left
-  // enterable rooms unvisited.
   {
     const double rx = (27 + .5) * barred.resolution;
     const double ry = (17 + .5) * barred.resolution;
@@ -669,18 +667,17 @@ int main() {
         {rx, ry},
         {rx, (24 + .5) * barred.resolution},
     };
-    assert(!navigation2d::PathCutsLiveOccupied(barred, entry, rx, ry));
+    assert(navigation2d::PathCutsLiveOccupied(barred, entry, rx, ry));
   }
-  // Before carving, PathCuts must treat the bar as an openable door seal.
   assert(navigation2d::IsOpenableDoorSealCell(barred, 27, 20));
   navigation2d::OpenPassableOpenings(&barred);
-  assert(barred.cells[20 * barred.width + 27] == 0);
-  assert(barred.cells[24 * barred.width + 27] == 0);
-  assert(!navigation2d::IsOpenableDoorSealCell(barred, 27, 20));
+  assert(barred.cells[20 * barred.width + 27] == 100);
+  // Unknown past the free mouth cells may still flood open for planning.
+  assert(barred.cells[24 * barred.width + 27] == 0 ||
+         barred.cells[24 * barred.width + 27] == -1);
 
-  // After both sides of a kitchen mouth are explored free, the live SLAM bar
-  // remains occupied. PathCuts must still treat that door-width free↔free
-  // seal as crossable (return home / re-enter kitchen).
+  // free↔free occupied bar is still a wall for PathCuts (return/re-enter must
+  // go through a real free gap, not through the bar).
   {
     navigation2d::ExplorationGrid both_free;
     both_free.width = 60;
@@ -697,9 +694,15 @@ int main() {
     fpaint(2, 58, 4, 18, 0);      // south hall
     fpaint(2, 58, 22, 36, 0);     // north kitchen now explored
     fpaint(20, 34, 18, 22, 0);    // 0.70 m mouth vestibule
-    fpaint(20, 34, 20, 21, 100);  // door-width SLAM bar
+    fpaint(20, 34, 20, 21, 100);  // occupied bar
     assert(navigation2d::IsOpenableDoorSealCell(both_free, 27, 20));
-    // Isolated free↔free speck must not count as a door.
+    const double rx = (27 + .5) * both_free.resolution;
+    const double ry = (17 + .5) * both_free.resolution;
+    const std::vector<std::pair<double, double>> through_bar = {
+        {rx, ry},
+        {rx, (24 + .5) * both_free.resolution},
+    };
+    assert(navigation2d::PathCutsLiveOccupied(both_free, through_bar, rx, ry));
     both_free.cells[10 * both_free.width + 10] = 100;
     assert(!navigation2d::IsOpenableDoorSealCell(both_free, 10, 10));
   }
@@ -739,8 +742,8 @@ int main() {
     assert(!tour.empty());
   }
 
-  // Same short seal, but the free hall continues on the bar row. Measuring
-  // span over free+occupied used to exceed max_lat and skip the carve.
+  // Occupied speck on a free hall row stays occupied; unknown beyond a free
+  // gap may still flood without carving the speck.
   navigation2d::ExplorationGrid wide_hall;
   wide_hall.width = 80;
   wide_hall.height = 40;
@@ -753,9 +756,9 @@ int main() {
   };
   wpaint(2, 78, 4, 21, 0);      // open hall including the bar row
   wpaint(2, 78, 21, 36, -1);    // room unknown immediately past the bar
-  wpaint(30, 44, 20, 21, 100);  // 0.70 m free↔unknown seal on the hall row
+  wpaint(30, 44, 20, 21, 100);  // occupied speck on the hall row
   navigation2d::OpenPassableOpenings(&wide_hall);
-  assert(wide_hall.cells[20 * wide_hall.width + 37] == 0);
+  assert(wide_hall.cells[20 * wide_hall.width + 37] == 100);
   assert(wide_hall.cells[24 * wide_hall.width + 37] == 0);
 
   // Structural free↔free wall with unknown only far beyond a deep free room
@@ -948,8 +951,7 @@ int main() {
     assert(navigation2d::PathCutsLiveOccupied(exterior, through, rx, ry));
   }
 
-  // Door-width SLAM seal: entry chord through the seal must stay legal so
-  // kitchen entry probes are not rejected as "mapped obstacles".
+  // Occupied door-width bar is still a wall: entry chord through it cuts.
   {
     navigation2d::ExplorationGrid sealed;
     sealed.width = 60;
@@ -969,7 +971,7 @@ int main() {
     spaint(2, 58, 4, 18, 0);      // hall
     spaint(2, 58, 22, 36, -1);    // kitchen unknown
     spaint(20, 34, 18, 22, 0);    // 0.70 m mouth vestibule
-    spaint(20, 34, 20, 21, 100);  // thin door bar
+    spaint(20, 34, 20, 21, 100);  // thin occupied bar
     assert(navigation2d::IsOpenableDoorSealCell(sealed, 27, 20));
     const double rx = (27 + .5) * sealed.resolution;
     const double ry = (17 + .5) * sealed.resolution;
@@ -977,7 +979,7 @@ int main() {
         {rx, ry},
         {rx, (24 + .5) * sealed.resolution},
     };
-    assert(!navigation2d::PathCutsLiveOccupied(sealed, entry, rx, ry));
+    assert(navigation2d::PathCutsLiveOccupied(sealed, entry, rx, ry));
   }
 
   // Wall-tip pause thrash: low-clearance path cuts must abandon (not replan).

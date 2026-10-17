@@ -2077,8 +2077,8 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   bool PathCutsMappedObstacle() const {
-    // Live-map check always runs (including entry/return). Door seals stay
-    // legal via IsOpenableDoorSealCell inside PathCutsLiveOccupied.
+    // Live-map check always runs (including entry/return). Occupied cells are
+    // walls — never exempted as "door seals".
     if (!navigation_ || !map_ || map_->info.resolution <= 0.) return false;
     const auto& route = navigation_->path();
     if (route.size() < 2) return false;
