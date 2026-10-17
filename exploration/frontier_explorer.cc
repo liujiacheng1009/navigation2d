@@ -18,9 +18,13 @@ constexpr double kNarrowMinWidth = .32;
 constexpr double kNarrowMaxWidth = 1.40;
 constexpr double kPlanningRadius = .22;
 constexpr double kNarrowClearance = kPlanningRadius;
-// Free spans at least this wide with unknown beyond count as pinched mouths
-// for unknown flooding (never for carving structural walls).
+// Free spans at least this wide with unknown beyond count as pinched mouths.
 constexpr double kDoorPinchMinWidth = .18;
+// When a real free throat is narrower than the planning footprint after SLAM
+// thickens the jambs, erode only those posts (never a sealed solid wall) until
+// the free span reaches this width.
+constexpr double kDoorCarveTargetWidth = .56;
+constexpr int kDoorJambErodeMaxCells = 4;
 // Narrow doorway floor: close enough to see through a kitchen mouth, but not
 // the old 0.08 m rim that parked the chassis on the wall. Open-space goals
 // use config.minimum_standoff (much larger); this only unlocks corridor poses.
@@ -200,16 +204,16 @@ bool PathCutsLiveOccupied(const ExplorationGrid& live,
       live.cells.size() != static_cast<std::size_t>(live.width) * live.height ||
       path_xy.size() < 2 || body_radius <= 0.)
     return false;
-  // Judge the live map. Door-width SLAM seals are passable (kitchen entry);
-  // everything else occupied is a structural wall. Do NOT run OpenPassable
-  // here — its flood/carve must not hide a through-wall chord from PathCuts.
+  // Judge the same opened grid the planner uses: door-width seal carve +
+  // free-gap jamb erode. Structural walls (no free throat) stay lethal.
+  ExplorationGrid opened = live;
+  OpenPassableOpenings(&opened);
   const double resolution = live.resolution;
   const int width = live.width;
   const int height = live.height;
   const auto lethal = [&](int col, int row) {
     if (col < 0 || row < 0 || col >= width || row >= height) return true;
-    if (live.cells[static_cast<std::size_t>(row) * width + col] <= 0) return false;
-    return !IsOpenableDoorSealCell(live, col, row);
+    return opened.cells[static_cast<std::size_t>(row) * width + col] > 0;
   };
   const auto hits_body = [&](double world_x, double world_y) {
     if (std::hypot(world_x - robot_x, world_y - robot_y) < under_robot_m)
@@ -268,9 +272,12 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
   auto value_at = [&](int col, int row) -> std::int8_t {
     return grid->cells[static_cast<std::size_t>(row) * width + col];
   };
-  // Carve only door-width SLAM seals (same predicate PathCuts exempts). The
-  // old run-length carve + jamb erode cleared ~3× more occupied cells on live
-  // maps and invented through-wall planner chords (cyan diagonals in the UI).
+  auto set_free = [&](int col, int row) {
+    if (col < 0 || row < 0 || col >= width || row >= height) return;
+    grid->cells[static_cast<std::size_t>(row) * width + col] = 0;
+  };
+  // Carve only door-width SLAM seals. Do not run the old loose run-length
+  // carve that ate structural walls.
   {
     std::vector<std::uint8_t> clear(grid->cells.size(), 0);
     for (int row = 0; row < height; ++row) {
@@ -282,8 +289,9 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
     for (std::size_t index = 0; index < clear.size(); ++index)
       if (clear[index]) grid->cells[index] = 0;
   }
-  // Flood unknown through an already-free wall-to-wall gap so planning can
-  // step into a still-white room. Never erode occupied jambs here.
+  // Flood unknown through an already-free wall-to-wall gap. If SLAM thickened
+  // the posts so the free throat is under the footprint, erode only those
+  // posts (requires an existing free gap + unknown beyond).
   auto unknown_beyond = [&](bool horizontal, int fixed, int begin, int end) {
     const int mid = (begin + end) / 2;
     for (const int delta : {-1, 1}) {
@@ -298,10 +306,37 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
     }
     return false;
   };
+  auto erode_jambs = [&](bool horizontal, int fixed, int* begin, int* end) {
+    if (!unknown_beyond(horizontal, fixed, *begin, *end)) return;
+    double gap_m = static_cast<double>(*end - *begin) * grid->resolution;
+    if (gap_m >= kDoorCarveTargetWidth) return;
+    // Posts must already be occupied wall cells bounding a free throat.
+    if (horizontal) {
+      if (*begin <= 0 || *end >= width) return;
+      if (value_at(*begin - 1, fixed) <= 0 || value_at(*end, fixed) <= 0) return;
+    } else {
+      if (*begin <= 0 || *end >= height) return;
+      if (value_at(fixed, *begin - 1) <= 0 || value_at(fixed, *end) <= 0) return;
+    }
+    const int need = static_cast<int>(std::ceil(
+        (kDoorCarveTargetWidth - gap_m) / (2. * grid->resolution)));
+    const int erode = std::max(1, std::min(kDoorJambErodeMaxCells, need));
+    for (int step = 1; step <= erode; ++step) {
+      if (horizontal) {
+        set_free(*begin - step, fixed);
+        set_free(*end + step - 1, fixed);
+      } else {
+        set_free(fixed, *begin - step);
+        set_free(fixed, *end + step - 1);
+      }
+    }
+    *begin -= erode;
+    *end += erode;
+  };
   std::vector<int> budget(grid->cells.size(), -1);
   auto seed_span = [&](bool horizontal, int fixed, int begin, int end) {
-    const int span_begin = begin;
-    const int span_end = end;
+    int span_begin = begin;
+    int span_end = end;
     const int pinch_cells =
         static_cast<int>(std::ceil(kDoorPinchMinWidth / grid->resolution));
     const int sample_col = horizontal ? begin : fixed;
@@ -318,6 +353,9 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
                        gap_m <= kNarrowMaxWidth &&
                        unknown_beyond(horizontal, fixed, begin, end);
     if (!shaped && !pinch) return;
+    // Widen only true free pinches. Never invent a gap through solid wall.
+    if (pinch && gap_m < kDoorCarveTargetWidth)
+      erode_jambs(horizontal, fixed, &span_begin, &span_end);
     const int span = std::max(1, span_end - span_begin);
     bool known_free = false;
     bool unknown = false;

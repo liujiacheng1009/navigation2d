@@ -20,9 +20,9 @@ struct ExplorationGrid {
   std::vector<std::int8_t> cells;
 };
 
-// Carve door-width SLAM seals (IsOpenableDoorSealCell only) and flood unknown
-// through free gaps. Never erode structural jambs — that invented through-wall
-// planner chords.
+// Carve door-width SLAM seals, widen undersized free-gap jambs to the planning
+// footprint, and flood unknown through those throats. Solid walls with no free
+// gap are never opened.
 void OpenPassableOpenings(ExplorationGrid* grid);
 
 // True when this occupied cell is a door-width SLAM seal (passable on both
@@ -31,9 +31,9 @@ void OpenPassableOpenings(ExplorationGrid* grid);
 // are not seals.
 bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row);
 
-// True when a world-frame polyline puts the body on a live occupied cell that
-// is not a door-width SLAM seal. Structural through-wall chords fail; kitchen
-// door seals stay enterable. under_robot_m covers chassis SLAM bleed only.
+// True when a world-frame polyline puts the body on a cell that remains
+// occupied after OpenPassableOpenings. Matches the planner so kitchen free-gap
+// / seal entry is not rejected; structural through-wall chords still fail.
 bool PathCutsLiveOccupied(const ExplorationGrid& live,
                           const std::vector<std::pair<double, double>>& path_xy,
                           double robot_x, double robot_y,
