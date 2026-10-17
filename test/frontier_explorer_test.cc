@@ -200,6 +200,23 @@ int main() {
                                1.80, 3000u);
   assert(!leftover_explorer.SelectLeftoverApproach(5., 5.).has_value());
 
+  // Mature open room with a >=minimum_frontier_cells residual strip against a
+  // furniture wall: SelectGoals must not place a tour GOAL in already-explored
+  // free space (the red-box junction thrash). Completing leftovers may still
+  // see the fragment.
+  navigation2d::ExplorationGrid residual = leftover;
+  for (int row = 40; row < 49; ++row)
+    residual.cells[static_cast<std::size_t>(row * residual.width + 20)] = -1;
+  for (int row = 40; row < 49; ++row)
+    residual.cells[static_cast<std::size_t>(row * residual.width + 19)] = 100;
+  navigation2d::FrontierExplorer residual_explorer(leftover_config);
+  residual_explorer.UpdateMap(residual);
+  assert(residual_explorer.KnownCells() >= 10000);
+  assert(residual_explorer.raw_frontier_cells() >= 6);
+  const auto residual_tour = residual_explorer.SelectGoals(5., 5.);
+  assert(residual_tour.empty());
+  assert(residual_explorer.SelectLeftoverApproach(5., 5.).has_value());
+
   // A 0.45 m pinch is wide enough for the 0.29 m chassis. The observation
   // pose has to sit on the far side of that pinch, beside the unknown
   // boundary. After that look succeeds, the same mouth must not be queued

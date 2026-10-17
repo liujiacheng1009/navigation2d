@@ -1225,6 +1225,26 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
     }
     if (best) goals.push_back(*best);
   }
+  // Mature maps: open-space residual fragments (furniture legs, already-seen
+  // wall tips) still form >=minimum_frontier_cells clusters with tiny visible
+  // unknown. Those viewpoints land in blue explored junctions and starve
+  // unfinished alcoves. Keep corridor mouths and meaningful unknown pockets.
+  if (KnownCells() >= 10000) {
+    constexpr double kMinOpenResidualGain = 1.5;
+    constexpr int kMinOpenResidualCells = 18;
+    goals.erase(std::remove_if(goals.begin(), goals.end(),
+                               [&](const ExplorationGoal& goal) {
+                                 if (CorridorMouthAt(map_, goal.frontier_x,
+                                                     goal.frontier_y))
+                                   return false;
+                                 if (goal.information_gain >= kMinOpenResidualGain)
+                                   return false;
+                                 if (goal.frontier_cells >= kMinOpenResidualCells)
+                                   return false;
+                                 return true;
+                               }),
+                goals.end());
+  }
   std::sort(goals.begin(), goals.end(),
             [](const auto& a, const auto& b) { return a.score > b.score; });
   // Stage A/B: mouth is the task unit — one goal per doorway/alcove, not per
@@ -1563,6 +1583,13 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
     auto leftovers = SelectLeftoverApproaches(robot_x, robot_y, 5);
     for (auto& leftover : leftovers) {
       if (!GoalInActiveRegion(leftover)) continue;
+      // Do not promote open-space residual leftovers into the exploring tour
+      // on a mature map — that re-queued GOAL/CARROT in already-explored
+      // junctions while unfinished rooms stayed white. Completing still uses
+      // SelectLeftoverApproaches directly for true tip finish-up.
+      if (KnownCells() >= 10000 &&
+          !CorridorMouthAt(map_, leftover.frontier_x, leftover.frontier_y))
+        continue;
       const bool duplicate = std::any_of(
           remaining.begin(), remaining.end(), [&](const ExplorationGoal& prior) {
             return std::hypot(prior.frontier_x - leftover.frontier_x,
