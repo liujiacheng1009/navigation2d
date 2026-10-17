@@ -35,9 +35,15 @@ class RegionScheduler {
                                      double robot_x, double robot_y);
   void Enter(double x, double y);
   void Enter(const ExplorationGoal& goal);
+  // True when `id` is the active DFS region or a child of it. Empty stack
+  // means no commitment yet (any region is eligible).
+  bool InActiveContext(RegionId id) const;
   bool Complete() const;
   const std::map<RegionId, RegionRecord>& regions() const { return regions_; }
   const std::vector<RegionId>& stack() const { return stack_; }
+  RegionId ActiveRegion() const {
+    return stack_.empty() ? 0 : stack_.back();
+  }
   std::string Audit() const;
  private:
   int Cell(double x, double y) const;

@@ -310,6 +310,21 @@ void RegionScheduler::Enter(const ExplorationGoal& goal) {
   it->second.state = RegionState::kActive;
 }
 
+bool RegionScheduler::InActiveContext(RegionId id) const {
+  if (!id) return false;
+  if (stack_.empty()) return true;
+  const RegionId preferred = stack_.back();
+  std::set<RegionId> seen;
+  RegionId cur = id;
+  while (cur && seen.insert(cur).second) {
+    if (cur == preferred) return true;
+    const auto it = regions_.find(cur);
+    if (it == regions_.end()) break;
+    cur = it->second.parent;
+  }
+  return false;
+}
+
 std::vector<ExplorationGoal> RegionScheduler::Order(
     std::vector<ExplorationGoal> goals, double x, double y) {
   for (auto& [id, r] : regions_) { (void)id; r.candidates = 0; }

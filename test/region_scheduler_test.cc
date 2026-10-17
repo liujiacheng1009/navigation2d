@@ -113,5 +113,23 @@ int main() {
   corridors.cells[31] = 100;
   for (int i = 0; i < 70; ++i) split_scheduler.Update(corridors, .2);
   assert(split_scheduler.regions().count(fresh) == 0);
+
+  // Once a room is entered, finish its observations before leaving — even if
+  // a sibling room offers a higher score.
+  navigation2d::RegionScheduler finish_first;
+  finish_first.Update(grid, .20);
+  navigation2d::ExplorationGoal left_low = near;
+  left_low.score = 1.;
+  left_low.information_gain = 1.;
+  navigation2d::ExplorationGoal right_high = far;
+  right_high.score = 100.;
+  right_high.information_gain = 100.;
+  finish_first.Enter(left_low);
+  assert(finish_first.ActiveRegion() == left);
+  assert(finish_first.InActiveContext(left));
+  assert(!finish_first.InActiveContext(right));
+  const auto locked = finish_first.Order({right_high, left_low}, .8, 1.2);
+  assert(locked.front().region_id == left);
+  assert(locked.back().region_id == right);
   return 0;
 }

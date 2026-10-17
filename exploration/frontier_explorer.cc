@@ -151,16 +151,34 @@ void OpenPassableOpenings(ExplorationGrid* grid) {
           auto cell = [&](int bb) {
             return lx != 0 ? std::pair<int, int>{bb, a} : std::pair<int, int>{a, bb};
           };
+          auto passage_reaches_unknown = [&](int c, int r, int dir) {
+            for (int step = 1; step <= 4; ++step) {
+              const int nc = c + dir * step * px;
+              const int nr = r + dir * step * py;
+              if (nc < 0 || nr < 0 || nc >= width || nr >= height) return false;
+              const std::int8_t value = value_at(nc, nr);
+              if (value < 0) return true;
+              if (value > 0) return false;
+            }
+            return false;
+          };
           auto seal_cell = [&](int bb) {
             const auto [c, r] = cell(bb);
             if (value_at(c, r) <= 0) return false;
             if (!passable(c - px, r - py) || !passable(c + px, r + py)) return false;
-            // Prefer free↔unknown seals (room mouth). Thin free↔free bars are
-            // also SLAM artifacts across observed corridors.
             const std::int8_t neg = value_at(c - px, r - py);
             const std::int8_t pos = value_at(c + px, r + py);
-            return (neg == 0 && pos == 0) || (neg == 0 && pos < 0) ||
-                   (neg < 0 && pos == 0) || (neg < 0 && pos < 0);
+            // free↔unknown / unknown↔unknown: door mouths.
+            if ((neg == 0 && pos < 0) || (neg < 0 && pos == 0) ||
+                (neg < 0 && pos < 0))
+              return true;
+            // free↔free only when unknown sits just beyond the vestibule.
+            // Carving free↔free walls between explored rooms invented chords
+            // that PathCutsMappedObstacle then rejected in a stuck loop.
+            if (neg == 0 && pos == 0)
+              return passage_reaches_unknown(c, r, 1) ||
+                     passage_reaches_unknown(c, r, -1);
+            return false;
           };
           if (!seal_cell(b)) { ++b; continue; }
           const int begin = b;
@@ -361,6 +379,9 @@ FrontierExplorer::FrontierExplorer(FrontierExplorerConfig config)
 void FrontierExplorer::UpdateMap(ExplorationGrid map) {
   observation_map_ = map;
   unresolved_frontier_cells_ = CountRawFrontierCells();
+  // Partition observed free space into topological regions before carving.
+  // Door necks stay as edges between rooms so DFS can finish one room first.
+  regions_.Update(observation_map_, kPlanningRadius);
   OpenPassableOpenings(&map);
   map_ = std::move(map);
 }
@@ -869,9 +890,11 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
       for (int col = std::max(0, static_cast<int>(mean_col) - search);
            col <= std::min(map_.width - 1, static_cast<int>(mean_col) + search); ++col) {
         const int viewpoint_index = row * map_.width + col;
-        // Only planning-radius viewpoints. Discovery-safe cells find the
-        // frontier but must not become Navigation2D goals.
-        if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0) continue;
+        // Only planning-radius viewpoints on observed free. Carved/flooded
+        // cells past a seal must not become tour goals (through-wall paths).
+        if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0 ||
+            !RawFree(col, row))
+          continue;
         const auto [x, y] = CellCenter(col, row);
         if (Blacklisted(x, y)) continue;
         const double standoff = std::hypot(x - frontier_x, y - frontier_y);
@@ -901,7 +924,9 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
         for (int col = std::max(0, static_cast<int>(mean_col) - search);
              col <= std::min(map_.width - 1, static_cast<int>(mean_col) + search); ++col) {
           const int viewpoint_index = row * map_.width + col;
-          if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0) continue;
+          if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0 ||
+              !RawFree(col, row))
+            continue;
           const auto [x, y] = CellCenter(col, row);
           if (Blacklisted(x, y)) continue;
           const double standoff = std::hypot(x - frontier_x, y - frontier_y);
@@ -936,7 +961,8 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
              col <= std::min(map_.width - 1, static_cast<int>(mean_col) + search * 2); ++col) {
           const int viewpoint_index = row * map_.width + col;
           if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0 ||
-              !narrow_viewpoint(col, row)) continue;
+              !RawFree(col, row) || !narrow_viewpoint(col, row))
+            continue;
           const auto [x, y] = CellCenter(col, row);
           if (Blacklisted(x, y)) continue;
           const double standoff = std::hypot(x - frontier_x, y - frontier_y);
@@ -967,7 +993,9 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
           for (int col = std::max(0, target_col - approach_search);
                col <= std::min(map_.width - 1, target_col + approach_search); ++col) {
             const int viewpoint_index = row * map_.width + col;
-            if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0) continue;
+            if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0 ||
+                !RawFree(col, row))
+              continue;
             const auto [x, y] = CellCenter(col, row);
             if (Blacklisted(x, y)) continue;
             const auto [target_x, target_y] = CellCenter(target_col, target_row);
@@ -1101,7 +1129,9 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectLeftoverApproaches(
       for (int col = std::max(0, target_col - leftover_search);
            col <= std::min(map_.width - 1, target_col + leftover_search); ++col) {
         const int viewpoint_index = row * map_.width + col;
-        if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0) continue;
+        if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0 ||
+            !RawFree(col, row))
+          continue;
         const auto [x, y] = CellCenter(col, row);
         if (PersistentlyBlacklisted(x, y)) continue;
         const double standoff = std::hypot(x - frontier_x, y - frontier_y);
@@ -1248,7 +1278,9 @@ std::vector<ExplorationGoal> FrontierExplorer::OneGoalPerMouth(
          row <= std::min(map_.height - 1, frow + search); ++row) {
       for (int col = std::max(0, fcol - search);
            col <= std::min(map_.width - 1, fcol + search); ++col) {
-        if (!SafeViewpoint(col, row)) continue;
+        // Stay on observed free. Carved/flooded cells past a SLAM seal look
+        // safe on map_ but force through-wall plans on the live grid.
+        if (!SafeViewpoint(col, row) || !RawFree(col, row)) continue;
         const auto [x, y] = CellCenter(col, row);
         const double depth = depth_past_frontier(goal, x, y);
         const double lateral = std::abs((x - goal.frontier_x) * dir_y -
@@ -1271,11 +1303,17 @@ std::vector<ExplorationGoal> FrontierExplorer::OneGoalPerMouth(
     const double current_depth = depth_past_frontier(goal, goal.x, goal.y);
     if (current_depth >= kCloseStandoff) continue;
     bool advanced = false;
-    // Prefer a room-side cell on the planning graph; fall back to snapping
-    // onto the free centerline of the mouth so the goal is not a hall spin.
+    // Only pull the viewpoint into the room when that cell is already free
+    // on the live observation map. Entry into still-unknown rooms is owned
+    // by StartEntryProbe after the hall standoff is reached.
     if (auto probe = SelectEntryProbe(goal, robot_x, robot_y, kCloseStandoff,
                                       .5 * kNarrowMaxWidth)) {
-      if (depth_past_frontier(goal, probe->x, probe->y) > current_depth) {
+      const int pcol = static_cast<int>(std::floor(
+          (probe->x - map_.origin_x) / map_.resolution));
+      const int prow = static_cast<int>(std::floor(
+          (probe->y - map_.origin_y) / map_.resolution));
+      if (RawFree(pcol, prow) &&
+          depth_past_frontier(goal, probe->x, probe->y) > current_depth) {
         goal.x = probe->x;
         goal.y = probe->y;
         goal.yaw = probe->yaw;
@@ -1289,110 +1327,33 @@ std::vector<ExplorationGoal> FrontierExplorer::OneGoalPerMouth(
 
 std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
     double robot_x, double robot_y) {
-  // Stage C only: order mouth goals by nearest-coverage BFS. Mouth collapse and
-  // entry-side posing already happened in SelectGoals / OneGoalPerMouth.
+  // Mouth collapse / entry posing already happened in SelectGoals. Region
+  // scheduling owns inter-room order: stay in the active room until its
+  // executable observations are gone, then BFS to an adjacent unfinished room.
   auto remaining = SelectGoals(robot_x, robot_y);
   if (remaining.empty()) return {};
+  return regions_.Order(std::move(remaining), robot_x, robot_y);
+}
 
-  // Tour ordering walks the same planning-radius graph the goals use. A
-  // looser ClearAt bridge ordered through cells Navigation2D cannot enter.
-  std::vector<unsigned char> tour_cell(map_.cells.size(), 0);
-  for (int row = 0; row < map_.height; ++row) {
-    for (int col = 0; col < map_.width; ++col) {
-      const std::size_t index = static_cast<std::size_t>(row) * map_.width + col;
-      tour_cell[index] = SafeViewpoint(col, row);
-    }
-  }
-  const auto nearest_safe = [&](double x, double y) -> int {
-    const int center_col = static_cast<int>(std::floor((x - map_.origin_x) / map_.resolution));
-    const int center_row = static_cast<int>(std::floor((y - map_.origin_y) / map_.resolution));
-    int best = -1;
-    double best_distance = std::numeric_limits<double>::infinity();
-    const int radius = static_cast<int>(std::ceil(1.0 / map_.resolution));
-    for (int row = std::max(0, center_row - radius);
-         row <= std::min(map_.height - 1, center_row + radius); ++row) {
-      for (int col = std::max(0, center_col - radius);
-           col <= std::min(map_.width - 1, center_col + radius); ++col) {
-        const int index = row * map_.width + col;
-        if (!tour_cell[static_cast<std::size_t>(index)]) continue;
-        const double distance = std::hypot(col - center_col, row - center_row);
-        if (distance < best_distance) { best_distance = distance; best = index; }
-      }
-    }
-    return best;
-  };
-  const auto distance_field = [&](int start) {
-    std::vector<int> distance(map_.cells.size(), -1);
-    if (start < 0) return distance;
-    std::deque<int> queue{start};
-    distance[start] = 0;
-    constexpr int dx[] = {-1, 1, 0, 0};
-    constexpr int dy[] = {0, 0, -1, 1};
-    while (!queue.empty()) {
-      const int current = queue.front(); queue.pop_front();
-      const int row = current / map_.width, col = current % map_.width;
-      for (int direction = 0; direction < 4; ++direction) {
-        const int x = col + dx[direction], y = row + dy[direction];
-        if (x < 0 || y < 0 || x >= map_.width || y >= map_.height) continue;
-        const int next = y * map_.width + x;
-        if (!tour_cell[static_cast<std::size_t>(next)] || distance[next] >= 0) continue;
-        distance[next] = distance[current] + 1;
-        queue.push_back(next);
-      }
-    }
-    return distance;
-  };
+std::vector<ExplorationGoal> FrontierExplorer::OrderByRegion(
+    std::vector<ExplorationGoal> goals, double robot_x, double robot_y) {
+  if (goals.empty()) return goals;
+  return regions_.Order(std::move(goals), robot_x, robot_y);
+}
 
-  std::vector<ExplorationGoal> tour;
-  int current = nearest_safe(robot_x, robot_y);
-  // Coverage policy: unfinished doorway/alcove mouths before open-boundary
-  // expansion, then nearest BFS in the local pocket. Gain only breaks ties.
-  std::vector<int> region_distance;
-  const int region_radius_cells = std::max(
-      1, static_cast<int>(std::ceil(5.0 / map_.resolution)));
-  while (!remaining.empty() && current >= 0) {
-    const auto distances = distance_field(current);
-    auto next = remaining.end();
-    int best_distance = std::numeric_limits<int>::max();
-    double best_gain = -1.;
-    int best_frontier_cells = -1;
-    bool best_room_mouth = false;
-    for (auto candidate = remaining.begin(); candidate != remaining.end(); ++candidate) {
-      const int viewpoint = nearest_safe(candidate->x, candidate->y);
-      if (viewpoint < 0 || distances[viewpoint] < 0) continue;
-      if (!region_distance.empty() &&
-          (region_distance[viewpoint] < 0 ||
-           region_distance[viewpoint] > region_radius_cells))
-        continue;
-      const int distance = distances[viewpoint];
-      const bool room_mouth =
-          CorridorMouthAt(map_, candidate->frontier_x, candidate->frontier_y);
-      const bool better =
-          next == remaining.end() ||
-          (room_mouth && !best_room_mouth) ||
-          (room_mouth == best_room_mouth && distance < best_distance) ||
-          (room_mouth == best_room_mouth && distance == best_distance &&
-           (candidate->information_gain > best_gain + 1e-9 ||
-            (std::abs(candidate->information_gain - best_gain) <= 1e-9 &&
-             candidate->frontier_cells > best_frontier_cells)));
-      if (!better) continue;
-      next = candidate;
-      best_distance = distance;
-      best_gain = candidate->information_gain;
-      best_frontier_cells = candidate->frontier_cells;
-      best_room_mouth = room_mouth;
-    }
-    if (next == remaining.end() && !region_distance.empty()) {
-      region_distance.clear();
-      continue;
-    }
-    if (next == remaining.end()) break;
-    current = nearest_safe(next->x, next->y);
-    if (region_distance.empty()) region_distance = distance_field(current);
-    tour.push_back(*next);
-    remaining.erase(next);
-  }
-  return tour;
+void FrontierExplorer::CommitRegion(const ExplorationGoal& goal) {
+  regions_.Enter(goal);
+}
+
+void FrontierExplorer::CommitRegion(double x, double y) {
+  regions_.Enter(x, y);
+}
+
+bool FrontierExplorer::GoalInActiveRegion(const ExplorationGoal& goal) const {
+  RegionId id = goal.region_id;
+  if (!id) id = regions_.RegionAt(goal.frontier_x, goal.frontier_y);
+  if (!id) id = regions_.RegionAt(goal.x, goal.y);
+  return regions_.InActiveContext(id);
 }
 
 bool FrontierExplorer::ShouldPreemptForNearerMouth(
@@ -1472,6 +1433,8 @@ bool FrontierExplorer::ShouldPreemptForNearerMouth(
         std::hypot(mouth.frontier_x - active_goal.frontier_x,
                    mouth.frontier_y - active_goal.frontier_y) < kSameMouthM)
       continue;
+    // Do not abandon an unfinished room for a sibling region's mouth.
+    if (!GoalInActiveRegion(mouth)) continue;
     d_near = std::min(d_near, bfs_m(mouth.x, mouth.y));
   }
   if (!std::isfinite(d_near) || d_near > kLocalPocketM) return false;

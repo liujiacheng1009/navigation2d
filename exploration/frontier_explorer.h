@@ -1,7 +1,10 @@
 #pragma once
 
+#include "navigation2d/exploration/region_scheduler.h"
+
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -84,13 +87,23 @@ class FrontierExplorer {
   // Drop non-persistent blacklist entries so completing can retry mouths that
   // failed once while their unknown tip is still visible.
   void ClearFailedBlacklist();
-  // Order SelectGoals mouths: unfinished doorway/alcove throats before
-  // open-boundary expansion, then nearest BFS in the local pocket. Information
-  // gain breaks near ties. Does not merge or re-pose goals.
+  // Order SelectGoals by RegionScheduler: finish the active topological
+  // region (and its children) before crossing to a sibling room. Geometry
+  // only ranks observations; it never relaxes planning obstacles.
   std::vector<ExplorationGoal> BuildTour(double robot_x, double robot_y);
-  // True when a nearer executable mouth sits in the local pocket while the
+  // Same region DFS ordering for leftover completing approaches.
+  std::vector<ExplorationGoal> OrderByRegion(std::vector<ExplorationGoal> goals,
+                                             double robot_x, double robot_y);
+  // Commit DFS context when a goal is accepted for execution (not on inspect).
+  void CommitRegion(const ExplorationGoal& goal);
+  void CommitRegion(double x, double y);
+  bool GoalInActiveRegion(const ExplorationGoal& goal) const;
+  RegionId ActiveRegion() const { return regions_.ActiveRegion(); }
+  bool RegionsComplete() const { return regions_.Complete(); }
+  std::string RegionAudit() const { return regions_.Audit(); }
+  // True when a nearer executable mouth sits in the active region while the
   // active goal is a clearly longer transit — used to interrupt drive-past
-  // behaviour at junctions without re-ranking every control tick.
+  // behaviour at junctions without abandoning an unfinished room.
   // `path_remaining_m` < 0 falls back to BFS distance to `active_goal`.
   bool ShouldPreemptForNearerMouth(double robot_x, double robot_y,
                                    const ExplorationGoal& active_goal,
@@ -194,6 +207,7 @@ class FrontierExplorer {
   std::size_t raw_frontier_clusters_ = 0;
   std::size_t executable_frontier_goals_ = 0;
   std::size_t candidate_frontier_goals_ = 0;
+  RegionScheduler regions_;
 };
 
 }  // namespace navigation2d

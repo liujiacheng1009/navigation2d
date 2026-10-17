@@ -529,9 +529,20 @@ class AutonomousExplorer final : public rclcpp::Node {
         RCLCPP_WARN(get_logger(),
                     "Navigation2D rejected goal before execution: %s",
                     last_planning_failure_.c_str());
+        if (initial_state.path_signature != 0)
+          cooled_signatures_.insert(initial_state.path_signature);
         navigation_.reset();
+        // Ban the illegal chord and replan once before cooling the mouth.
+        if (!mapped_obstacle_retry_) {
+          mapped_obstacle_retry_ = true;
+          const bool ok = StartNavigation(goal, returning, true);
+          mapped_obstacle_retry_ = false;
+          if (ok) return true;
+        }
+        NoteMappedObstacleReject(goal);
         return false;
       }
+      mapped_obstacle_rejects_ = 0;
       // Do not classify a frontier from the controller's first sample. At a
       // continuous goal handoff the measured velocity still belongs to the
       // previous route, so acceleration and collision constraints may
@@ -556,11 +567,17 @@ class AutonomousExplorer final : public rclcpp::Node {
                         (goal.leftover_approach
                              ? "one leftover approach after exploring tour emptied"
                              : "navigating to frontier")));
+      // Accepted dispatch commits the DFS room context. Inspecting candidates
+      // must not Enter — only a path that will actually be tracked.
+      if (!returning && !retreat_goal_) explorer_.CommitRegion(goal);
       RCLCPP_INFO(get_logger(),
-                  "Navigation2D goal: pose=(%.2f, %.2f) goal=(%.2f, %.2f) frontier_cells=%d path_signature=%llu",
+                  "Navigation2D goal: pose=(%.2f, %.2f) goal=(%.2f, %.2f) "
+                  "frontier_cells=%d region=%llu path_signature=%llu %s",
                   pose_->pose.position.x, pose_->pose.position.y, goal.x, goal.y,
                   goal.frontier_cells,
-                  static_cast<unsigned long long>(initial_state.path_signature));
+                  static_cast<unsigned long long>(goal.region_id),
+                  static_cast<unsigned long long>(initial_state.path_signature),
+                  explorer_.RegionAudit().c_str());
       return true;
     } catch (const std::exception& error) {
       last_planning_failure_ = error.what();
@@ -650,10 +667,11 @@ class AutonomousExplorer final : public rclcpp::Node {
     for (const auto& goal : goals) committed_tour_.push_back(goal);
     ++tour_revision_;
     RCLCPP_INFO(get_logger(),
-                "Frontier graph tour %zu: raw_cells=%zu raw_clusters=%zu candidates=%zu stable=%zu",
+                "Frontier graph tour %zu: raw_cells=%zu raw_clusters=%zu candidates=%zu "
+                "stable=%zu %s",
                 tour_revision_, explorer_.raw_frontier_cells(),
                 explorer_.raw_frontier_clusters(), explorer_.candidate_frontier_goals(),
-                committed_tour_.size());
+                committed_tour_.size(), explorer_.RegionAudit().c_str());
   }
 
   bool StartEntryProbe() {
@@ -864,8 +882,10 @@ class AutonomousExplorer final : public rclcpp::Node {
     // Completing must see them again or PARTIAL leaves visible white tips.
     explorer_.ClearFailedBlacklist();
     cooled_signatures_.clear();
-    const auto leftovers = explorer_.SelectLeftoverApproaches(
+    auto leftovers = explorer_.SelectLeftoverApproaches(
         pose_->pose.position.x, pose_->pose.position.y, 3);
+    leftovers = explorer_.OrderByRegion(
+        std::move(leftovers), pose_->pose.position.x, pose_->pose.position.y);
     if (leftovers.empty()) {
       RCLCPP_WARN(get_logger(),
                   "Completing probe found no leftover approach: raw_cells=%zu rounds=%d",
@@ -890,6 +910,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         continue;
       }
       if (StartNavigation(leftover, false)) return;
+      if (BreakMappedObstacleThrash()) return;
       // Doorway leftovers often need a room-side entry pose; hallway standoffs
       // fail StartNavigation while the mouth is still openable.
       pending_entry_goal_ = leftover;
@@ -924,7 +945,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   bool ShouldKeepWaitingForFrontiers() const {
     if (explorer_.raw_frontier_cells() == 0) return false;
     // Allow several completing rounds on distinct mouths before giving up.
-    if (completing_probe_rounds_ < 3) return true;
+    if (completing_probe_rounds_ < 5) return true;
     return no_executable_frontier_cycles_ < 36;
   }
 
@@ -939,7 +960,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       SelectNextGoal();
       return;
     }
-    if (explorer_.raw_frontier_cells() > 0 && completing_probe_rounds_ < 3) {
+    if (explorer_.raw_frontier_cells() > 0 && completing_probe_rounds_ < 5) {
       StartCompletingProbe();
       return;
     }
@@ -1138,7 +1159,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       const bool no_executable_mouths =
           explorer_.candidate_frontier_goals() == 0 || tour_unplannable;
       if (explorer_.raw_frontier_cells() > 0 && no_executable_mouths) {
-        if (completing_probe_rounds_ < 3) {
+        if (completing_probe_rounds_ < 5) {
           StartCompletingProbe();
           return;
         }
@@ -1158,7 +1179,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       PublishStatus("SELECTING",
                     "frontiers locally blocked; waiting for map update");
       if (no_executable_frontier_cycles_ >= 12) {
-        if (completing_probe_rounds_ < 3 && explorer_.raw_frontier_cells() > 0) {
+        if (completing_probe_rounds_ < 5 && explorer_.raw_frontier_cells() > 0) {
           StartCompletingProbe();
           return;
         }
@@ -1278,6 +1299,7 @@ class AutonomousExplorer final : public rclcpp::Node {
           std::hypot(mouth.frontier_x - active_goal_.frontier_x,
                      mouth.frontier_y - active_goal_.frontier_y) < .80)
         continue;
+      if (!explorer_.GoalInActiveRegion(mouth)) continue;
       const double range = std::hypot(mouth.x - pose_->pose.position.x,
                                       mouth.y - pose_->pose.position.y);
       if (range + 1.5 >= goal_range || range > 2.5) continue;
@@ -1597,6 +1619,40 @@ class AutonomousExplorer final : public rclcpp::Node {
     last_planner_elapsed_s_ = state.global_planning.elapsed_s;
   }
 
+  void NoteMappedObstacleReject(const Goal& goal) {
+    ++mapped_obstacle_rejects_;
+    // Cool only the failed viewpoint briefly. Cooling the whole mouth/room
+    // (1.8 m / 4000 cells) hid kitchen and bedroom frontiers while the robot
+    // kept reworking living-room crumbs.
+    explorer_.CoolRegion(goal.x, goal.y, 0.45, 600u);
+  }
+
+  bool BreakMappedObstacleThrash() {
+    if (mapped_obstacle_rejects_ < 3) return false;
+    RCLCPP_WARN(get_logger(),
+                "mapped-obstacle reject thrash (%d); leave pinch, keep room mouths",
+                mapped_obstacle_rejects_);
+    mapped_obstacle_rejects_ = 0;
+    committed_tour_.clear();
+    pending_entry_goal_.reset();
+    entry_probe_attempts_ = 0;
+    navigation_.reset();
+    recovery_.Clear();
+    if (phase_ == MissionPhase::kCompleting) {
+      phase_ = MissionPhase::kExploring;
+    }
+    PublishStatus("SELECTING", "leaving pinch after mapped-obstacle rejects");
+    if (StartRetreat()) return true;
+    // Unfinished rooms first — not open-space escape ping-pong in the living room.
+    if (explorer_.raw_frontier_cells() > 0 && completing_probe_rounds_ < 5) {
+      StartCompletingProbe();
+      return true;
+    }
+    if (TryStartEscape()) return true;
+    next_selection_ = now() + rclcpp::Duration::from_seconds(2.0);
+    return true;
+  }
+
   bool PathCutsMappedObstacle() const {
     if (!navigation_ || !map_ || map_->info.resolution <= 0.) return false;
     const auto& route = navigation_->path();
@@ -1822,7 +1878,9 @@ class AutonomousExplorer final : public rclcpp::Node {
         partial_return_ = true;
         Finish(true, "return path intersected mapped obstacles");
       } else {
+        NoteMappedObstacleReject(active_goal_);
         DemoteActiveGoal("path intersected mapped obstacles");
+        if (BreakMappedObstacleThrash()) return;
       }
       return;
     }
@@ -1926,6 +1984,8 @@ class AutonomousExplorer final : public rclcpp::Node {
                          : "frontiers exhausted and robot returned through final-map global path");
       } else if (phase_ == MissionPhase::kCompleting) {
         explorer_.RecordAttempt(active_goal_, true);
+        // Arrival pose owns the room lock — finish this region before siblings.
+        explorer_.CommitRegion(pose_->pose.position.x, pose_->pose.position.y);
         FinishCompleting();
       } else if (retreat_goal_) {
         retreat_goal_ = false;
@@ -1936,11 +1996,12 @@ class AutonomousExplorer final : public rclcpp::Node {
       } else if (pending_entry_goal_) {
         if (EntryProbeSatisfied()) {
           explorer_.RecordAttempt(*pending_entry_goal_, true, false);
+          explorer_.CommitRegion(pose_->pose.position.x, pose_->pose.position.y);
           pending_entry_goal_.reset();
           entry_probe_attempts_ = 0;
           committed_tour_.clear();
           next_selection_ = now();
-          PublishStatus("SELECTING", "frontier entered; rebuilding tour");
+          PublishStatus("SELECTING", "room entered; finishing active region first");
         } else if (entry_probe_attempts_ < 2 && StartEntryProbe()) {
           return;
         } else {
@@ -1974,9 +2035,10 @@ class AutonomousExplorer final : public rclcpp::Node {
         PublishStatus("SELECTING", "frontier entry unavailable; unresolved boundary retained");
       } else {
         explorer_.RecordAttempt(active_goal_, true);
+        explorer_.CommitRegion(pose_->pose.position.x, pose_->pose.position.y);
         if (!committed_tour_.empty()) committed_tour_.pop_front();
         next_selection_ = now();
-        PublishStatus("SELECTING", "frontier reached; continuing committed tour");
+        PublishStatus("SELECTING", "frontier reached; continuing active region tour");
       }
     } else if (state.status == navigation2d::NavigationStatus::kBlocked ||
                // Explore goals used to skip the wall-clock timeout while the
@@ -2204,6 +2266,8 @@ class AutonomousExplorer final : public rclcpp::Node {
   int completing_probe_rounds_ = 0;
   std::unordered_set<std::uint64_t> cooled_signatures_;
   int reject_streak_ = 0;
+  int mapped_obstacle_rejects_ = 0;
+  bool mapped_obstacle_retry_ = false;
   bool reject_pose_valid_ = false;
   int reject_cell_x_ = 0;
   int reject_cell_y_ = 0;

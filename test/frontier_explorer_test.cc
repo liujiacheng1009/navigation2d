@@ -112,8 +112,14 @@ int main() {
   const double kfy = (26 + .5) * kitchen_first.resolution;
   const auto kitchen_first_tour = kitchen_first_explorer.BuildTour(kfx, kfy);
   assert(!kitchen_first_tour.empty());
-  // Lead with the kitchen-side mouth, not the nearer left open wall.
-  assert(kitchen_first_tour.front().x > 2.5);
+  // Dispatch commits the kitchen mouth; later tours stay on that region
+  // until its executable observations are exhausted.
+  kitchen_first_explorer.CommitRegion(kitchen_first_tour.front());
+  const auto after_enter = kitchen_first_explorer.BuildTour(kfx, kfy);
+  if (!after_enter.empty() && kitchen_first_tour.front().region_id != 0) {
+    assert(after_enter.front().region_id == kitchen_first_tour.front().region_id ||
+           kitchen_first_explorer.GoalInActiveRegion(after_enter.front()));
+  }
 
   // One task per mouth: tour stops for distinct mouths stay well separated.
   for (std::size_t i = 0; i < tour.size(); ++i) {
