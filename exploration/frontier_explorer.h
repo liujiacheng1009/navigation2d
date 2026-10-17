@@ -33,6 +33,16 @@ void OpenPassableOpenings(ExplorationGrid* grid);
 // Live-map PathCuts must ignore these cells or entry probes never enter rooms.
 bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row);
 
+// True when a world-frame polyline puts the body on a LIVE occupied cell that
+// is not an openable door seal. Used for entry and mid-tour alike — skipping
+// entry published through-wall GOAL↔CARROT chords. under_robot_m only covers
+// the chassis footprint (SLAM bleed under the base), not a doorway disk.
+bool PathCutsLiveOccupied(const ExplorationGrid& live,
+                          const std::vector<std::pair<double, double>>& path_xy,
+                          double robot_x, double robot_y,
+                          double body_radius = .22,
+                          double under_robot_m = .22);
+
 struct ExplorationGoal {
   double x = 0.;
   double y = 0.;

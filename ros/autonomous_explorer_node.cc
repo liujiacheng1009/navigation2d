@@ -2011,96 +2011,37 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   bool PathCutsMappedObstacle() const {
-    // Validate against the LIVE occupancy grid. Full OpenPassable carve here
-    // previously let falsely opened structural walls look free, so theta*
-    // chords through black walls were accepted. Thin door bars remain
-    // crossable via IsOpenableDoorSealCell — do NOT skip this check during
-    // entry/return: that published GOAL↔CARROT chords through real walls.
+    // Live-map check always runs (including entry/return). Door seals stay
+    // legal via IsOpenableDoorSealCell inside PathCutsLiveOccupied.
     if (!navigation_ || !map_ || map_->info.resolution <= 0.) return false;
     const auto& route = navigation_->path();
     if (route.size() < 2) return false;
-    const double resolution = map_->info.resolution;
-    const double origin_x = map_->info.origin.position.x;
-    const double origin_y = map_->info.origin.position.y;
-    const int width = static_cast<int>(map_->info.width);
-    const int height = static_cast<int>(map_->info.height);
-    navigation2d::ExplorationGrid seal_grid;
-    seal_grid.width = width;
-    seal_grid.height = height;
-    seal_grid.resolution = resolution;
-    seal_grid.origin_x = origin_x;
-    seal_grid.origin_y = origin_y;
-    seal_grid.cells.resize(static_cast<std::size_t>(width * height));
-    for (int row = 0; row < height; ++row) {
-      for (int col = 0; col < width; ++col) {
-        const auto cell = map_->data[static_cast<std::size_t>(row) * map_->info.width + col];
+    navigation2d::ExplorationGrid live;
+    live.width = static_cast<int>(map_->info.width);
+    live.height = static_cast<int>(map_->info.height);
+    live.resolution = map_->info.resolution;
+    live.origin_x = map_->info.origin.position.x;
+    live.origin_y = map_->info.origin.position.y;
+    live.cells.resize(static_cast<std::size_t>(live.width) * live.height);
+    for (int row = 0; row < live.height; ++row) {
+      for (int col = 0; col < live.width; ++col) {
+        const auto cell =
+            map_->data[static_cast<std::size_t>(row) * map_->info.width + col];
         std::int8_t value = 0;
         if (cell < 0) value = -1;
         else if (cell >= 50) value = 100;
-        seal_grid.cells[static_cast<std::size_t>(row) * width + col] = value;
+        live.cells[static_cast<std::size_t>(row) * live.width + col] = value;
       }
     }
-    constexpr double kBodyRadius = .22;
-    // Only the chassis footprint may ignore occupied cells (SLAM bleed under
-    // the base). The old 0.35 m disk hid short through-wall chords at the
-    // doorway when GOAL sat just past a black cluster.
-    constexpr double kUnderRobotM = .22;
-    const double robot_x = pose_ ? pose_->pose.position.x : 0.;
-    const double robot_y = pose_ ? pose_->pose.position.y : 0.;
-    const auto hits = [&](double world_x, double world_y) {
-      if (pose_ && std::hypot(world_x - robot_x, world_y - robot_y) < kUnderRobotM)
-        return false;
-      const int col = static_cast<int>(std::floor((world_x - origin_x) / resolution));
-      const int row = static_cast<int>(std::floor((world_y - origin_y) / resolution));
-      const int reach = static_cast<int>(std::ceil(
-          (kBodyRadius + std::sqrt(.5) * resolution) / resolution));
-      for (int dy = -reach; dy <= reach; ++dy) {
-        for (int dx = -reach; dx <= reach; ++dx) {
-          const int x = col + dx, y = row + dy;
-          if (x < 0 || y < 0 || x >= width || y >= height) continue;
-          const auto cell = map_->data[static_cast<std::size_t>(y) * map_->info.width + x];
-          if (cell < 50) continue;
-          // Thin door bars OpenPassable would open remain legal to cross.
-          if (navigation2d::IsOpenableDoorSealCell(seal_grid, x, y)) continue;
-          const double center_x = origin_x + (x + .5) * resolution;
-          const double center_y = origin_y + (y + .5) * resolution;
-          const double half = .5 * resolution;
-          const double nearest_x = std::max(std::abs(world_x - center_x) - half, 0.);
-          const double nearest_y = std::max(std::abs(world_y - center_y) - half, 0.);
-          if (std::hypot(nearest_x, nearest_y) <= kBodyRadius) return true;
-        }
-      }
-      return false;
-    };
-    // Also reject when the densified centerline itself steps on a non-seal
-    // occupied cell (catches thin wall clips the body-disk sampling misses).
-    const auto centerline_hits = [&](double world_x, double world_y) {
-      if (pose_ && std::hypot(world_x - robot_x, world_y - robot_y) < kUnderRobotM)
-        return false;
-      const int col = static_cast<int>(std::floor((world_x - origin_x) / resolution));
-      const int row = static_cast<int>(std::floor((world_y - origin_y) / resolution));
-      if (col < 0 || row < 0 || col >= width || row >= height) return true;
-      const auto cell = map_->data[static_cast<std::size_t>(row) * map_->info.width + col];
-      if (cell < 50) return false;
-      return !navigation2d::IsOpenableDoorSealCell(seal_grid, col, row);
-    };
-    for (std::size_t index = 0; index < route.size(); ++index) {
-      const double x = navigation2d::X(route[index]) + navigation_origin_x_;
-      const double y = navigation2d::Y(route[index]) + navigation_origin_y_;
-      if (hits(x, y) || centerline_hits(x, y)) return true;
-      if (index == 0) continue;
-      const double x0 = navigation2d::X(route[index - 1]) + navigation_origin_x_;
-      const double y0 = navigation2d::Y(route[index - 1]) + navigation_origin_y_;
-      const double length = std::hypot(x - x0, y - y0);
-      const int samples = std::max(1, static_cast<int>(std::ceil(length / std::max(.02, .5 * resolution))));
-      for (int sample = 1; sample < samples; ++sample) {
-        const double ratio = static_cast<double>(sample) / samples;
-        const double wx = x0 + ratio * (x - x0);
-        const double wy = y0 + ratio * (y - y0);
-        if (hits(wx, wy) || centerline_hits(wx, wy)) return true;
-      }
+    std::vector<std::pair<double, double>> path_xy;
+    path_xy.reserve(route.size());
+    for (const auto& pose : route) {
+      path_xy.emplace_back(navigation2d::X(pose) + navigation_origin_x_,
+                           navigation2d::Y(pose) + navigation_origin_y_);
     }
-    return false;
+    const double robot_x = pose_ ? pose_->pose.position.x : path_xy.front().first;
+    const double robot_y = pose_ ? pose_->pose.position.y : path_xy.front().second;
+    return navigation2d::PathCutsLiveOccupied(live, path_xy, robot_x, robot_y);
   }
 
   bool TourSegmentCutsWall(double x0, double y0, double x1, double y1) const {

@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <utility>
+#include <vector>
 
 int main() {
   navigation2d::FrontierExplorerConfig config;
@@ -797,6 +799,91 @@ int main() {
       }
       assert(nearest_occupied + 1e-9 >= open_config.footprint_clearance);
     }
+  }
+
+  // PathCutsLiveOccupied: entry must reject through-wall chords even when the
+  // robot stands on the threshold (old 0.35 m under-robot disk hid them).
+  {
+    navigation2d::ExplorationGrid doorway;
+    doorway.width = 40;
+    doorway.height = 40;
+    doorway.resolution = .05;
+    doorway.origin_x = 0.;
+    doorway.origin_y = 0.;
+    doorway.cells.assign(
+        static_cast<std::size_t>(doorway.width * doorway.height), 100);
+    const auto dpaint = [&](int col0, int col1, int row0, int row1,
+                            std::int8_t value) {
+      for (int row = row0; row < row1; ++row)
+        for (int col = col0; col < col1; ++col)
+          doorway.cells[static_cast<std::size_t>(row * doorway.width + col)] =
+              value;
+    };
+    // South hall free; north pocket free; structural wall cluster at row 20.
+    dpaint(4, 36, 4, 20, 0);
+    dpaint(4, 36, 21, 36, 0);
+    dpaint(12, 28, 20, 21, 100);  // solid wall bar (not a door seal: both free
+                                 // but span is wide continuous wall)
+
+    const double robot_x = (20 + .5) * doorway.resolution;  // 1.025
+    const double robot_y = (18 + .5) * doorway.resolution;  // 0.925
+    // Short GOAL–CARROT chord straight through the wall (~0.30 m), entirely
+    // inside the old 0.35 m exemption disk around the robot.
+    const std::vector<std::pair<double, double>> through_wall = {
+        {robot_x, robot_y},
+        {robot_x, (22 + .5) * doorway.resolution},
+    };
+    assert(navigation2d::PathCutsLiveOccupied(doorway, through_wall, robot_x,
+                                              robot_y));
+    // Same chord with the old loose under-robot radius would miss the wall —
+    // prove the default 0.22 m still catches it, and that 0.35 m would not
+    // be an acceptable production default.
+    assert(navigation2d::PathCutsLiveOccupied(doorway, through_wall, robot_x,
+                                              robot_y, .22, .22));
+    assert(!navigation2d::PathCutsLiveOccupied(doorway, through_wall, robot_x,
+                                               robot_y, .22, .40));
+
+    // Path that goes around the wall stays legal.
+    const std::vector<std::pair<double, double>> around = {
+        {robot_x, robot_y},
+        {(8 + .5) * doorway.resolution, robot_y},
+        {(8 + .5) * doorway.resolution, (24 + .5) * doorway.resolution},
+        {robot_x, (24 + .5) * doorway.resolution},
+    };
+    assert(!navigation2d::PathCutsLiveOccupied(doorway, around, robot_x,
+                                               robot_y));
+  }
+
+  // Door-width SLAM seal: entry chord through the seal must stay legal so
+  // kitchen entry probes are not rejected as "mapped obstacles".
+  {
+    navigation2d::ExplorationGrid sealed;
+    sealed.width = 60;
+    sealed.height = 40;
+    sealed.resolution = .05;
+    sealed.origin_x = 0.;
+    sealed.origin_y = 0.;
+    sealed.cells.assign(static_cast<std::size_t>(sealed.width * sealed.height),
+                        100);
+    const auto spaint = [&](int col0, int col1, int row0, int row1,
+                            std::int8_t value) {
+      for (int row = row0; row < row1; ++row)
+        for (int col = col0; col < col1; ++col)
+          sealed.cells[static_cast<std::size_t>(row * sealed.width + col)] =
+              value;
+    };
+    spaint(2, 58, 4, 18, 0);      // hall
+    spaint(2, 58, 22, 36, -1);    // kitchen unknown
+    spaint(20, 34, 18, 22, 0);    // 0.70 m mouth vestibule
+    spaint(20, 34, 20, 21, 100);  // thin door bar
+    assert(navigation2d::IsOpenableDoorSealCell(sealed, 27, 20));
+    const double rx = (27 + .5) * sealed.resolution;
+    const double ry = (17 + .5) * sealed.resolution;
+    const std::vector<std::pair<double, double>> entry = {
+        {rx, ry},
+        {rx, (24 + .5) * sealed.resolution},
+    };
+    assert(!navigation2d::PathCutsLiveOccupied(sealed, entry, rx, ry));
   }
 
 }
