@@ -135,6 +135,10 @@ class FrontierExplorer {
   // Free throat width at a frontier (metres). Wide easy doors (~≥0.50 m)
   // use shallower entry probes; pinch mouths stay on the deep-probe path.
   double MouthGapWidth(double frontier_x, double frontier_y) const;
+  // True only for a door/alcove throat (narrow free run in [0.32, 1.40] m).
+  // Open-wall frontier expansion is NOT a mouth — MouthGapWidth alone can
+  // read 1.6 m+ in an open room and must not trigger entry.
+  bool IsCorridorMouth(double frontier_x, double frontier_y) const;
   // How far Free space continues past the frontier along the into-room axis.
   double MouthFreeDepth(const ExplorationGoal& frontier_goal, double robot_x,
                         double robot_y) const;

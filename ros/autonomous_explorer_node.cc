@@ -955,17 +955,61 @@ class AutonomousExplorer final : public rclcpp::Node {
            std::hypot(a.x - b.x, a.y - b.y) < .55;
   }
 
+  // Real door/alcove only: CorridorMouthAt AND throat in [0.50, 1.40] m.
+  // Open-room free span (live gap=1.65 along a wall) is NOT a mouth — treating
+  // it as "easy door" locked entry and thrash-abandoned the wrong place.
   bool EasyLockedMouth() const {
     if (!pending_entry_goal_ && !locked_entry_mouth_) return false;
     const Goal& mouth =
         pending_entry_goal_.value_or(*locked_entry_mouth_);
-    return explorer_.MouthGapWidth(mouth.frontier_x, mouth.frontier_y) >= .50;
+    if (!explorer_.IsCorridorMouth(mouth.frontier_x, mouth.frontier_y))
+      return false;
+    const double gap =
+        explorer_.MouthGapWidth(mouth.frontier_x, mouth.frontier_y);
+    return gap >= .50 && gap <= 1.40;
+  }
+
+  bool PassableMouthGoal(const Goal& goal) const {
+    if (!std::isfinite(goal.frontier_x) || !std::isfinite(goal.frontier_y))
+      return false;
+    if (!explorer_.IsCorridorMouth(goal.frontier_x, goal.frontier_y))
+      return false;
+    const double gap =
+        explorer_.MouthGapWidth(goal.frontier_x, goal.frontier_y);
+    return gap >= .35 && gap <= 1.40;
   }
 
   int EntryAttemptBudget() const {
     // Wide free mouths must not be abandoned after a few PathCuts rejects —
     // live log: gap=2.15 failed_goals→69 while the opening stayed clear.
     return EasyLockedMouth() ? 14 : 6;
+  }
+
+  // Promote only true corridor mouths into locked entry.
+  bool PromotePassableMouthEntry(const char* reason) {
+    if (returning_ || retreat_goal_ || phase_ == MissionPhase::kReturning)
+      return false;
+    if (!std::isfinite(active_goal_.x) || !PassableMouthGoal(active_goal_))
+      return false;
+    if (locked_entry_mouth_ && !SameEntryMouth(*locked_entry_mouth_, active_goal_))
+      return false;
+    RCLCPP_WARN(get_logger(), "Passable-mouth promote: %s gap=%.2f", reason,
+                explorer_.MouthGapWidth(active_goal_.frontier_x,
+                                        active_goal_.frontier_y));
+    LockEntryMouth(active_goal_);
+    paint_driven_corridor_ = true;
+    paint_trail_budget_m_ = 8.0;
+    cooled_signatures_.clear();
+    if (StartEntryProbe()) {
+      PublishStatus("COMPLETING", reason);
+      return true;
+    }
+    if (EasyLockedMouth() && entry_open_loop_ticks_ == 0) {
+      entry_open_loop_ticks_ = 1;
+      PublishStatus("COMPLETING", "passable mouth; mid-gap crawl");
+      return true;
+    }
+    return false;
   }
 
   bool StartEntryProbe() {
@@ -984,7 +1028,10 @@ class AutonomousExplorer final : public rclcpp::Node {
                                                pending_entry_goal_->frontier_y);
     const double free_depth = explorer_.MouthFreeDepth(
         *pending_entry_goal_, pose_->pose.position.x, pose_->pose.position.y);
-    const bool easy_door = gap >= .50;
+    const bool easy_door =
+        explorer_.IsCorridorMouth(pending_entry_goal_->frontier_x,
+                                  pending_entry_goal_->frontier_y) &&
+        gap >= .50 && gap <= 1.40;
     std::optional<Goal> probe;
     double used_min_depth = 0.;
     const double schedules[][2] = {
@@ -1759,25 +1806,37 @@ class AutonomousExplorer final : public rclcpp::Node {
         }
         break;
       }
-      // Pre-execution rejection at a doorway: try the bounded room-side entry
-      // probe instead of stuffing more hallway standoffs into the tour.
-      // Skip if another mouth is already locked.
-      if (locked_entry_mouth_ && !SameEntryMouth(*locked_entry_mouth_, goal)) {
-        explorer_.RecordAttempt(goal, false);
-        continue;
+      // Entry only for real corridor mouths. Open-wall / residual frontiers
+      // (user: 没有门缝) must not LockEntryMouth — that burned attempts on
+      // gap=1.65 open spans and looked like "stuck at a door".
+      if (PassableMouthGoal(goal)) {
+        if (locked_entry_mouth_ && !SameEntryMouth(*locked_entry_mouth_, goal)) {
+          explorer_.RecordAttempt(goal, false);
+          continue;
+        }
+        LockEntryMouth(goal);
+        if (StartEntryProbe()) return;
+        if (entry_probe_attempts_ >= EntryAttemptBudget()) {
+          AbandonLockedEntryMouth(
+              "hallway reject; entry probe exhausted, leaving mouth");
+          continue;
+        }
+        pending_entry_goal_.reset();  // lock retained
+        next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+        return;
       }
-      LockEntryMouth(goal);
-      if (StartEntryProbe()) return;
-      // Hallway reject + failed entry: keep the lock for a few SelectNextGoal
-      // retries; abandon (wide cool) after the attempt budget is exhausted.
-      if (entry_probe_attempts_ >= EntryAttemptBudget()) {
-        AbandonLockedEntryMouth(
-            "hallway reject; entry probe exhausted, leaving mouth");
-        continue;
-      }
-      pending_entry_goal_.reset();  // lock retained
-      next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
-      return;
+      explorer_.RecordAttempt(goal, false);
+      recently_demoted_ = goal;
+      recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(10.0);
+      RCLCPP_WARN(get_logger(),
+                  "Open-wall goal rejected (%s); demoting, not entry-locking "
+                  "gap=%.2f corridor=%s",
+                  last_planning_failure_.c_str(),
+                  explorer_.MouthGapWidth(goal.frontier_x, goal.frontier_y),
+                  explorer_.IsCorridorMouth(goal.frontier_x, goal.frontier_y)
+                      ? "yes"
+                      : "no");
+      continue;
     }
     // Same pose keeps rejecting every queued frontier (often cooled first-
     // segment signatures while pinched in an alcove). Retreat along the
@@ -3276,7 +3335,7 @@ class AutonomousExplorer final : public rclcpp::Node {
                     local_unknown, local_frontier_open ? "yes" : "no");
         navigation_.reset();
         cooled_signatures_.clear();
-        if (local_frontier_open) {
+        if (local_frontier_open && PassableMouthGoal(active_goal_)) {
           LockEntryMouth(active_goal_);
           paint_driven_corridor_ = true;
           paint_trail_budget_m_ = 8.0;
@@ -3366,13 +3425,11 @@ class AutonomousExplorer final : public rclcpp::Node {
           next_selection_ = now();
           PublishStatus("SELECTING", "frontier entry blocked; unresolved boundary retained");
         }
-      } else if (explorer_.GoalRegionStillFrontier(active_goal_)) {
-        // Hallway arrival with the mouth still open — cross into the room.
-        // Keep the tour; clearing it forced a reverse rebuild every doorway.
+      } else if (explorer_.GoalRegionStillFrontier(active_goal_) &&
+                 PassableMouthGoal(active_goal_)) {
+        // Real corridor mouth still open — cross into the room.
         LockEntryMouth(active_goal_);
         if (StartEntryProbe()) return;
-        // Easy/shallow doors often need a second depth schedule — do not
-        // abandon on the first nullopt (live: wide free doorway left).
         if (entry_probe_attempts_ < EntryAttemptBudget()) {
           next_selection_ = now() + rclcpp::Duration::from_seconds(0.35);
           PublishStatus("SELECTING",
@@ -3381,6 +3438,13 @@ class AutonomousExplorer final : public rclcpp::Node {
         }
         AbandonLockedEntryMouth(
             "frontier reached but no safe entry probe; leaving mouth");
+      } else if (explorer_.GoalRegionStillFrontier(active_goal_)) {
+        // Open-wall frontier (no door throat): observe done, do not entry-lock.
+        explorer_.RecordAttempt(active_goal_, true);
+        if (!committed_tour_.empty()) committed_tour_.pop_front();
+        next_selection_ = now();
+        PublishStatus("SELECTING",
+                      "open-wall frontier observed; continuing tour");
       } else {
         explorer_.RecordAttempt(active_goal_, true);
         // Goal dispatch already CommitRegion'd; do not re-Enter the robot cell

@@ -115,6 +115,9 @@ bool CorridorMouthAt(const ExplorationGrid& map, double frontier_x,
     ++vertical;
   const int narrow_min = static_cast<int>(std::ceil(kNarrowMinWidth / map.resolution));
   const int narrow_max = static_cast<int>(std::floor(kNarrowMaxWidth / map.resolution));
+  // Open-room free space hits the probe cap on BOTH axes — that is a wall
+  // expansion, not a door throat (live: gap=1.65 "easy door" on open wall).
+  if (horizontal >= narrow_max && vertical >= narrow_max) return false;
   const bool narrow_h = horizontal >= narrow_min && horizontal <= narrow_max;
   const bool narrow_v = vertical >= narrow_min && vertical <= narrow_max;
   const int smaller = std::min(horizontal, vertical);
@@ -1746,6 +1749,11 @@ double FrontierExplorer::MouthGapWidth(double frontier_x,
     ++vertical;
   // Throat width is the narrow free run (door gap), not the deep room axis.
   return static_cast<double>(std::min(horizontal, vertical)) * map_.resolution;
+}
+
+bool FrontierExplorer::IsCorridorMouth(double frontier_x,
+                                       double frontier_y) const {
+  return CorridorMouthAt(map_, frontier_x, frontier_y);
 }
 
 double FrontierExplorer::MouthFreeDepth(const ExplorationGoal& frontier_goal,
