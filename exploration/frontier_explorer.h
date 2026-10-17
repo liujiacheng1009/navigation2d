@@ -26,9 +26,10 @@ struct ExplorationGrid {
 void OpenPassableOpenings(ExplorationGrid* grid);
 
 // True when this occupied cell is a door-width SLAM seal (passable on both
-// passage sides, lateral span in [0.32, 1.40] m). Unknown-touching seals may
-// be up to ~0.45 m thick; free↔free seals stay ≤0.30 m. Long exterior walls
-// are not seals.
+// passage sides, lateral span in [0.32, 1.40] m, wall mass/jambs on both
+// lateral ends). Unknown-touching seals may be up to ~0.45 m thick; free↔free
+// seals stay ≤0.30 m. Long exterior walls and alcove partition tips (free
+// wrap at an end) are not seals.
 bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row);
 
 // True when a world-frame polyline puts the body on a cell that remains

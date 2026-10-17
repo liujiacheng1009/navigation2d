@@ -350,12 +350,18 @@ class NavigationSystem::Impl {
       if (config.planner != "state_lattice" && config.smoother_enabled) {
         Path smoothed = planning_internal::ConstrainedPathSmoother(config).Smooth(
             path, costmap, config.robot_radius);
-        if (PathFootprintValid(smoothed, costmap, planning_radius)) path = std::move(smoothed);
+        // Densify after smooth and re-check: soft obstacle pull can bow a
+        // chord through a thin tip between sparse waypoints. Keep the
+        // pre-smooth route when the dense polyline is no longer clear.
+        if (PathFootprintValid(smoothed, costmap, planning_radius)) {
+          Path dense_smooth = DensifyPath(smoothed, .08);
+          if (PathFootprintValid(dense_smooth, costmap, planning_radius))
+            path = std::move(dense_smooth);
+        }
       }
-      // Keep Theta* long chords. Replacing them with densified A* for a few
-      // centimetres of clearance produced the sawtooth GLOBAL polyline the UI
-      // showed (while RPP still drove smoothly). Narrow-door entry is owned by
-      // OpenPassable / pinch clearance, not by swapping planners here.
+      // Keep Theta* long chords when they stay footprint-valid. Narrow-door
+      // entry is owned by OpenPassable / pinch clearance, not by swapping
+      // planners for a few centimetres of clearance (that made sawtooth GLOBAL).
       // A replan is a new ordered route contract. Reset the controller's
       // internal projection state even when the new path has similar endpoints.
       controller = MakeController(config);

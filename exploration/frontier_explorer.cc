@@ -194,16 +194,28 @@ bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row) {
   };
   auto door_width_span = [&](int c, int r, int px, int py, int max_thick) {
     const int lx = py, ly = px;
-    int span = 1;
+    int span_pos = 0;
+    int span_neg = 0;
     for (int s = 1; s <= max_lat; ++s) {
       if (!thin_passage_cell(c + s * lx, r + s * ly, px, py, max_thick)) break;
-      ++span;
+      ++span_pos;
     }
     for (int s = 1; s <= max_lat; ++s) {
       if (!thin_passage_cell(c - s * lx, r - s * ly, px, py, max_thick)) break;
-      ++span;
+      ++span_neg;
     }
-    return span >= min_lat && span <= max_lat;
+    const int span = 1 + span_pos + span_neg;
+    if (span < min_lat || span > max_lat) return false;
+    // Real doors sit between wall mass (jambs). Alcove partition tips / fins
+    // are free↔free thin strips that *end in free wrap* — carving those let
+    // Theta*/smoother publish GLOBAL paths through solid black (UI 穿墙).
+    const int pos_end_c = c + (span_pos + 1) * lx;
+    const int pos_end_r = r + (span_pos + 1) * ly;
+    const int neg_end_c = c - (span_neg + 1) * lx;
+    const int neg_end_r = r - (span_neg + 1) * ly;
+    if (value_at(pos_end_c, pos_end_r) <= 0) return false;
+    if (value_at(neg_end_c, neg_end_r) <= 0) return false;
+    return true;
   };
   // Passage axis (px,py); seal runs perpendicular. Door-width lateral span is
   // required for every mouth type so long exterior walls stay blocked, but
@@ -281,12 +293,27 @@ bool PathCutsLiveOccupied(const ExplorationGrid& live,
     if (col < 0 || row < 0 || col >= width || row >= height) return true;
     return lethal(col, row);
   };
-  // Raw occupied: only a door seal that OpenPassable actually freed may be
-  // crossed. Uncarved "seal-looking" cells and solid pillars stay lethal —
-  // the old seal exemption alone let GLOBAL chords pierce islands the UI
-  // still paints occupied (红框穿墙).
+  // Raw occupied: only a jamb-bounded door seal that OpenPassable actually
+  // freed may be crossed. Partition tips / fins are not seals (see
+  // IsOpenableDoorSealCell), so GLOBAL chords through them stay 穿墙.
   const double structural_radius = std::max(.18, body_radius);
   const double skip_under = std::min(under_robot_m, .12);
+  const auto carved_door_seal = [&](int x, int y) {
+    return IsOpenableDoorSealCell(live, x, y) && !lethal(x, y);
+  };
+  const auto hits_raw_centerline = [&](double world_x, double world_y) {
+    if (std::hypot(world_x - robot_x, world_y - robot_y) < skip_under)
+      return false;
+    const int col =
+        static_cast<int>(std::floor((world_x - live.origin_x) / resolution));
+    const int row =
+        static_cast<int>(std::floor((world_y - live.origin_y) / resolution));
+    if (col < 0 || row < 0 || col >= width || row >= height) return true;
+    if (live.cells[static_cast<std::size_t>(row) * width + col] <= 0)
+      return false;
+    // Centerline on raw occupied that was not a carved door = hard 穿墙.
+    return !carved_door_seal(col, row);
+  };
   const auto hits_raw_structural = [&](double world_x, double world_y) {
     if (std::hypot(world_x - robot_x, world_y - robot_y) < skip_under)
       return false;
@@ -307,9 +334,7 @@ bool PathCutsLiveOccupied(const ExplorationGrid& live,
           continue;
         }
         if (live.cells[static_cast<std::size_t>(y) * width + x] <= 0) continue;
-        // Carved door seal: opened cell is free → allow. Everything else that
-        // is still occupied on the live map is 穿墙.
-        if (IsOpenableDoorSealCell(live, x, y) && !lethal(x, y)) continue;
+        if (carved_door_seal(x, y)) continue;
         const double center_x = live.origin_x + (x + .5) * resolution;
         const double center_y = live.origin_y + (y + .5) * resolution;
         const double half = .5 * resolution;
@@ -323,20 +348,22 @@ bool PathCutsLiveOccupied(const ExplorationGrid& live,
   for (std::size_t index = 0; index < path_xy.size(); ++index) {
     const double x = path_xy[index].first;
     const double y = path_xy[index].second;
-    if (hits_body(x, y) || hits_centerline(x, y) || hits_raw_structural(x, y))
+    if (hits_body(x, y) || hits_centerline(x, y) || hits_raw_centerline(x, y) ||
+        hits_raw_structural(x, y))
       return true;
     if (index == 0) continue;
     const double x0 = path_xy[index - 1].first;
     const double y0 = path_xy[index - 1].second;
     const double length = std::hypot(x - x0, y - y0);
+    // Dense samples so smooth Theta* arcs cannot sneak between cells.
     const int samples = std::max(
-        2, static_cast<int>(std::ceil(length / std::max(.015, .4 * resolution))));
+        2, static_cast<int>(std::ceil(length / std::max(.01, .35 * resolution))));
     for (int sample = 1; sample <= samples; ++sample) {
       const double ratio = static_cast<double>(sample) / samples;
       const double wx = x0 + ratio * (x - x0);
       const double wy = y0 + ratio * (y - y0);
       if (hits_body(wx, wy) || hits_centerline(wx, wy) ||
-          hits_raw_structural(wx, wy))
+          hits_raw_centerline(wx, wy) || hits_raw_structural(wx, wy))
         return true;
     }
   }
