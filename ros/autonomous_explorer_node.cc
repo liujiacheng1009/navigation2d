@@ -959,32 +959,41 @@ class AutonomousExplorer final : public rclcpp::Node {
     const double left = SectorMinRange(+std::acos(-1.) / 2., .45);
     const double right = SectorMinRange(-std::acos(-1.) / 2., .45);
     geometry_msgs::msg::Twist command;
+    double hold_s = 1.0;
     // Open room with one tight flank: peel into free space instead of
     // crawling forward along the speck that stalled the monitor.
     const bool pinched_side =
         std::min(left, right) < .30 && std::max(left, right) >= .70;
+    const bool wall_tip =
+        front > 0. && front < .35 && back >= .45 &&
+        std::min(left > 0. ? left : 10., right > 0. ? right : 10.) < .55;
     if (front >= .45) {
       command.linear.x = pinched_side ? .22 : .18;
       if (left + .25 < right) command.angular.z = -.55;
       else if (right + .25 < left) command.angular.z = .55;
+      hold_s = 1.4;
     } else if (back >= .35) {
-      // Brief reverse out of a wall tip; bias yaw toward the more open side.
-      command.linear.x = -.16;
-      if (left > right + .05) command.angular.z = .65;
-      else if (right > left + .05) command.angular.z = -.65;
+      // Reverse out of a wall tip. Short 1.4 s peels left the chassis on the
+      // same inflation cell (log: immobility at (-2.45,-0.19) ×7, return stuck
+      // at (-0.47,-4.32) with home_dist=4.3).
+      command.linear.x = wall_tip ? -.22 : -.16;
+      if (left > right + .05) command.angular.z = wall_tip ? .80 : .65;
+      else if (right > left + .05) command.angular.z = wall_tip ? -.80 : -.65;
+      hold_s = wall_tip || returning_ ? 2.4 : 1.4;
     } else if (std::max(left, right) >= .35) {
       // Too tight to translate — turn toward the open flank first.
       command.angular.z = left >= right ? .70 : -.70;
+      hold_s = 1.2;
     } else {
       return false;
     }
     escape_command_ = command;
-    escape_until_ = now() + rclcpp::Duration::from_seconds(
-        std::abs(command.linear.x) > .01 ? 1.4 : 1.0);
+    escape_until_ = now() + rclcpp::Duration::from_seconds(hold_s);
     RCLCPP_WARN(get_logger(),
                 "Starting clearance escape: front=%.2f back=%.2f left=%.2f "
-                "right=%.2f v=%.2f w=%.2f",
-                front, back, left, right, command.linear.x, command.angular.z);
+                "right=%.2f v=%.2f w=%.2f hold=%.1f",
+                front, back, left, right, command.linear.x, command.angular.z,
+                hold_s);
     return true;
   }
 
@@ -1132,31 +1141,37 @@ class AutonomousExplorer final : public rclcpp::Node {
     const auto cell = PoseCell();
     if (retreat_attempted_ && retreat_cell_x_ == cell.first && retreat_cell_y_ == cell.second)
       return false;
-    // Wall-tip thrash: a 1.2 m trail walk still lands inside the same U-alcove.
-    // Back farther into open space when lidar already shows a pinch.
+    // Wall-tip thrash: trail arc through dense stuck samples can be metres
+    // while Euclidean progress is centimetres — require real displacement.
     const double front = SectorMinRange(0., .45);
     const double left = SectorMinRange(+std::acos(-1.) / 2., .45);
     const double right = SectorMinRange(-std::acos(-1.) / 2., .45);
     const double side = std::min(left > 0. ? left : 10., right > 0. ? right : 10.);
     const bool pinched = (front > 0. && front < .55) || (side < .50);
-    const double want_arc = pinched ? 3.2 : 1.2;
-    const double min_arc = pinched ? 1.6 : .6;
-    double arc = 0.;
+    const double want_euclid = pinched ? 2.4 : 1.2;
+    const double min_euclid = pinched ? 1.2 : .70;
+    const double rx = pose_->pose.position.x;
+    const double ry = pose_->pose.position.y;
     std::size_t index = trajectory_.size() - 1;
-    while (index > 0 && arc < want_arc) {
-      arc += std::hypot(trajectory_[index].first - trajectory_[index - 1].first,
-                         trajectory_[index].second - trajectory_[index - 1].second);
+    double best_d = 0.;
+    std::size_t best = index;
+    while (index > 0) {
       --index;
+      const double d = std::hypot(trajectory_[index].first - rx,
+                                  trajectory_[index].second - ry);
+      if (d > best_d) {
+        best_d = d;
+        best = index;
+      }
+      if (d >= want_euclid) break;
     }
-    if (arc < min_arc) return false;
-    const double goal_x = trajectory_[index].first;
-    const double goal_y = trajectory_[index].second;
-    if (std::hypot(goal_x - pose_->pose.position.x, goal_y - pose_->pose.position.y) < .55)
-      return false;
+    if (best_d < min_euclid) return false;
+    const double goal_x = trajectory_[best].first;
+    const double goal_y = trajectory_[best].second;
     Goal retreat;
     retreat.x = goal_x;
     retreat.y = goal_y;
-    retreat.yaw = std::atan2(goal_y - pose_->pose.position.y, goal_x - pose_->pose.position.x);
+    retreat.yaw = std::atan2(goal_y - ry, goal_x - rx);
     // Exit path out of a pinch may already be cooled from first-segment
     // stalls; clear so the driven trail can be planned again.
     cooled_signatures_.clear();
@@ -1164,6 +1179,8 @@ class AutonomousExplorer final : public rclcpp::Node {
     retreat_cell_x_ = cell.first;
     retreat_cell_y_ = cell.second;
     paint_driven_corridor_ = true;
+    paint_trail_budget_m_ = pinched ? 12.0 : 4.0;
+    clear_start_pinch_ = true;
     retreat_goal_ = true;
     if (StartNavigation(retreat, false)) return true;
     retreat_goal_ = false;
@@ -1515,54 +1532,59 @@ class AutonomousExplorer final : public rclcpp::Node {
   bool StartBreadcrumbTowardHome() {
     if (!start_pose_ || !pose_ || trajectory_.size() < 4) return false;
     const Goal home = MakeHomeGoal();
-    const double home_dist =
-        std::hypot(pose_->pose.position.x - home.x, pose_->pose.position.y - home.y);
+    const double rx = pose_->pose.position.x;
+    const double ry = pose_->pose.position.y;
+    const double home_dist = std::hypot(rx - home.x, ry - home.y);
     if (home_dist < .40) {
       breadcrumb_returning_ = false;
       paint_driven_corridor_ = true;
       paint_trail_budget_m_ = 80.0;
+      clear_start_pinch_ = true;
       return StartNavigation(home, true);
     }
-    // Nearest driven sample, then walk toward the start of the trail (home).
+    // Nearest driven sample, then pick a trail cell that is Euclidean-closer
+    // to home. Arc length through wall-tip thrash samples looked like a 2.8 m
+    // hop while the chassis only moved 0.3 m (log: step (-0.34,-4.06) from
+    // (-0.47,-4.32) with home_dist still 4.3).
     std::size_t nearest = trajectory_.size() - 1;
     double nearest_d = std::numeric_limits<double>::infinity();
     for (std::size_t i = 0; i < trajectory_.size(); ++i) {
-      const double d = std::hypot(trajectory_[i].first - pose_->pose.position.x,
-                                  trajectory_[i].second - pose_->pose.position.y);
+      const double d = std::hypot(trajectory_[i].first - rx,
+                                  trajectory_[i].second - ry);
       if (d < nearest_d) {
         nearest_d = d;
         nearest = i;
       }
     }
-    constexpr double kHopM = 2.8;
     constexpr double kMinHopM = 0.90;
-    double arc = 0.;
-    std::size_t index = nearest;
-    while (index > 0 && arc < kHopM) {
-      arc += std::hypot(trajectory_[index].first - trajectory_[index - 1].first,
-                        trajectory_[index].second - trajectory_[index - 1].second);
-      --index;
-    }
+    constexpr double kMinHomeProgressM = 0.60;
+    constexpr double kPreferHopM = 2.8;
     Goal step = home;
-    if (arc >= kMinHopM) {
-      step.x = trajectory_[index].first;
-      step.y = trajectory_[index].second;
-      step.yaw = std::atan2(step.y - pose_->pose.position.y,
-                            step.x - pose_->pose.position.x);
-      // Prefer a trail cell that is strictly closer to home than the robot.
-      const double step_home = std::hypot(step.x - home.x, step.y - home.y);
-      if (step_home + .25 >= home_dist && index > 0) {
-        // Keep walking toward trail origin until closer or out of samples.
-        while (index > 0 &&
-               std::hypot(trajectory_[index].first - home.x,
-                          trajectory_[index].second - home.y) + .25 >= home_dist) {
-          --index;
-        }
-        step.x = trajectory_[index].first;
-        step.y = trajectory_[index].second;
-        step.yaw = std::atan2(step.y - pose_->pose.position.y,
-                              step.x - pose_->pose.position.x);
+    bool found = false;
+    double best_progress = 0.;
+    for (std::size_t i = nearest; i > 0; --i) {
+      const auto& sample = trajectory_[i - 1];
+      const double d_robot = std::hypot(sample.first - rx, sample.second - ry);
+      const double d_home = std::hypot(sample.first - home.x, sample.second - home.y);
+      const double progress = home_dist - d_home;
+      if (d_robot < kMinHopM || progress < kMinHomeProgressM) continue;
+      if (!found || progress > best_progress ||
+          (std::abs(progress - best_progress) < .15 && d_robot <= kPreferHopM)) {
+        found = true;
+        best_progress = progress;
+        step.x = sample.first;
+        step.y = sample.second;
+        step.yaw = std::atan2(step.y - ry, step.x - rx);
+        if (d_robot >= kPreferHopM && progress >= 1.2) break;
       }
+    }
+    if (!found) {
+      // No useful trail hop — paint the corridor and drive home directly.
+      breadcrumb_returning_ = false;
+      paint_driven_corridor_ = true;
+      paint_trail_budget_m_ = 80.0;
+      clear_start_pinch_ = true;
+      return StartNavigation(home, true);
     }
     phase_ = MissionPhase::kReturning;
     returning_ = true;
@@ -1570,11 +1592,11 @@ class AutonomousExplorer final : public rclcpp::Node {
     cooled_signatures_.clear();
     paint_driven_corridor_ = true;
     paint_trail_budget_m_ = 80.0;
+    clear_start_pinch_ = true;
     if (!StartNavigation(step, true)) return false;
     RCLCPP_INFO(get_logger(),
                 "Breadcrumb return hop: pose=(%.2f,%.2f) step=(%.2f,%.2f) home_dist=%.2f",
-                pose_->pose.position.x, pose_->pose.position.y, step.x, step.y,
-                home_dist);
+                rx, ry, step.x, step.y, home_dist);
     PublishStatus("RETURNING", "following driven trail breadcrumbs home");
     return true;
   }
@@ -1848,30 +1870,34 @@ class AutonomousExplorer final : public rclcpp::Node {
       PublishStatus("SELECTING", "immobility exhausted locked mouth");
       return true;
     }
-    // Repeated tip immobility: cool the pocket so SelectNextGoal cannot
-    // re-queue the same wall-tip viewpoint after a short retreat.
+    // Repeated tip immobility: demote the tip only. Cooling the robot pose
+    // froze the exit corridor and left the chassis on the wall (回不去).
     if (immobility_recoveries_ >= 2 && pose_) {
       explorer_.RecordAttempt(active_goal_, false);
       recently_demoted_ = active_goal_;
       recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(10.0);
-      explorer_.CoolRegion(active_goal_.x, active_goal_.y, 1.50, 2500u);
-      explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 1.50,
-                           2500u);
-      explorer_.CoolRegion(pose_->pose.position.x, pose_->pose.position.y, 1.50,
-                           2500u);
-      committed_tour_.clear();
+      explorer_.CoolRegion(active_goal_.x, active_goal_.y, 0.80, 1800u);
+      explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 0.80,
+                           1800u);
       ClearEntryMouthLock();
       retreat_attempted_ = false;
+      clear_start_pinch_ = true;
       next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
       if (StartRetreat()) {
         PublishStatus("NAVIGATING",
-                      "immobility at wall tip; cool pocket and leave trail");
+                      "immobility at wall tip; leave along driven trail");
+        return true;
+      }
+      if (TryStartEscape()) {
+        PublishStatus("RECOVERING",
+                      "immobility at wall tip; reverse out of inflation");
         return true;
       }
       DemoteActiveGoal("immobility tip thrash; demoting cooled viewpoint");
       return true;
     }
     retreat_attempted_ = false;
+    clear_start_pinch_ = true;
     if (StartRetreat()) {
       PublishStatus("NAVIGATING", "immobility; leaving along driven trail");
       return true;
@@ -2360,8 +2386,21 @@ class AutonomousExplorer final : public rclcpp::Node {
         // that was the thrash. TickEscape already resumes return once.
         if (escape_until_.nanoseconds() != 0 || escape_then_return_) return;
         if (breadcrumb_returning_ && StartBreadcrumbTowardHome()) return;
-        if (return_escape_attempts_ >= 3) {
-          if (StartBreadcrumbTowardHome()) return;
+        // Wall-tip return: allow more reverse peels before giving up 4 m from
+        // home (result.json: return_error=4.1 with first-segment replay fails).
+        constexpr int kMaxReturnEscapes = 5;
+        if (return_escape_attempts_ < kMaxReturnEscapes && TryStartEscape()) {
+          ++return_escape_attempts_;
+          escape_then_return_ = true;
+          clear_start_pinch_ = true;
+          return;
+        }
+        if (StartBreadcrumbTowardHome()) return;
+        if (return_escape_attempts_ >= kMaxReturnEscapes) {
+          paint_driven_corridor_ = true;
+          paint_trail_budget_m_ = 80.0;
+          clear_start_pinch_ = true;
+          if (StartNavigation(MakeHomeGoal(), true)) return;
           Finish(true, "return path unavailable; stopping to protect localization");
           return;
         }
@@ -2433,7 +2472,17 @@ class AutonomousExplorer final : public rclcpp::Node {
       path_publisher_->publish(empty);
       if (phase_ == MissionPhase::kReturning || returning_) {
         navigation_.reset();
+        cooled_signatures_.clear();
+        clear_start_pinch_ = true;
         if (StartBreadcrumbTowardHome()) return;
+        if (return_escape_attempts_ < 5 && TryStartEscape()) {
+          ++return_escape_attempts_;
+          escape_then_return_ = true;
+          return;
+        }
+        paint_driven_corridor_ = true;
+        paint_trail_budget_m_ = 80.0;
+        if (StartNavigation(MakeHomeGoal(), true)) return;
         partial_return_ = true;
         Finish(true, "return path intersected mapped obstacles");
       } else if (HandlePathCutsWhileExploring(state)) {
