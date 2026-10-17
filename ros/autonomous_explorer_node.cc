@@ -670,8 +670,10 @@ class AutonomousExplorer final : public rclcpp::Node {
       // Open-tier wall-foot chords: refuse and fall through to pinch. Do not
       // apply the same floor to pinch/entry — door throats legitimately sit
       // near ~0.10 m, and start-pose lidar cannot tell a throat from a graze.
+      // Open-tier paths that graze partition tips (~0.18–0.21 m) still park
+      // CARROT on the corner; require a clearer aisle before accepting.
       if (!entry_drive && !returning && !retreat_goal_ && !pinch_plan &&
-          last_path_min_clearance_m_ > 0. && last_path_min_clearance_m_ < .18) {
+          last_path_min_clearance_m_ > 0. && last_path_min_clearance_m_ < .22) {
         if (initial_state.path_signature != 0)
           cooled_signatures_.insert(initial_state.path_signature);
         last_planning_failure_ = "wall-scrape path in open clearance";
@@ -1366,6 +1368,21 @@ class AutonomousExplorer final : public rclcpp::Node {
     return path_clearance_m > 0. && path_clearance_m < .16;
   }
 
+  // Convex partition tip mid-route: GLOBAL hugs the tip so CARROT sits on it
+  // while GOAL is still metres away. Forward is often 0.30–0.55 m — neither
+  // the open-wall-scrape gate (>=0.70) nor forward-blocked (<0.28) fires, so
+  // peel/resume parked the robot on the tip forever (UI red box).
+  bool IsCornerTipStall(double path_clearance_m, double front_range,
+                        double side_range) const {
+    if (pending_entry_goal_ || locked_entry_mouth_ || returning_ || retreat_goal_)
+      return false;
+    if (path_clearance_m <= 0. || path_clearance_m >= .22) return false;
+    const bool tip_close =
+        (front_range > 0. && front_range < .55 && side_range < .50) ||
+        (side_range < .28 && front_range > 0. && front_range < .70);
+    return tip_close;
+  }
+
   bool BreakWallScrapeThrash(const char* reason) {
     if (last_path_signature_ != 0)
       cooled_signatures_.insert(last_path_signature_);
@@ -1382,7 +1399,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     latest_map_replans_ = 0;
     if (StartNavigation(active_goal_, false, true)) {
       // Fresh plan still on the rim → leave this viewpoint.
-      if (last_path_min_clearance_m_ > 0. && last_path_min_clearance_m_ < .12) {
+      if (last_path_min_clearance_m_ > 0. && last_path_min_clearance_m_ < .16) {
         if (last_path_signature_ != 0)
           cooled_signatures_.insert(last_path_signature_);
         DemoteActiveGoal("replanned path still wall-scrape; demoting");
@@ -1398,7 +1415,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   bool BreakWallScrapeAfterPeel() {
     const bool scrape =
         recovery_.side_peels > 0 || recovery_.wall_scrapes > 0 ||
-        (last_path_min_clearance_m_ > 0. && last_path_min_clearance_m_ < .16);
+        (last_path_min_clearance_m_ > 0. && last_path_min_clearance_m_ < .22);
     if (!scrape) return false;
     return BreakWallScrapeThrash("after wall peel; ban scrape chord");
   }
@@ -2230,8 +2247,10 @@ class AutonomousExplorer final : public rclcpp::Node {
           state.global_planning.path_min_clearance_m > 0.
               ? state.global_planning.path_min_clearance_m
               : last_path_min_clearance_m_;
-      if (IsOpenWallScrape(path_clear, side, front >= .70)) {
-        BreakWallScrapeThrash("immobility wall-scrape");
+      if (IsOpenWallScrape(path_clear, side, front >= .70) ||
+          IsCornerTipStall(path_clear, front, side)) {
+        BreakWallScrapeThrash(front >= .70 ? "immobility wall-scrape"
+                                           : "immobility corner-tip");
         return true;
       }
     }
@@ -3260,6 +3279,22 @@ class AutonomousExplorer final : public rclcpp::Node {
           forward_clearance > 0. && forward_clearance < .28;
       const bool exploring_drive =
           phase_ == MissionPhase::kExploring && !returning_;
+
+      // Corner-tip stall: fill the gap between open-wall-scrape (>=0.70 front)
+      // and forward-blocked (<0.28). Live: CARROT sitting on a partition tip
+      // with GOAL still far away and progress dead.
+      if (exploring_drive && monitor_stop) {
+        const double path_clear =
+            state.global_planning.path_min_clearance_m > 0.
+                ? state.global_planning.path_min_clearance_m
+                : last_path_min_clearance_m_;
+        if (IsCornerTipStall(path_clear, front_range, side_range) &&
+            last_goal_path_progress_time_.nanoseconds() > 0 &&
+            (now() - last_goal_path_progress_time_).seconds() > 2.0) {
+          BreakWallScrapeThrash("corner-tip CARROT stall");
+          return;
+        }
+      }
 
       // SideSpeckStall: moderately open forward with a lateral speck STOP.
       // When forward is clearly open (>=0.70 m), a close flank is a normal
