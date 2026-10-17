@@ -886,4 +886,12 @@ int main() {
     assert(!navigation2d::PathCutsLiveOccupied(sealed, entry, rx, ry));
   }
 
+  // Wall-tip pause thrash: low-clearance path cuts must abandon (not replan).
+  assert(!navigation2d::PreferTipAbandonAfterPathCut(0, .30));
+  assert(!navigation2d::PreferTipAbandonAfterPathCut(1, .30));
+  assert(navigation2d::PreferTipAbandonAfterPathCut(2, .30));
+  assert(navigation2d::PreferTipAbandonAfterPathCut(1, .08));  // tip graze
+  assert(navigation2d::PreferTipAbandonAfterPathCut(0, .10));
+  assert(!navigation2d::PreferTipAbandonAfterPathCut(0, 0.));  // unknown clearance
+
 }

@@ -190,6 +190,14 @@ bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row) {
   return seal_on_axis(0, 1) || seal_on_axis(1, 0);
 }
 
+bool PreferTipAbandonAfterPathCut(int mapped_obstacle_rejects,
+                                  double path_min_clearance_m) {
+  if (mapped_obstacle_rejects >= 2) return true;
+  // Clearance already below body half-width: another theta* chord will clip
+  // the same tip and PathCuts will drop it again (pause thrash).
+  return path_min_clearance_m > 0. && path_min_clearance_m < .14;
+}
+
 bool PathCutsLiveOccupied(const ExplorationGrid& live,
                           const std::vector<std::pair<double, double>>& path_xy,
                           double robot_x, double robot_y, double body_radius,

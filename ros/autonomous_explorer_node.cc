@@ -1611,6 +1611,36 @@ class AutonomousExplorer final : public rclcpp::Node {
     PublishStatus("SELECTING", reason);
   }
 
+  bool AbandonWallTipAfterPathCut(const char* reason) {
+    RCLCPP_WARN(get_logger(), "%s", reason);
+    explorer_.RecordAttempt(active_goal_, false);
+    recently_demoted_ = active_goal_;
+    recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(10.0);
+    if (pose_) {
+      explorer_.CoolRegion(active_goal_.x, active_goal_.y, 1.50, 2500u);
+      explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 1.50,
+                           2500u);
+      explorer_.CoolRegion(pose_->pose.position.x, pose_->pose.position.y, 1.50,
+                           2500u);
+    }
+    ClearEntryMouthLock();
+    navigation_.reset();
+    recovery_.Clear();
+    committed_tour_.clear();
+    cooled_signatures_.clear();
+    latest_map_replans_ = 0;
+    mapped_obstacle_rejects_ = 0;
+    retreat_attempted_ = false;
+    next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
+    PublishStatus("SELECTING", reason);
+    if (StartRetreat()) {
+      PublishStatus("NAVIGATING", "leaving wall tip after path-cut thrash");
+      return true;
+    }
+    if (TryStartEscape()) return true;
+    return true;
+  }
+
   bool HandlePathCutsWhileExploring(const navigation2d::NavigationState& state) {
     NoteMappedObstacleReject(active_goal_);
     if (state.path_signature != 0) cooled_signatures_.insert(state.path_signature);
@@ -1635,6 +1665,16 @@ class AutonomousExplorer final : public rclcpp::Node {
       next_selection_ = now() + rclcpp::Duration::from_seconds(2.0);
       PublishStatus("SELECTING", "locked mouth path cut exhausted");
       return true;
+    }
+    const double clearance = state.global_planning.path_min_clearance_m > 0.
+                                 ? state.global_planning.path_min_clearance_m
+                                 : last_path_min_clearance_m_;
+    // Wall-tip chords: replan-once just rebuilds another illegal tip graze and
+    // the robot pause→drop→replan→pause in place (red-box tip thrash).
+    if (navigation2d::PreferTipAbandonAfterPathCut(mapped_obstacle_rejects_,
+                                                   clearance)) {
+      return AbandonWallTipAfterPathCut(
+          "path cut at low-clearance wall tip; leaving tip pocket");
     }
     if (ReplanActiveGoalOnLatestMap("path cut mapped obstacle; replan once"))
       return true;
@@ -1718,6 +1758,29 @@ class AutonomousExplorer final : public rclcpp::Node {
       ClearEntryMouthLock();
       next_selection_ = now() + rclcpp::Duration::from_seconds(2.0);
       PublishStatus("SELECTING", "immobility exhausted locked mouth");
+      return true;
+    }
+    // Repeated tip immobility: cool the pocket so SelectNextGoal cannot
+    // re-queue the same wall-tip viewpoint after a short retreat.
+    if (immobility_recoveries_ >= 2 && pose_) {
+      explorer_.RecordAttempt(active_goal_, false);
+      recently_demoted_ = active_goal_;
+      recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(10.0);
+      explorer_.CoolRegion(active_goal_.x, active_goal_.y, 1.50, 2500u);
+      explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 1.50,
+                           2500u);
+      explorer_.CoolRegion(pose_->pose.position.x, pose_->pose.position.y, 1.50,
+                           2500u);
+      committed_tour_.clear();
+      ClearEntryMouthLock();
+      retreat_attempted_ = false;
+      next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
+      if (StartRetreat()) {
+        PublishStatus("NAVIGATING",
+                      "immobility at wall tip; cool pocket and leave trail");
+        return true;
+      }
+      DemoteActiveGoal("immobility tip thrash; demoting cooled viewpoint");
       return true;
     }
     retreat_attempted_ = false;
@@ -1959,7 +2022,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   bool BreakMappedObstacleThrash() {
-    if (mapped_obstacle_rejects_ < 3) return false;
+    if (mapped_obstacle_rejects_ < 2) return false;
     mapped_obstacle_rejects_ = 0;
     navigation_.reset();
     recovery_.Clear();
