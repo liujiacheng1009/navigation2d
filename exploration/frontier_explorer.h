@@ -1,6 +1,7 @@
 #pragma once
 
 #include "navigation2d/exploration/region_scheduler.h"
+#include "navigation2d/geometry/robot_geometry.h"
 
 #include <cstdint>
 #include <limits>
@@ -25,8 +26,8 @@ struct ExplorationGrid {
 bool PathCutsLiveOccupied(const ExplorationGrid& live,
                           const std::vector<std::pair<double, double>>& path_xy,
                           double robot_x, double robot_y,
-                          double body_radius = .22,
-                          double under_robot_m = .22);
+                          double body_radius = kPlanningRadius,
+                          double under_robot_m = kPlanningRadius);
 
 // After repeated live-map path cuts (>=2), leave the tip pocket instead of
 // replan thrash. A single low-clearance graze near a passable door must not

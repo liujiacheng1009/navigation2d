@@ -11,13 +11,12 @@
 namespace {
 
 // Chassis half-width is 0.147 m; CAD max footprint radius ~0.207 m. Planning
-// uses robot_radius 0.22 m for goal acceptance (GridSearch goal_clearance).
+// uses kPlanningRadius for goal acceptance (GridSearch goal_clearance).
 // Nominated viewpoints must meet that same radius — a looser 0.18 m floor
 // produced candidates the planner rejected as "goal occupied, nearest 0.18 m".
 constexpr double kNarrowMinWidth = .32;
 constexpr double kNarrowMaxWidth = 1.40;
-constexpr double kPlanningRadius = .22;
-constexpr double kNarrowClearance = kPlanningRadius;
+constexpr double kNarrowClearance = navigation2d::kPlanningRadius;
 // Narrow doorway floor: close enough to see through a kitchen mouth, but not
 // the old 0.08 m rim that parked the chassis on the wall. Open-space goals
 // use config.minimum_standoff (much larger); this only unlocks corridor poses.
@@ -331,7 +330,7 @@ bool FrontierExplorer::SafeViewpoint(int col, int row) const {
   const bool corridor = narrow_h || narrow_v ||
                         (smaller >= narrow_min && smaller <= narrow_max);
   // Wide open space keeps footprint_clearance (typically .30 with inflation).
-  // Corridor / doorway cells must use the planning radius (.22): requiring
+  // Corridor / doorway cells must use kPlanningRadius: requiring
   // .30 m half-width rejects a physical 0.70 m kitchen door after SLAM
   // thickens the jambs, so entry probes never reach the room side.
   const double corridor_clearance =

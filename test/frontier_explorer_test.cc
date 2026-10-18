@@ -63,7 +63,7 @@ int main() {
   // far high-gain wall, even though NBV would prefer the distant blob.
   navigation2d::FrontierExplorerConfig tour_config;
   tour_config.minimum_frontier_cells = 6;
-  tour_config.footprint_clearance = .22;
+  tour_config.footprint_clearance = navigation2d::kPlanningRadius;
   tour_config.minimum_standoff = .10;
   tour_config.maximum_standoff = 1.10;
   tour_config.required_frontier_observations = 1;
@@ -222,7 +222,7 @@ int main() {
   // again.
   navigation2d::FrontierExplorerConfig pinch_config;
   pinch_config.minimum_frontier_cells = 6;
-  pinch_config.footprint_clearance = .22;
+  pinch_config.footprint_clearance = navigation2d::kPlanningRadius;
   pinch_config.minimum_standoff = .10;
   pinch_config.maximum_standoff = 1.10;
   pinch_config.blacklist_radius = 1.20;
@@ -268,7 +268,7 @@ int main() {
   // past the doorway, stay unknown.
   navigation2d::FrontierExplorerConfig door_config;
   door_config.minimum_frontier_cells = 6;
-  door_config.footprint_clearance = .22;
+  door_config.footprint_clearance = navigation2d::kPlanningRadius;
   door_config.minimum_standoff = .10;
   door_config.maximum_standoff = 1.10;
   door_config.required_frontier_observations = 1;
@@ -313,7 +313,7 @@ int main() {
         nearest_occupied = std::min(nearest_occupied, std::hypot(goal.x - x, goal.y - y));
       }
     }
-    assert(nearest_occupied >= .22);
+    assert(nearest_occupied >= navigation2d::kPlanningRadius);
   }
   assert(on_centerline);
 
@@ -401,7 +401,7 @@ int main() {
   // Observing one cools that mouth only.
   navigation2d::FrontierExplorerConfig pair_config;
   pair_config.minimum_frontier_cells = 6;
-  pair_config.footprint_clearance = .22;
+  pair_config.footprint_clearance = navigation2d::kPlanningRadius;
   pair_config.minimum_standoff = .10;
   pair_config.maximum_standoff = 1.10;
   pair_config.blacklist_radius = 1.20;
@@ -467,7 +467,7 @@ int main() {
   // mouth; a far active goal must be preemptable until local mouths are gone.
   navigation2d::FrontierExplorerConfig junction_config;
   junction_config.minimum_frontier_cells = 6;
-  junction_config.footprint_clearance = .22;
+  junction_config.footprint_clearance = navigation2d::kPlanningRadius;
   junction_config.minimum_standoff = .10;
   junction_config.maximum_standoff = 1.10;
   junction_config.required_frontier_observations = 1;
@@ -963,10 +963,12 @@ int main() {
     // Same chord with the old loose under-robot radius would miss the wall —
     // prove the default 0.22 m still catches it, and that 0.35 m would not
     // be an acceptable production default.
-    assert(navigation2d::PathCutsLiveOccupied(doorway, through_wall, robot_x,
-                                              robot_y, .22, .22));
-    assert(!navigation2d::PathCutsLiveOccupied(doorway, through_wall, robot_x,
-                                               robot_y, .22, .40));
+    assert(navigation2d::PathCutsLiveOccupied(
+        doorway, through_wall, robot_x, robot_y,
+        navigation2d::kPlanningRadius, navigation2d::kPlanningRadius));
+    assert(!navigation2d::PathCutsLiveOccupied(
+        doorway, through_wall, robot_x, robot_y, navigation2d::kPlanningRadius,
+        .40));
 
     // Path that goes around the wall stays legal.
     const std::vector<std::pair<double, double>> around = {
@@ -1211,7 +1213,8 @@ int main() {
     const double x1 = (40 + .5) * island.resolution;
     const double y1 = (20 + .5) * island.resolution;
     const std::vector<std::pair<double, double>> through = {{x0, y0}, {x1, y1}};
-    assert(navigation2d::PathCutsLiveOccupied(island, through, x0, y0, .22));
+    assert(navigation2d::PathCutsLiveOccupied(
+        island, through, x0, y0, navigation2d::kPlanningRadius));
     assert(island.cells[20 * island.width + 30] == 100);
   }
 
@@ -1232,7 +1235,7 @@ int main() {
     for (int col = 4; col < 56; ++col)
       open_wall.cells[static_cast<std::size_t>(35 * open_wall.width + col)] = -1;
     navigation2d::FrontierExplorerConfig ocfg;
-    ocfg.footprint_clearance = .22;
+    ocfg.footprint_clearance = navigation2d::kPlanningRadius;
     ocfg.minimum_frontier_cells = 4;
     ocfg.minimum_standoff = .10;
     ocfg.maximum_standoff = 1.10;
@@ -1265,7 +1268,7 @@ int main() {
         wide_room.cells[static_cast<std::size_t>(row * wide_room.width + col)] =
             -1;
     navigation2d::FrontierExplorerConfig wcfg;
-    wcfg.footprint_clearance = .22;
+    wcfg.footprint_clearance = navigation2d::kPlanningRadius;
     wcfg.minimum_frontier_cells = 4;
     wcfg.required_frontier_observations = 1;
     navigation2d::FrontierExplorer wex(wcfg);
@@ -1298,7 +1301,7 @@ int main() {
     sp(18, 32, 22, 30, 0);      // 0.70 m × 0.40 m shallow room (free)
     sp(18, 32, 30, 36, -1);     // unknown past the pocket
     navigation2d::FrontierExplorerConfig scfg;
-    scfg.footprint_clearance = .22;
+    scfg.footprint_clearance = navigation2d::kPlanningRadius;
     scfg.minimum_frontier_cells = 4;
     scfg.minimum_standoff = .10;
     scfg.maximum_standoff = 1.10;
@@ -1354,7 +1357,8 @@ int main() {
     const double y1 = (28 + .5) * finger.resolution;
     const std::vector<std::pair<double, double>> through_fin = {{x0, y0},
                                                                 {x1, y1}};
-    assert(navigation2d::PathCutsLiveOccupied(finger, through_fin, x0, y0, .22));
+    assert(navigation2d::PathCutsLiveOccupied(
+        finger, through_fin, x0, y0, navigation2d::kPlanningRadius));
     assert(finger.cells[28 * finger.width + 29] == 100);
     assert(finger.cells[21 * finger.width + 29] == 100);
   }

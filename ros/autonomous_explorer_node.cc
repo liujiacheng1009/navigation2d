@@ -22,6 +22,7 @@
 #include "nav_msgs/msg/path.hpp"
 #include "navigation2d/application/navigation_system.h"
 #include "navigation2d/exploration/frontier_explorer.h"
+#include "navigation2d/geometry/robot_geometry.h"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_msgs/msg/string.hpp"
@@ -57,7 +58,7 @@ navigation2d::FrontierExplorerConfig ExplorerConfig() {
   // Keep frontier generation consistent with the navigation costmap: a goal
   // must leave room for the physical footprint and its obstacle buffer, not
   // merely be free in the raw occupancy image. CAD max footprint radius is
-  // ~0.207 m; planning uses 0.22 m + soft inflation 0.26 m (same as production).
+  // ~0.207 m; planning uses kPlanningRadius + soft inflation (same as production).
   // Open-space standoff stays well off walls — lidar covers the rim without
   // driving there. Narrow doorways still use kCloseStandoff via SafeViewpoint.
   config.footprint_clearance = .38;
@@ -511,18 +512,17 @@ class AutonomousExplorer final : public rclcpp::Node {
     config.max_reverse_velocity = .10;
     // CAD: chassis 290×230 mm, wheel envelope half-width 0.147 m, max
     // footprint radius ~0.207 m. Match production navigation2d_node (+margin).
-    // Always plan at the chassis planning radius (0.22 m). The old entry
-    // 0.14 m / pinch acceptance <0.15 m let GLOBAL thread furniture V-gaps
-    // the body cannot fit (UI: yellow path hard-squeezing a tip pocket).
+    // Always plan at kPlanningRadius. The old entry 0.14 m / pinch acceptance
+    // <0.15 m let GLOBAL thread furniture V-gaps the body cannot fit.
     const bool entry_drive = pending_entry_goal_ || locked_entry_mouth_;
     // Entry: A* only. Theta* long chords cut nearby wall tips even when the
     // locked mouth is metres wide (live: gap=2.15 Entry probe rejected
     // path-intersects → abandon → tour loop → failed_goals thrash).
     config.planner = entry_drive ? "astar" : "theta_star";
-    config.robot_radius = .22;
+    config.robot_radius = navigation2d::kPlanningRadius;
     if (entry_drive) {
-      // Circular inscribed footprint for mouth crawl (monitor / RPP), but
-      // keep the same 0.22 m radius as open explore.
+      // Circular inscribed footprint for mouth crawl (monitor / RPP), same
+      // lethal radius as open explore.
       config.footprint.clear();
     } else {
       config.footprint = {{-.145, -.147}, {.115, -.147}, {.145, -.132},
@@ -533,7 +533,8 @@ class AutonomousExplorer final : public rclcpp::Node {
     //   pinch  — automatic retry when open-tier finds no route through a
     //            door-width throat (any map, not kitchen-specific)
     //   open   — default explore: prefer mid-aisle over wall feet
-    // Lethal radius stays 0.22 in all tiers; tiers only change soft inflation.
+    // Lethal radius stays kPlanningRadius in all tiers; tiers only change
+    // soft inflation.
     const bool pinch_plan = narrow_passage_retry_ && !entry_drive && !returning;
     if (entry_drive) {
       config.inflation_radius = .28;
@@ -689,11 +690,12 @@ class AutonomousExplorer final : public rclcpp::Node {
       mapped_obstacle_rejects_ = 0;
       last_path_signature_ = initial_state.path_signature;
       last_path_min_clearance_m_ = initial_state.global_planning.path_min_clearance_m;
-      // Refuse any explore path thinner than the planning radius — including
+      // Refuse any explore path thinner than kPlanningRadius — including
       // entry / pinch tiers. Soft inflation may still prefer wider aisles;
-      // lethal fit must remain ≥0.22 m so tip pockets are not "hard squeezed".
+      // lethal fit must remain ≥ kPlanningRadius so tip pockets are not
+      // "hard squeezed".
       if (!returning && !retreat_goal_ && last_path_min_clearance_m_ > 0. &&
-          last_path_min_clearance_m_ < .22) {
+          last_path_min_clearance_m_ < navigation2d::kPlanningRadius) {
         if (initial_state.path_signature != 0)
           cooled_signatures_.insert(initial_state.path_signature);
         last_planning_failure_ = pinch_plan ? "pinch path still wall-scrape"
@@ -799,7 +801,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     planning_input_publisher_->publish(input);
 
     nav_msgs::msg::OccupancyGrid inflated = input;
-    constexpr double kRobotRadius = .22;
+    constexpr double kRobotRadius = navigation2d::kPlanningRadius;
     constexpr double kInflationRadius = .30;
     constexpr double kInflationCostScaling = 8.;
     const int inflation_cells =
@@ -1396,7 +1398,8 @@ class AutonomousExplorer final : public rclcpp::Node {
       geometry_msgs::msg::Twist command = escape_command_;
       const double front = SectorMinRange(0., .40);
       const double back = SectorMinRange(std::acos(-1.), .40);
-      if (command.linear.x > 0. && front > 0. && front < .22) {
+      if (command.linear.x > 0. && front > 0. &&
+          front < navigation2d::kPlanningRadius) {
         command.linear.x = 0.;
         if (std::abs(command.angular.z) < .20)
           command.angular.z = command.angular.z >= 0. ? .55 : -.55;
@@ -1674,7 +1677,8 @@ class AutonomousExplorer final : public rclcpp::Node {
   bool BreakWallScrapeAfterPeel() {
     const bool scrape =
         recovery_.side_peels > 0 || recovery_.wall_scrapes > 0 ||
-        (last_path_min_clearance_m_ > 0. && last_path_min_clearance_m_ < .22);
+        (last_path_min_clearance_m_ > 0. &&
+         last_path_min_clearance_m_ < navigation2d::kPlanningRadius);
     if (!scrape) return false;
     return UnstickFromPinch("after wall peel; leave pinch pocket");
   }
@@ -2721,7 +2725,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         ",\"minimum_ttc_s\":" + std::to_string(last_minimum_ttc_s_) +
         ",\"planner_expansions\":" + std::to_string(last_planner_expansions_) +
         ",\"planner_elapsed_s\":" + std::to_string(last_planner_elapsed_s_) +
-        ",\"robot_radius_m\":0.22" +
+        ",\"robot_radius_m\":" + std::to_string(navigation2d::kPlanningRadius) +
         ",\"cmd_vel\":{\"linear\":" + std::to_string(last_cmd_linear_) +
         ",\"angular\":" + std::to_string(last_cmd_angular_) +
         "},\"requested_cmd\":{\"linear\":" + std::to_string(last_requested_linear_) +
@@ -2866,8 +2870,8 @@ class AutonomousExplorer final : public rclcpp::Node {
     const double robot_y = pose_ ? pose_->pose.position.y : path_xy.front().second;
     // Same body as the planner radius — entry no longer uses a 0.14 m
     // exemption that let GLOBAL squeeze tip gaps PathCuts would otherwise cut.
-    return navigation2d::PathCutsLiveOccupied(live, path_xy, robot_x, robot_y,
-                                              .22);
+    return navigation2d::PathCutsLiveOccupied(
+        live, path_xy, robot_x, robot_y, navigation2d::kPlanningRadius);
   }
 
   bool TourSegmentCutsWall(double x0, double y0, double x1, double y1) const {
@@ -3303,7 +3307,8 @@ class AutonomousExplorer final : public rclcpp::Node {
           std::hypot(rx - mouth.frontier_x, ry - mouth.frontier_y);
       const double front_clear = SectorMinRange(0., .40);
       if (mouth_range < 1.20 && std::abs(command.linear.x) < .12 &&
-          (front_clear <= 0. || front_clear >= .22)) {
+          (front_clear <= 0. ||
+           front_clear >= navigation2d::kPlanningRadius)) {
         double into_x = active_goal_.x - mouth.frontier_x;
         double into_y = active_goal_.y - mouth.frontier_y;
         double into_len = std::hypot(into_x, into_y);
