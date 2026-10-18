@@ -1112,24 +1112,33 @@ class AutonomousExplorer final : public rclcpp::Node {
       LockEntryMouth(*pending_entry_goal_);
     else
       pending_entry_goal_ = *locked_entry_mouth_;
-    // Far from the mouth: drive the hall standoff first. A long chord into the
-    // flooded nose failed first-segment replay while the chassis never moved
-    // (live: pose=(-0.70,1.12) → target=(-2.50,2.49)).
+    // Far from the mouth: step along the ray toward the frontier until the
+    // remaining gap is the poke distance. The stored viewpoint can sit behind
+    // the robot; navigating there is the open-room reverse, and once the
+    // chassis is already inside goal tolerance that navigation succeeds every
+    // tick and the robot freezes (live: pose=(-1.69,-0.50) goal=(-1.81,-0.45)
+    // while the frontier stayed 2.06 m south).
     {
-      const double mouth_range = std::hypot(
-          pose_->pose.position.x - pending_entry_goal_->frontier_x,
-          pose_->pose.position.y - pending_entry_goal_->frontier_y);
-      if (mouth_range > 1.55) {
+      const double fx = pending_entry_goal_->frontier_x;
+      const double fy = pending_entry_goal_->frontier_y;
+      const double rx = pose_->pose.position.x;
+      const double ry = pose_->pose.position.y;
+      const double mouth_range = std::hypot(rx - fx, ry - fy);
+      constexpr double kPokeRange = 1.55;
+      const double travel = mouth_range - kPokeRange;
+      if (travel > navigation2d::kSwingClearance) {
         Goal approach = *pending_entry_goal_;
+        approach.x = rx + travel * (fx - rx) / mouth_range;
+        approach.y = ry + travel * (fy - ry) / mouth_range;
+        approach.yaw = std::atan2(fy - ry, fx - rx);
         paint_driven_corridor_ = true;
         paint_trail_budget_m_ = 8.0;
         cooled_signatures_.clear();
         if (StartNavigation(approach, false)) {
           RCLCPP_INFO(get_logger(),
                       "Entry approach standoff: frontier=(%.2f,%.2f) "
-                      "range=%.2f before poke",
-                      pending_entry_goal_->frontier_x,
-                      pending_entry_goal_->frontier_y, mouth_range);
+                      "range=%.2f step=(%.2f,%.2f)",
+                      fx, fy, mouth_range, approach.x, approach.y);
           PublishStatus("COMPLETING", "approaching sealed-room mouth");
           return true;
         }
