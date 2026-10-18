@@ -697,7 +697,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       // Margin == 0 must count (dist ≤ body radius).
       if (!entry_drive && !returning && !retreat_goal_ && !pinch_plan &&
           std::isfinite(last_path_min_clearance_m_) &&
-          last_path_min_clearance_m_ < navigation2d::kOpenPreferPathMargin) {
+          !navigation2d::PathClearsOpen(last_path_min_clearance_m_)) {
         if (initial_state.path_signature != 0)
           cooled_signatures_.insert(initial_state.path_signature);
         last_planning_failure_ = "wall-scrape path in open clearance";
@@ -727,7 +727,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       // Pinch may thread a door but must not accept a corner-tip scrape.
       if (!entry_drive && !returning && !retreat_goal_ && pinch_plan &&
           std::isfinite(last_path_min_clearance_m_) &&
-          last_path_min_clearance_m_ < navigation2d::kPinchMinPathMargin) {
+          !navigation2d::PathClearsPinch(last_path_min_clearance_m_)) {
         if (initial_state.path_signature != 0)
           cooled_signatures_.insert(initial_state.path_signature);
         last_planning_failure_ = "pinch path still wall-scrape";
@@ -1380,15 +1380,45 @@ class AutonomousExplorer final : public rclcpp::Node {
     return any ? minimum : 0.;
   }
 
+  // One aperture for every stall/escape sample (kBodyConeHalfAngle).
+  struct BodyRanges {
+    double front = 0.;
+    double back = 0.;
+    double left = 0.;
+    double right = 0.;
+    double side = 0.;
+  };
+
+  BodyRanges ReadBodyRanges() const {
+    const double cone = navigation2d::kBodyConeHalfAngle;
+    const double pi = std::acos(-1.);
+    BodyRanges ranges;
+    ranges.front = SectorMinRange(0., cone);
+    ranges.back = SectorMinRange(pi, cone);
+    ranges.left = SectorMinRange(pi / 2., cone);
+    ranges.right = SectorMinRange(-pi / 2., cone);
+    ranges.side = std::min(ranges.left > 0. ? ranges.left : 10.,
+                           ranges.right > 0. ? ranges.right : 10.);
+    return ranges;
+  }
+
+  // Prefer the live route metric. A stored 0 after navigation_.reset() is not
+  // a measurement — callers that require an active route check navigation_.
+  double ActivePathMargin(double sample) const {
+    if (navigation_ && std::isfinite(sample)) return sample;
+    return last_path_min_clearance_m_;
+  }
+
   // Body-frame lidar only — no map pose / yaw. LD14 distorts hard while
   // spinning and localization coasts on odom, so tip escape must prefer
   // reverse translation over in-place rotate.
   bool TryStartEscape() {
     if (!scan_ || !pose_ || now() < escape_until_) return false;
-    const double front = SectorMinRange(0., .45);
-    const double back = SectorMinRange(std::acos(-1.), .45);
-    const double left = SectorMinRange(+std::acos(-1.) / 2., .45);
-    const double right = SectorMinRange(-std::acos(-1.) / 2., .45);
+    const BodyRanges body = ReadBodyRanges();
+    const double front = body.front;
+    const double back = body.back;
+    const double left = body.left;
+    const double right = body.right;
     geometry_msgs::msg::Twist command;
     double hold_s = 1.6;
     // Mild side bias only (≤0.35 rad/s). Large w during reverse was the
@@ -1397,18 +1427,18 @@ class AutonomousExplorer final : public rclcpp::Node {
         (left > 0. && right > 0. && std::abs(left - right) > .12)
             ? ((left > right) ? .30 : -.30)
             : 0.;
-    if (back >= .28) {
+    if (back >= navigation2d::kPlanningRadius) {
       // Priority 1: back straight out of the tip. Odom coasts fine; map yaw
-      // does not matter.
+      // does not matter. Tail must clear the planning circle.
       command.linear.x = -.20;
       command.angular.z = side_bias;
       hold_s = returning_ ? 2.2 : 1.8;
-    } else if (front >= .50) {
+    } else if (navigation2d::AxisSwingClear(front)) {
       // Priority 2: creep forward into open, slight bias off the near wall.
       command.linear.x = .16;
       command.angular.z = side_bias;
       hold_s = 1.4;
-    } else if (std::max(left, right) >= .40) {
+    } else if (navigation2d::AxisSwingClear(std::max(left, right))) {
       // Priority 3 (last): short body-frame turn toward freer flank, then the
       // next escape tick will reverse. Keep spin ≤0.8 s.
       command.angular.z = left >= right ? .55 : -.55;
@@ -1432,10 +1462,11 @@ class AutonomousExplorer final : public rclcpp::Node {
       // Re-read body-frame lidar every tick. Do not trust the frozen command's
       // yaw bias after localization has coasted on odom.
       geometry_msgs::msg::Twist command = escape_command_;
-      const double front = SectorMinRange(0., .40);
-      const double back = SectorMinRange(std::acos(-1.), .40);
-      const double left = SectorMinRange(+std::acos(-1.) / 2., .40);
-      const double right = SectorMinRange(-std::acos(-1.) / 2., .40);
+      const BodyRanges body = ReadBodyRanges();
+      const double front = body.front;
+      const double back = body.back;
+      const double left = body.left;
+      const double right = body.right;
       if (std::abs(command.linear.x) > .05 && left > 0. && right > 0. &&
           std::abs(left - right) > .12) {
         const double bias = (left > right) ? .30 : -.30;
@@ -1448,14 +1479,14 @@ class AutonomousExplorer final : public rclcpp::Node {
           front < navigation2d::kPlanningRadius) {
         command.linear.x = 0.;
         // Prefer reverse over spin when the nose closes mid-escape.
-        if (back >= .28) {
+        if (back >= navigation2d::kPlanningRadius) {
           command.linear.x = -.16;
           command.angular.z = 0.;
         } else if (std::abs(command.angular.z) < .20) {
           command.angular.z = (left >= right) ? .50 : -.50;
         }
       }
-      if (command.linear.x < 0. && back > 0. && back < .16) {
+      if (command.linear.x < 0. && navigation2d::HitInsideBody(back)) {
         command.linear.x = 0.;
       }
       command_publisher_->publish(command);
@@ -1598,13 +1629,14 @@ class AutonomousExplorer final : public rclcpp::Node {
 
   bool TipPinchedNow() const {
     if (!scan_ || !pose_) return false;
-    const double front = SectorMinRange(0., .50);
-    const double left = SectorMinRange(+std::acos(-1.) / 2., .40);
-    const double right = SectorMinRange(-std::acos(-1.) / 2., .40);
-    const double side =
-        std::min(left > 0. ? left : 10., right > 0. ? right : 10.);
-    return IsPinchGeometryStall(last_path_min_clearance_m_, front, side) ||
-           (side < .32 && front > 0. && front < .85);
+    const BodyRanges body = ReadBodyRanges();
+    if (navigation_)
+      return IsPinchGeometryStall(last_path_min_clearance_m_, body.front,
+                                  body.side);
+    // No route: both axes inside one body diameter. A near flank alone is
+    // not a pocket.
+    return navigation2d::HitBlocksSwing(body.front) &&
+           navigation2d::HitBlocksSwing(body.side);
   }
 
   // Leave a tip pocket and re-queue far corridor mouths (kitchen) instead of
@@ -1712,27 +1744,26 @@ class AutonomousExplorer final : public rclcpp::Node {
     return false;
   }
 
-  // Unified pinch / doorway-jamb / corner-tip geometry. One detector for the
-  // family of "wedged on a wall edge" failures instead of separate open-scrape
-  // vs corner-tip vs room-side gates that disagreed and looped.
+  // Tip only when BOTH axes are inside one body diameter and the live path
+  // does not already clear the open-tier margin. A near side wall with an
+  // open nose is ordinary driving.
   bool IsPinchGeometryStall(double path_clearance_m, double front_range,
                             double side_range) const {
     if (pending_entry_goal_ || locked_entry_mouth_ || returning_ || retreat_goal_)
       return false;
-    const bool tip_close =
-        (front_range > 0. && front_range < .55 && side_range < .50) ||
-        (side_range < .30 && front_range > 0. && front_range < .70) ||
-        (side_range < .40 && front_range >= .70);  // open-forward wall foot
-    if (!tip_close) return false;
-    // Margin 0 = body already at lethal distance — still a scrape.
-    if (std::isfinite(path_clearance_m) && path_clearance_m >= .20) return false;
-    return true;
+    if (!navigation_ || navigation2d::PathClearsOpen(path_clearance_m))
+      return false;
+    return navigation2d::HitBlocksSwing(front_range) &&
+           navigation2d::HitBlocksSwing(side_range);
   }
 
   bool IsOpenWallScrape(double path_clearance_m, double side_range,
                         bool forward_clearly_open) const {
-    return forward_clearly_open &&
-           IsPinchGeometryStall(path_clearance_m, 1.0, side_range);
+    // Open nose, but the flank hit is inside the planning circle and the
+    // path is not an open-tier (mid-aisle) route.
+    if (!forward_clearly_open || !navigation_) return false;
+    if (navigation2d::PathClearsOpen(path_clearance_m)) return false;
+    return navigation2d::HitInsideBody(side_range);
   }
 
   bool IsCornerTipStall(double path_clearance_m, double front_range,
@@ -1796,15 +1827,14 @@ class AutonomousExplorer final : public rclcpp::Node {
     // lethal tip → demote. Do not unstick on first open-front scrape (that
     // burned tour goals via "driving scrape path into corner tip").
     if (recovery_.wall_scrapes >= 2 || recovery_.side_peels > 0 ||
-        last_path_min_clearance_m_ < .05) {
+        !navigation2d::PathClearsPinch(last_path_min_clearance_m_)) {
       return UnstickFromPinch(reason);
     }
     latest_map_replans_ = 0;
     const int scrapes = recovery_.wall_scrapes;
     if (StartNavigation(active_goal_, false, true)) {
       recovery_.wall_scrapes = scrapes;  // Begin must not erase the budget
-      if (std::isfinite(last_path_min_clearance_m_) &&
-          last_path_min_clearance_m_ < .16) {
+      if (!navigation2d::PathClearsPinch(last_path_min_clearance_m_)) {
         if (last_path_signature_ != 0)
           cooled_signatures_.insert(last_path_signature_);
         // Count as a failed replan scrape; next BreakWallScrapeThrash demotes.
@@ -1818,10 +1848,10 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   bool BreakWallScrapeAfterPeel() {
-    // Only when this peel was started from an active scrape session.
-    // Stale last_path_min_clearance_m_==0 after UnstickFromPinch::Clear()
-    // used to re-enter here forever (UI: tip escape thrash at fixed pose).
-    if (recovery_.side_peels <= 0 && recovery_.wall_scrapes <= 0) return false;
+    // Only after a confirmed scrape session. side_peels-only (open speck peel)
+    // must resume/reselect — Unstick→Escape here was the fixed-pose thrash
+    // (log: after wall peel clearance=0 scrapes=0 every ~2s).
+    if (recovery_.wall_scrapes <= 0) return false;
     return UnstickFromPinch("after wall peel; leave pinch pocket");
   }
 
@@ -1863,16 +1893,14 @@ class AutonomousExplorer final : public rclcpp::Node {
     // while Euclidean progress is centimetres — require real displacement.
     // Entry / open-room: keep reverse short — long trail retreat is the
     // inefficient 往回跑 the UI shows.
-    const double front = SectorMinRange(0., .45);
-    const double left = SectorMinRange(+std::acos(-1.) / 2., .45);
-    const double right = SectorMinRange(-std::acos(-1.) / 2., .45);
-    const double side = std::min(left > 0. ? left : 10., right > 0. ? right : 10.);
+    const BodyRanges body = ReadBodyRanges();
     const bool entry = pending_entry_goal_ || locked_entry_mouth_;
-    const bool pinched = (front > 0. && front < .55) || (side < .50);
-    const double want_euclid =
-        entry ? .85 : (pinched ? 2.4 : 1.2);
-    const double min_euclid =
-        entry ? .50 : (pinched ? 1.2 : .70);
+    const bool pinched = navigation2d::HitBlocksSwing(body.front) &&
+                         navigation2d::HitBlocksSwing(body.side);
+    const double want_euclid = entry ? navigation2d::kEntryRetreat
+                                     : (pinched ? navigation2d::kPocketRetreat
+                                                : navigation2d::kOpenRetreat);
+    const double min_euclid = 0.5 * want_euclid;
     const double rx = pose_->pose.position.x;
     const double ry = pose_->pose.position.y;
     std::size_t index = trajectory_.size() - 1;
@@ -2174,7 +2202,8 @@ class AutonomousExplorer final : public rclcpp::Node {
       // rescue distant mouths (kitchen) before PARTIAL.
       const int wait_budget =
           TipPinchedNow() ? 2
-                          : ((attempted > 0 && SectorMinRange(0., .50) >= .70)
+                          : ((attempted > 0 &&
+              navigation2d::AxisSwingClear(ReadBodyRanges().front))
                                  ? 3
                                  : 6);
       if (no_executable_frontier_cycles_ >= wait_budget) {
@@ -2582,9 +2611,8 @@ class AutonomousExplorer final : public rclcpp::Node {
       return true;
     }
     if (state.path_signature != 0) cooled_signatures_.insert(state.path_signature);
-    const double clearance = state.global_planning.path_min_clearance_m > 0.
-                                 ? state.global_planning.path_min_clearance_m
-                                 : last_path_min_clearance_m_;
+    const double clearance =
+        ActivePathMargin(state.global_planning.path_min_clearance_m);
     // Wall-tip chords: replan-once just rebuilds another illegal tip graze and
     // the robot pause→drop→replan→pause in place (red-box tip thrash).
     if (navigation2d::PreferTipAbandonAfterPathCut(mapped_obstacle_rejects_,
@@ -2615,21 +2643,16 @@ class AutonomousExplorer final : public rclcpp::Node {
     NotePoseMotion();
     if (!navigation_ || !pose_ || !pose_motion_initialized_) return false;
     const bool entry_drive = pending_entry_goal_ || locked_entry_mouth_;
-    const double front = SectorMinRange(0., .50);
-    const double left = SectorMinRange(+std::acos(-1.) / 2., .40);
-    const double right = SectorMinRange(-std::acos(-1.) / 2., .40);
-    const double side =
-        std::min(left > 0. ? left : 10., right > 0. ? right : 10.);
+    const BodyRanges body = ReadBodyRanges();
     const double path_clear =
-        state.global_planning.path_min_clearance_m > 0.
-            ? state.global_planning.path_min_clearance_m
-            : last_path_min_clearance_m_;
+        ActivePathMargin(state.global_planning.path_min_clearance_m);
     const bool tip_wedged =
         !entry_drive &&
-        IsPinchGeometryStall(path_clear, front, side);
-    // Open-front slow crawl (RPP near inflation) is not a tip. Use longer
-    // stalls and never peel/demote — static maps were thrashing on front≥1.5.
-    const bool open_slow = !entry_drive && !tip_wedged && front >= .70;
+        IsPinchGeometryStall(path_clear, body.front, body.side);
+    // Open-front slow crawl is not a tip. Longer stall, never peel.
+    const bool open_slow =
+        !entry_drive && !tip_wedged &&
+        navigation2d::AxisSwingClear(body.front);
     const double min_goal_s =
         entry_drive ? 14.0 : (open_slow ? 8.0 : 4.0);
     if ((now() - goal_started_).seconds() < min_goal_s) return false;
@@ -2654,7 +2677,7 @@ class AutonomousExplorer final : public rclcpp::Node {
                 pose_->pose.position.x, pose_->pose.position.y,
                 immobility_recoveries_, returning_ ? "yes" : "no",
                 pending_entry_goal_ ? "yes" : "no", state.path_progress_m,
-                tip_wedged ? "yes" : "no", front);
+                tip_wedged ? "yes" : "no", body.front);
     geometry_msgs::msg::Twist stop;
     command_publisher_->publish(stop);
     navigation_.reset();
@@ -3445,19 +3468,13 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (phase_ == MissionPhase::kExploring && !returning_ && !retreat_goal_ &&
         !pending_entry_goal_ && !locked_entry_mouth_ && pose_) {
       const double path_clear =
-          state.global_planning.path_min_clearance_m > 0.
-              ? state.global_planning.path_min_clearance_m
-              : last_path_min_clearance_m_;
+          ActivePathMargin(state.global_planning.path_min_clearance_m);
       const double goal_dist = std::hypot(active_goal_.x - pose_->pose.position.x,
                                           active_goal_.y - pose_->pose.position.y);
-      const double front = SectorMinRange(0., .40);
-      const double left = SectorMinRange(+std::acos(-1.) / 2., .40);
-      const double right = SectorMinRange(-std::acos(-1.) / 2., .40);
-      const double side =
-          std::min(left > 0. ? left : 10., right > 0. ? right : 10.);
-      if (std::isfinite(path_clear) && path_clear < .15 && goal_dist < 1.60 &&
-          state.path_progress_m >= .25 &&
-          IsCornerTipStall(path_clear, front, side)) {
+      const BodyRanges body = ReadBodyRanges();
+      if (goal_dist < 4. * navigation2d::kSwingClearance &&
+          state.path_progress_m >= navigation2d::kPlanningRadius &&
+          IsCornerTipStall(path_clear, body.front, body.side)) {
         geometry_msgs::msg::Twist stop;
         command_publisher_->publish(stop);
         BreakWallScrapeThrash("driving scrape path into corner tip");
@@ -3496,7 +3513,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       const double ry = pose_->pose.position.y;
       const double mouth_range =
           std::hypot(rx - mouth.frontier_x, ry - mouth.frontier_y);
-      const double front_clear = SectorMinRange(0., .40);
+      const double front_clear = ReadBodyRanges().front;
       if (mouth_range < 1.20 && std::abs(command.linear.x) < .12 &&
           (front_clear <= 0. ||
            front_clear >= navigation2d::kPlanningRadius)) {
@@ -3531,8 +3548,8 @@ class AutonomousExplorer final : public rclcpp::Node {
     // Last hard gate: never publish a forward shove into a near lidar wall,
     // even if a crawl/escape path above set linear > 0.
     if (command.linear.x > 0.) {
-      const double front = SectorMinRange(0., .35);
-      if (front > 0. && front < .16) {
+      const double front = ReadBodyRanges().front;
+      if (navigation2d::HitInsideBody(front)) {
         command.linear.x = 0.;
         if (std::abs(command.angular.z) < .15)
           command.angular.z = 0.;
@@ -3573,23 +3590,19 @@ class AutonomousExplorer final : public rclcpp::Node {
         ? std::hypot(active_goal_.x - pose_->pose.position.x,
                      active_goal_.y - pose_->pose.position.y)
         : std::numeric_limits<double>::infinity();
-    const double front_range = SectorMinRange(0., .40);
-    const double left_range = SectorMinRange(+std::acos(-1.) / 2., .40);
-    const double right_range = SectorMinRange(-std::acos(-1.) / 2., .40);
-    const double side_range = std::min(left_range > 0. ? left_range : 10.,
-                                       right_range > 0. ? right_range : 10.);
+    const BodyRanges body = ReadBodyRanges();
+    const double front_range = body.front;
+    const double side_range = body.side;
     // Parallel room wall (front open, one flank close) is normal driving, not a
-    // U-tip. Side-only tightness must not trigger tip-crawl / pinch escapes.
-    const bool forward_clearly_open =
-        SectorMinRange(0., .50) >= .70 || front_range >= .70;
-    const bool corridor_pinch =
-        (front_range > 0. && front_range < .45) ||
-        (side_range < .40 && !forward_clearly_open);
+    // U-tip. Pinch requires both axes inside one body diameter.
+    const bool forward_clearly_open = navigation2d::AxisSwingClear(front_range);
+    const bool corridor_pinch = navigation2d::HitBlocksSwing(front_range) &&
+                                 navigation2d::HitBlocksSwing(side_range);
     // Include retreat_goal_: tip thrash used frontier_cells=0 retreat poses
     // that were exempt from this abort, so the robot spun forever in the U.
     const bool near_goal_alcove_crawl =
         phase_ == MissionPhase::kExploring && !returning_ &&
-        (goal_distance_now < .45 ||
+        (goal_distance_now < navigation2d::kSwingClearance ||
          (state.global_path_length_m > .20 &&
           state.path_progress_m >= .80 * state.global_path_length_m)) &&
         last_goal_path_progress_time_.nanoseconds() > 0 &&
@@ -3768,7 +3781,7 @@ class AutonomousExplorer final : public rclcpp::Node {
                // approach failure after a short grace period so the recovery
                // can back out and select a different viewpoint.
                (state.path_progress_m < .05 && state.requested_command.linear < .01 &&
-                SectorMinRange(0., .45) > 0. && SectorMinRange(0., .45) < .30 &&
+                navigation2d::HitBlocksSwing(front_range) &&
                 (now() - goal_started_).seconds() > 8.0) ||
                // Mid-route pinch crawl: progress already left the first 5 cm,
                // but the robot sits in a doorway spinning/creeping without
@@ -3781,7 +3794,7 @@ class AutonomousExplorer final : public rclcpp::Node {
                 last_goal_path_progress_time_.nanoseconds() > 0 &&
                 (now() - last_goal_path_progress_time_).seconds() >
                     (corridor_pinch ? 5.0 : 10.0) &&
-                (SectorMinRange(0., .50) < .45 ||
+                (navigation2d::HitBlocksSwing(front_range) ||
                  (state.recoveries >= 2 && !forward_clearly_open) ||
                  (state.requested_command.linear < .05 &&
                   std::abs(state.requested_command.angular) > .15 &&
@@ -3794,28 +3807,22 @@ class AutonomousExplorer final : public rclcpp::Node {
                     navigation2d::CollisionMonitorAction::kStop &&
                 state.requested_command.linear > .01 &&
                 state.minimum_ttc_s < .15 &&
-                SectorMinRange(0., .50) < .28 &&
+                navigation2d::HitInsideBody(front_range) &&
                 last_goal_path_progress_time_.nanoseconds() > 0 &&
                 (now() - last_goal_path_progress_time_).seconds() > 2.0)) {
       const bool monitor_stop =
           state.status == navigation2d::NavigationStatus::kBlocked &&
           state.collision_monitor_action ==
               navigation2d::CollisionMonitorAction::kStop;
-      const double forward_clearance = SectorMinRange(0., .50);
-      const bool forward_open = forward_clearance >= .45;
       const bool forward_blocked_close =
-          forward_clearance > 0. && forward_clearance < .28;
+          navigation2d::HitInsideBody(front_range);
       const bool exploring_drive =
           phase_ == MissionPhase::kExploring && !returning_;
 
-      // Corner-tip stall: fill the gap between open-wall-scrape (>=0.70 front)
-      // and forward-blocked (<0.28). Live: CARROT sitting on a partition tip
-      // with GOAL still far away and progress dead.
+      // Corner-tip: both axes inside one body diameter (IsCornerTipStall).
       if (exploring_drive && monitor_stop) {
         const double path_clear =
-            state.global_planning.path_min_clearance_m > 0.
-                ? state.global_planning.path_min_clearance_m
-                : last_path_min_clearance_m_;
+            ActivePathMargin(state.global_planning.path_min_clearance_m);
         if (IsCornerTipStall(path_clear, front_range, side_range) &&
             last_goal_path_progress_time_.nanoseconds() > 0 &&
             (now() - last_goal_path_progress_time_).seconds() > 2.0) {
@@ -3852,85 +3859,31 @@ class AutonomousExplorer final : public rclcpp::Node {
           return;
         }
         const double path_clear =
-            state.global_planning.path_min_clearance_m > 0.
-                ? state.global_planning.path_min_clearance_m
-                : last_path_min_clearance_m_;
-        if (IsOpenWallScrape(path_clear, side_range, true) ||
-            (side_range < .35 && std::isfinite(path_clear) &&
-             path_clear < .18)) {
+            ActivePathMargin(state.global_planning.path_min_clearance_m);
+        if (IsOpenWallScrape(path_clear, side_range, true)) {
           BreakWallScrapeThrash("open-forward wall-scrape STOP");
           return;
         }
-        // Keep a centered open-space route; only peel if progress is dead.
+        // Open forward + side STOP: replan once, never peel (wide-room false
+        // scrape thrash). Progress stall alone is not a wall pocket.
         if (last_goal_path_progress_time_.nanoseconds() > 0 &&
             (now() - last_goal_path_progress_time_).seconds() > 6.0) {
-          BreakWallScrapeThrash("open-forward side-wall stall");
-          return;
-        }
-        return;
-      }
-      if (exploring_drive && monitor_stop && forward_open && side_range < .35) {
-        if (locked_entry_mouth_ || pending_entry_goal_) {
-          // Jamb proximity is expected while crawling the throat. Resetting the
-          // probe here burned attempts 1→6 without advancing (live: side
-          // clearance abandon while CARROT sat inside the room).
-          if (!pending_entry_goal_) pending_entry_goal_ = locked_entry_mouth_;
-          if (last_goal_path_progress_time_.nanoseconds() > 0 &&
-              (now() - last_goal_path_progress_time_).seconds() > 8.0) {
-            navigation_.reset();
-            paint_driven_corridor_ = true;
-            paint_trail_budget_m_ = 8.0;
-            if (entry_probe_attempts_ < EntryAttemptBudget() && StartEntryProbe()) {
-              PublishStatus("COMPLETING",
-                            "side clearance stall; deeper entry probe");
-              return;
-            }
-            AbandonLockedEntryMouth(
-                "side clearance stall; leave mouth and continue tour (no reverse)");
-            next_selection_ = now();
+          if (recovery_.open_replans < 1 &&
+              ReplanActiveGoalOnLatestMap(
+                  "open-forward side stall; replan without peel")) {
+            ++recovery_.open_replans;
             return;
           }
-          return;
-        }
-        const double path_clear =
-            state.global_planning.path_min_clearance_m > 0.
-                ? state.global_planning.path_min_clearance_m
-                : last_path_min_clearance_m_;
-        // Prefer ban+replan over peel when the committed path itself scrapes.
-        if (IsOpenWallScrape(path_clear, side_range, forward_clearly_open) ||
-            (std::isfinite(path_clear) && path_clear < .14)) {
-          BreakWallScrapeThrash("side speck wall-scrape path");
-          return;
-        }
-        if (recovery_.open_replans < 1) {
-          ++recovery_.open_replans;
-          if (last_path_signature_ != 0)
-            cooled_signatures_.insert(last_path_signature_);
-          if (ReplanActiveGoalOnLatestMap(
-                  "side speck stall; open path replan"))
-            return;
-        }
-        if (recovery_.side_peels < 1 && TryStartEscape()) {
-          ++recovery_.side_peels;
+          next_selection_ = now() + rclcpp::Duration::from_seconds(0.35);
+          PublishStatus("SELECTING",
+                        "open-forward side stall; reselect without peel");
           navigation_.reset();
-          recovery_.resume_after_escape = true;
-          PublishStatus("RECOVERING",
-                        "open-space peel after side clearance stop");
           return;
         }
-        // Leave the cell before demoting — demote alone re-queued goals from
-        // the same pose and restarted the speck loop.
-        retreat_attempted_ = false;
-        navigation_.reset();
-        if (EscapeOrShortRetreat(
-                "side speck exhausted; peel",
-                "side speck exhausted; short trail retreat"))
-          return;
-        DemoteActiveGoal("side speck stall; demoting viewpoint");
         return;
       }
 
-      // ForwardBlocked: do not resume the same path signature after peel.
+      // Nose hit is inside the planning circle. Do not resume the same path.
       if (exploring_drive && monitor_stop && forward_blocked_close) {
         // Locked mouth: one peel, else leave and continue tour from here.
         if (locked_entry_mouth_ || pending_entry_goal_) {
@@ -4044,9 +3997,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         // Unified pinch exit: doorway jamb / corner tip / open wall foot.
         if (phase_ != MissionPhase::kReturning && !returning_ &&
             IsPinchGeometryStall(
-                state.global_planning.path_min_clearance_m > 0.
-                    ? state.global_planning.path_min_clearance_m
-                    : last_path_min_clearance_m_,
+                ActivePathMargin(state.global_planning.path_min_clearance_m),
                 front_range, side_range)) {
           BreakWallScrapeThrash("room-side / doorway pinch stall");
           return;
