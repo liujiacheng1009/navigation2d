@@ -1723,6 +1723,59 @@ bool FrontierExplorer::GoalStillFrontier(const ExplorationGoal& goal) const {
   return RawFrontier(col, row);
 }
 
+bool FrontierExplorer::UnenteredRoomBeyond(const ExplorationGoal& goal) const {
+  const ExplorationGrid& map = observation_map_;
+  if (map.resolution <= 0. || map.width <= 2 || map.height <= 2 ||
+      map.cells.size() != static_cast<std::size_t>(map.width) * map.height)
+    return false;
+  const double dx = goal.frontier_x - goal.x;
+  const double dy = goal.frontier_y - goal.y;
+  const double length = std::hypot(dx, dy);
+  if (length < map.resolution) return false;
+  const double ux = dx / length;
+  const double uy = dy / length;
+  // Same distances already used to tell a room from a fringe: CorridorMouthAt's
+  // 1.4 m free-run probe, and UnknownRoomBeyond's 0.55 m unknown depth.
+  const int steps = static_cast<int>(std::ceil(1.4 / map.resolution));
+  const int need =
+      std::max(1, static_cast<int>(std::ceil(.55 / map.resolution)));
+  auto at = [&](int col, int row) -> std::int8_t {
+    if (col < 0 || row < 0 || col >= map.width || row >= map.height) return 100;
+    return map.cells[static_cast<std::size_t>(row) * map.width + col];
+  };
+  bool have_free = false;
+  double free_x = 0.;
+  double free_y = 0.;
+  int unknown_run = 0;
+  for (int step = -1; step <= steps; ++step) {
+    const double wx = goal.frontier_x + step * map.resolution * ux;
+    const double wy = goal.frontier_y + step * map.resolution * uy;
+    const int col =
+        static_cast<int>(std::floor((wx - map.origin_x) / map.resolution));
+    const int row =
+        static_cast<int>(std::floor((wy - map.origin_y) / map.resolution));
+    const auto cell = at(col, row);
+    if (cell > 0) {
+      // A jamb beside the standoff is not the room. Occupied on the
+      // into-room ray means this axis is a wall, not an entrance.
+      if (step < 0) continue;
+      return false;
+    }
+    if (cell == 0) {
+      have_free = true;
+      free_x = map.origin_x + (col + .5) * map.resolution;
+      free_y = map.origin_y + (row + .5) * map.resolution;
+      unknown_run = 0;
+      continue;
+    }
+    ++unknown_run;
+    if (have_free && unknown_run >= need &&
+        CorridorMouthAt(map, free_x, free_y))
+      return true;
+  }
+  return false;
+}
+
 bool FrontierExplorer::GoalRegionStillFrontier(const ExplorationGoal& goal) const {
   if (GoalStillFrontier(goal) || observation_map_.resolution <= 0.)
     return GoalStillFrontier(goal);

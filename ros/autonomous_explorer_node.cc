@@ -348,11 +348,15 @@ class AutonomousExplorer final : public rclcpp::Node {
     // a valid current pose is not rejected as "start occupied" on a replan
     // after a tight-corner approach.  This only clears the measured current
     // footprint; all cells ahead remain lethal unless observed free.
-    // Match production: clear under the measured pose past inflation so a
-    // wall-corner approach is not rejected as "start occupied" every tick.
+    // Unknown next to the robot is not yet observed. Occupied is cleared only
+    // inside the planning circle — the same disk PathCuts ignores. Clearing
+    // occupied out to this wider disk let the planner thread a door jamb and
+    // PathCuts then reject every entry as a first-segment replay.
     const double snapshot_clearance = .40;
     const int robot_clearance = static_cast<int>(
         std::ceil(snapshot_clearance / map_->info.resolution));
+    const int body_cells = static_cast<int>(
+        std::ceil(navigation2d::kPlanningRadius / map_->info.resolution));
     // Near-field lidar is fresher than the online occupancy grid. Preserve
     // only ray interiors (never the hit endpoint) as temporary free evidence
     // for this plan, allowing a certified narrow passage to be entered before
@@ -483,13 +487,19 @@ class AutonomousExplorer final : public rclcpp::Node {
       const int col = static_cast<int>(index % map_->info.width);
       const bool under_robot = (col - robot_col) * (col - robot_col) +
           (row - robot_row) * (row - robot_row) <= robot_clearance * robot_clearance;
+      const bool under_body = (col - robot_col) * (col - robot_col) +
+          (row - robot_row) * (row - robot_row) <= body_cells * body_cells;
       // The robot's current footprint is physically known to be free. SLAM's
       // confidence threshold can otherwise leave isolated unknown cells below
       // the base and make every first plan fail its start-collision check.
+      // Occupied outside that circle stays lethal so a doorway plan cannot
+      // ride a jamb the live-map check will cut.
       const auto cell = planning_grid.cells[index];
       const bool lidar_evidence = cell < 0 && near_field_free.count(index) > 0;
       const bool driven = driven_corridor_.count(index) > 0;
-      const bool forced_free = cell == 0 || under_robot || lidar_evidence || driven;
+      const bool unknown_near_robot = under_robot && cell < 0;
+      const bool forced_free = cell == 0 || under_body || unknown_near_robot ||
+                               lidar_evidence || driven;
       output << (forced_free ? 0 : (cell < 0 ? 255 : 254));
     }
     output << "]}";
@@ -673,17 +683,21 @@ class AutonomousExplorer final : public rclcpp::Node {
         RCLCPP_WARN(get_logger(),
                     "Navigation2D rejected goal before execution: %s",
                     last_planning_failure_.c_str());
-        // Must cool on entry too — skipping the ban let the same through-tip
-        // chord replay until AbandonLockedEntryMouth (gap=2.15 thrash).
-        if (initial_state.path_signature != 0)
-          cooled_signatures_.insert(initial_state.path_signature);
+        // Open explore bans the chord before its one retry so the replay is a
+        // different first segment. Entry shares that hallway prefix with every
+        // probe into the room; banning it made the retry "failed first-segment
+        // replay" and left the mouth in the same second (gap=1.60).
+        const auto cut_signature = initial_state.path_signature;
         navigation_.reset();
         if (!mapped_obstacle_retry_) {
           mapped_obstacle_retry_ = true;
+          if (!entry_drive && cut_signature != 0)
+            cooled_signatures_.insert(cut_signature);
           const bool ok = StartNavigation(goal, returning, true);
           mapped_obstacle_retry_ = false;
           if (ok) return true;
         }
+        if (cut_signature != 0) cooled_signatures_.insert(cut_signature);
         if (!entry_drive) NoteMappedObstacleReject(goal);
         return false;
       }
@@ -1965,10 +1979,10 @@ class AutonomousExplorer final : public rclcpp::Node {
         PublishStatus("SELECTING",
                       "room entered; finishing active region first");
         return;
-      } else if (entry_probe_attempts_ < EntryAttemptBudget() &&
-                 StartEntryProbe()) {
-        return;
-      } else if (EasyLockedMouth() && entry_probe_attempts_ < EntryAttemptBudget()) {
+      }
+      const int before_attempts = entry_probe_attempts_;
+      if (before_attempts < EntryAttemptBudget() && StartEntryProbe()) return;
+      if (EasyLockedMouth() && entry_probe_attempts_ < EntryAttemptBudget()) {
         // Keep the lock on a wide mouth; open-loop crawl mid-gap instead of
         // abandoning into a tour loop (live: "entry blocked" spam).
         if (entry_open_loop_ticks_ == 0) entry_open_loop_ticks_ = 1;
@@ -1976,13 +1990,18 @@ class AutonomousExplorer final : public rclcpp::Node {
         PublishStatus("COMPLETING",
                       "wide mouth blocked; crawling mid-gap instead of abandon");
         return;
-      } else {
-        // Plan failed at the mouth: leave it and continue the tour from HERE.
-        // Trail retreat "then retry" was the post-脱困 折返 (drive back, then
-        // re-approach the same doorway).
-        AbandonLockedEntryMouth(
-            "entry blocked; leave mouth and continue tour (no reverse)");
       }
+      if (entry_probe_attempts_ > before_attempts &&
+          entry_probe_attempts_ < EntryAttemptBudget()) {
+        next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+        PublishStatus("COMPLETING", "entry plan rejected; budget remains");
+        return;
+      }
+      // Plan failed at the mouth: leave it and continue the tour from HERE.
+      // Trail retreat "then retry" was the post-脱困 折返 (drive back, then
+      // re-approach the same doorway).
+      AbandonLockedEntryMouth(
+          "entry blocked; leave mouth and continue tour (no reverse)");
     }
     // Drop mouths the lidar already cleared; keep the remaining committed
     // order. Rebuilding the tour on every SelectNextGoal reordered T1..Tn and
@@ -2026,6 +2045,21 @@ class AutonomousExplorer final : public rclcpp::Node {
                     "Skipping recently demoted viewpoint (%.2f, %.2f)", goal.x,
                     goal.y);
         committed_tour_.pop_front();
+        // Order keeps the nearby demoted mouth and drops unfinished rooms
+        // farther than its prefer radius. Pull those mouths in directly so
+        // one failed doorway does not send the robot home.
+        if (committed_tour_.empty() && pose_) {
+          const auto mouths = explorer_.SelectGoals(pose_->pose.position.x,
+                                                    pose_->pose.position.y);
+          for (const auto& candidate : mouths) {
+            if (RecentlyDemoted(candidate)) continue;
+            if (!explorer_.GoalRegionStillFrontier(candidate) &&
+                !explorer_.UnenteredRoomBeyond(candidate))
+              continue;
+            committed_tour_.push_back(candidate);
+            if (committed_tour_.size() >= 3) break;
+          }
+        }
         continue;
       }
       // Defer reverse goals only when they are far. A tip inside the local
@@ -2610,10 +2644,22 @@ class AutonomousExplorer final : public rclcpp::Node {
                       "path cut; replanning locked mouth on latest map");
         return true;
       }
-      if (entry_probe_attempts_ < EntryAttemptBudget() && StartEntryProbe()) {
-        PublishStatus("COMPLETING",
-                      "path cut; retrying locked mouth at deeper probe");
-        return true;
+      if (entry_probe_attempts_ < EntryAttemptBudget()) {
+        const int before_attempts = entry_probe_attempts_;
+        if (StartEntryProbe()) {
+          PublishStatus("COMPLETING",
+                        "path cut; retrying locked mouth at deeper probe");
+          return true;
+        }
+        // One rejected plan is not the whole mouth budget. Abandoning here
+        // left the room after attempt 2 of 6.
+        if (entry_probe_attempts_ > before_attempts &&
+            entry_probe_attempts_ < EntryAttemptBudget()) {
+          next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+          PublishStatus("COMPLETING",
+                        "path cut; entry budget remains");
+          return true;
+        }
       }
       AbandonLockedEntryMouth("locked mouth path cut exhausted; leaving mouth");
       return true;
@@ -3402,8 +3448,21 @@ class AutonomousExplorer final : public rclcpp::Node {
                                           active_goal_.y - pose_->pose.position.y);
       if (goal_dist < .28 && state.path_progress_m >= .05) {
         navigation_.reset();
-        if (pending_entry_goal_ || explorer_.GoalRegionStillFrontier(active_goal_)) {
-          if (!pending_entry_goal_) LockEntryMouth(active_goal_);
+        // A doorway peek moves the frontier past the 0.35 m association disk.
+        // The viewpoint is not done while a room of unknown is still beyond it.
+        const bool room_beyond = explorer_.UnenteredRoomBeyond(active_goal_);
+        if (pending_entry_goal_ ||
+            explorer_.GoalRegionStillFrontier(active_goal_) || room_beyond) {
+          if (!pending_entry_goal_) {
+            if (room_beyond &&
+                !explorer_.GoalRegionStillFrontier(active_goal_)) {
+              RCLCPP_INFO(get_logger(),
+                          "At viewpoint with room still beyond "
+                          "frontier=(%.2f,%.2f); entering",
+                          active_goal_.frontier_x, active_goal_.frontier_y);
+            }
+            LockEntryMouth(active_goal_);
+          }
           if (EntryProbeSatisfied()) {
             explorer_.RecordAttempt(*pending_entry_goal_, true, false);
             ClearEntryMouthLock();
@@ -3416,8 +3475,14 @@ class AutonomousExplorer final : public rclcpp::Node {
             return;
           }
           if (entry_probe_attempts_ < EntryAttemptBudget() && StartEntryProbe()) return;
-          // Budget spent on the threshold: cool the mouth. Keeping the lock
-          // here re-drove hall→door→fail→hall (red-box shuttle).
+          // One rejected probe is not the mouth. Abandoning here marked the
+          // doorway visited and left the room white.
+          if (entry_probe_attempts_ < EntryAttemptBudget()) {
+            next_selection_ = now() + rclcpp::Duration::from_seconds(0.35);
+            PublishStatus("SELECTING",
+                          "at doorway; retrying centered entry probe");
+            return;
+          }
           AbandonLockedEntryMouth(
               "at doorway; entry incomplete, leaving mouth");
           return;
@@ -3705,9 +3770,17 @@ class AutonomousExplorer final : public rclcpp::Node {
           next_selection_ = now();
           PublishStatus("SELECTING", "frontier entry blocked; unresolved boundary retained");
         }
-      } else if (explorer_.GoalRegionStillFrontier(active_goal_) &&
-                 PassableMouthGoal(active_goal_)) {
-        // Real corridor mouth still open — cross into the room.
+      } else if (explorer_.UnenteredRoomBeyond(active_goal_) ||
+                 (explorer_.GoalRegionStillFrontier(active_goal_) &&
+                  PassableMouthGoal(active_goal_))) {
+        // Real corridor mouth still open — cross into the room. The frontier
+        // may already have stepped past the association disk.
+        if (!explorer_.GoalRegionStillFrontier(active_goal_)) {
+          RCLCPP_INFO(get_logger(),
+                      "Goal reached with room still beyond frontier=(%.2f,%.2f); "
+                      "entering",
+                      active_goal_.frontier_x, active_goal_.frontier_y);
+        }
         LockEntryMouth(active_goal_);
         if (StartEntryProbe()) return;
         if (entry_probe_attempts_ < EntryAttemptBudget()) {

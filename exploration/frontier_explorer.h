@@ -171,6 +171,10 @@ class FrontierExplorer {
   // from unknown to free.  This associates a queued task with its local
   // frontier region instead of treating that benign movement as completion.
   bool GoalRegionStillFrontier(const ExplorationGoal& goal) const;
+  // True when a room of unknown still lies past this viewpoint. A doorway
+  // peek moves the frontier farther than GoalRegionStillFrontier's disk;
+  // the viewpoint is not done until that room is entered.
+  bool UnenteredRoomBeyond(const ExplorationGoal& goal) const;
   // `region_complete` is false for a successful doorway probe: crossing an
   // entrance observes the room but does not prove the room has been swept.
   // `cool_frontier` false cools only the viewpoint — open-wall demotes must
