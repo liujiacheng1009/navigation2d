@@ -1633,7 +1633,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (navigation_)
       return IsPinchGeometryStall(last_path_min_clearance_m_, body.front,
                                   body.side);
-    // No route: both axes inside one body diameter. A near flank alone is
+    // No route: both axes inside the planning circle. A near flank alone is
     // not a pocket.
     return navigation2d::HitBlocksSwing(body.front) &&
            navigation2d::HitBlocksSwing(body.side);
@@ -1744,7 +1744,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     return false;
   }
 
-  // Tip only when BOTH axes are inside one body diameter and the live path
+  // Tip only when BOTH axes are inside the planning circle and the live path
   // does not already clear the open-tier margin. A near side wall with an
   // open nose is ordinary driving.
   bool IsPinchGeometryStall(double path_clearance_m, double front_range,
@@ -3594,7 +3594,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     const double front_range = body.front;
     const double side_range = body.side;
     // Parallel room wall (front open, one flank close) is normal driving, not a
-    // U-tip. Pinch requires both axes inside one body diameter.
+    // U-tip. Pinch requires both axes inside the planning circle.
     const bool forward_clearly_open = navigation2d::AxisSwingClear(front_range);
     const bool corridor_pinch = navigation2d::HitBlocksSwing(front_range) &&
                                  navigation2d::HitBlocksSwing(side_range);
@@ -3819,7 +3819,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       const bool exploring_drive =
           phase_ == MissionPhase::kExploring && !returning_;
 
-      // Corner-tip: both axes inside one body diameter (IsCornerTipStall).
+      // Corner-tip: both axes inside the planning circle (IsCornerTipStall).
       if (exploring_drive && monitor_stop) {
         const double path_clear =
             ActivePathMargin(state.global_planning.path_min_clearance_m);
@@ -3831,8 +3831,8 @@ class AutonomousExplorer final : public rclcpp::Node {
         }
       }
 
-      // SideSpeckStall: moderately open forward with a lateral speck STOP.
-      // When forward is clearly open (>=0.70 m), a close flank is a normal
+      // SideSpeckStall: open forward with a lateral speck STOP.
+      // Forward outside the planning circle and a close flank is a normal
       // room wall — peel/resume of a wall-foot path is the red-box sawtooth.
       if (exploring_drive && monitor_stop && forward_clearly_open) {
         // Locked doorway: jamb STOP with open forward is the entry crawl, not

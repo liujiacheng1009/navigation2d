@@ -9,9 +9,9 @@ namespace navigation2d {
 // configs share this value — do not scatter bare 0.22 literals.
 inline constexpr double kPlanningRadius = .22;
 
-// One body diameter of free space. A lidar hit closer than this means the
-// chassis cannot yaw clear of that obstacle. At or beyond it, that axis is
-// open. Derived from the planning circle — not a room or doorway width.
+// One planning-circle diameter. Retreat lengths and near-goal windows use
+// this as a travel distance. It is not a lidar stuck threshold: a return
+// inside the diameter can still be outside the chassis.
 inline constexpr double kSwingClearance = 2. * kPlanningRadius;
 
 // Cone half-angle whose lateral span at kSwingClearance equals one body
@@ -31,21 +31,23 @@ inline const double kBodyConeHalfAngle =
 inline constexpr double kOpenPreferPathMargin = kPlanningRadius;
 inline constexpr double kPinchMinPathMargin = 0.;
 
-// Trail-reverse distances, in body diameters. Entry/open leave the cell;
-// a pocket retreat is longer because both axes are inside kSwingClearance.
+// Trail-reverse distances, in planning-circle diameters. Entry/open leave
+// the cell; a pocket retreat is longer because both axes are inside the
+// planning circle.
 inline constexpr double kEntryRetreat = 2. * kSwingClearance;
 inline constexpr double kOpenRetreat = 3. * kSwingClearance;
 inline constexpr double kPocketRetreat = 4. * kSwingClearance;
 
 // Lidar range is distance to the hit. 0 means that sector returned nothing.
+// Yaw sweeps the planning circle. A return inside that circle is the body
+// on that axis; the diameter (0.44 m) is not required. A centered 0.70 m
+// door leaves about 0.35 m to each jamb, which is outside this circle.
 inline bool HitInsideBody(double range) {
   return range > 0. && range < kPlanningRadius;
 }
-inline bool HitBlocksSwing(double range) {
-  return range > 0. && range < kSwingClearance;
-}
+inline bool HitBlocksSwing(double range) { return HitInsideBody(range); }
 inline bool AxisSwingClear(double range) {
-  return range >= kSwingClearance;
+  return range >= kPlanningRadius;
 }
 
 // Extra path margin. Open-tier paths sit at least one body radius off
