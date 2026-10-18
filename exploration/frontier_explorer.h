@@ -55,6 +55,29 @@ struct ExplorationGoal {
   std::uint64_t region_id = 0;
 };
 
+// Debug overlay for SelectGoals: approachable frontier cells, per-cluster
+// viewpoints, and final mouth-stable goals. World frame = map frame.
+struct FrontierDebugSnapshot {
+  struct Cell {
+    double x = 0.;
+    double y = 0.;
+    int cluster_id = -1;
+  };
+  struct Goal {
+    double x = 0.;
+    double y = 0.;
+    double frontier_x = 0.;
+    double frontier_y = 0.;
+    int cluster_id = -1;
+    double score = 0.;
+    double information_gain = 0.;
+    int frontier_cells = 0;
+  };
+  std::vector<Cell> cells;
+  std::vector<Goal> cluster_goals;
+  std::vector<Goal> goals;
+};
+
 struct FrontierExplorerConfig {
   int minimum_frontier_cells = 6;
   double footprint_clearance = .38;
@@ -178,6 +201,8 @@ class FrontierExplorer {
   std::size_t raw_frontier_clusters() const { return raw_frontier_clusters_; }
   std::size_t executable_frontier_goals() const { return executable_frontier_goals_; }
   std::size_t candidate_frontier_goals() const { return candidate_frontier_goals_; }
+  // Last SelectGoals geometry for the debug UI (cells / clusters / goals).
+  const FrontierDebugSnapshot& debug_snapshot() const { return debug_snapshot_; }
 
  private:
   bool Free(int col, int row) const;
@@ -230,6 +255,7 @@ class FrontierExplorer {
   std::size_t raw_frontier_clusters_ = 0;
   std::size_t executable_frontier_goals_ = 0;
   std::size_t candidate_frontier_goals_ = 0;
+  FrontierDebugSnapshot debug_snapshot_;
   RegionScheduler regions_;
 };
 

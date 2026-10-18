@@ -190,6 +190,8 @@ class AutonomousExplorer final : public rclcpp::Node {
         "/navigation/carrot", rclcpp::QoS(1).transient_local().reliable());
     frontiers_publisher_ = create_publisher<geometry_msgs::msg::PoseArray>(
         "/exploration/frontier_goals", rclcpp::QoS(1).transient_local().reliable());
+    frontier_debug_publisher_ = create_publisher<std_msgs::msg::String>(
+        "/exploration/frontier_debug", rclcpp::QoS(1).transient_local().reliable());
     planning_input_publisher_ = create_publisher<nav_msgs::msg::OccupancyGrid>(
         "/exploration/global_planning_input", rclcpp::QoS(1).transient_local().reliable());
     inflated_costmap_publisher_ = create_publisher<nav_msgs::msg::OccupancyGrid>(
@@ -849,12 +851,59 @@ class AutonomousExplorer final : public rclcpp::Node {
                                            pose_->pose.position.y, yaw);
     for (const auto& goal : goals) committed_tour_.push_back(goal);
     ++tour_revision_;
+    PublishFrontierDebug();
     RCLCPP_INFO(get_logger(),
                 "Frontier graph tour %zu: raw_cells=%zu raw_clusters=%zu candidates=%zu "
                 "stable=%zu %s",
                 tour_revision_, explorer_.raw_frontier_cells(),
                 explorer_.raw_frontier_clusters(), explorer_.candidate_frontier_goals(),
                 committed_tour_.size(), explorer_.RegionAudit().c_str());
+  }
+
+  void PublishFrontierDebug() {
+    const auto& snap = explorer_.debug_snapshot();
+    std::string json = "{\"cells\":[";
+    bool first = true;
+    constexpr std::size_t kMaxCells = 4000;
+    const std::size_t cell_step =
+        snap.cells.size() > kMaxCells ? snap.cells.size() / kMaxCells + 1 : 1;
+    for (std::size_t i = 0; i < snap.cells.size(); i += cell_step) {
+      const auto& c = snap.cells[i];
+      if (!first) json += ",";
+      first = false;
+      json += "[" + std::to_string(c.x) + "," + std::to_string(c.y) + "," +
+              std::to_string(c.cluster_id) + "]";
+    }
+    json += "],\"cluster_goals\":[";
+    first = true;
+    for (const auto& g : snap.cluster_goals) {
+      if (!first) json += ",";
+      first = false;
+      json += "{\"x\":" + std::to_string(g.x) + ",\"y\":" + std::to_string(g.y) +
+              ",\"fx\":" + std::to_string(g.frontier_x) +
+              ",\"fy\":" + std::to_string(g.frontier_y) +
+              ",\"cid\":" + std::to_string(g.cluster_id) +
+              ",\"score\":" + std::to_string(g.score) +
+              ",\"gain\":" + std::to_string(g.information_gain) +
+              ",\"n\":" + std::to_string(g.frontier_cells) + "}";
+    }
+    json += "],\"goals\":[";
+    first = true;
+    for (const auto& g : snap.goals) {
+      if (!first) json += ",";
+      first = false;
+      json += "{\"x\":" + std::to_string(g.x) + ",\"y\":" + std::to_string(g.y) +
+              ",\"fx\":" + std::to_string(g.frontier_x) +
+              ",\"fy\":" + std::to_string(g.frontier_y) +
+              ",\"cid\":" + std::to_string(g.cluster_id) +
+              ",\"score\":" + std::to_string(g.score) +
+              ",\"gain\":" + std::to_string(g.information_gain) +
+              ",\"n\":" + std::to_string(g.frontier_cells) + "}";
+    }
+    json += "]}";
+    std_msgs::msg::String msg;
+    msg.data = std::move(json);
+    frontier_debug_publisher_->publish(msg);
   }
 
   void LockEntryMouth(const Goal& mouth) {
@@ -2971,6 +3020,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     }
     tour_publisher_->publish(tour);
     frontiers_publisher_->publish(frontiers);
+    PublishFrontierDebug();
   }
 
   void Tick() {
@@ -3992,6 +4042,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr tour_publisher_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr carrot_publisher_;
   rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr frontiers_publisher_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr frontier_debug_publisher_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr planning_input_publisher_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr inflated_costmap_publisher_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_subscription_;

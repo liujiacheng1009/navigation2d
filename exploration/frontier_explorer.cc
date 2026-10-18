@@ -454,6 +454,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
   raw_frontier_clusters_ = 0;
   executable_frontier_goals_ = 0;
   candidate_frontier_goals_ = 0;
+  debug_snapshot_ = {};
   if (map_.width <= 2 || map_.height <= 2 || map_.resolution <= 0. ||
       map_.cells.size() != static_cast<std::size_t>(map_.width * map_.height)) return {};
   std::vector<unsigned char> frontier(map_.cells.size(), 0), visited(map_.cells.size(), 0);
@@ -677,6 +678,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
       }
     }
     ++raw_frontier_clusters_;
+    const int cluster_id = static_cast<int>(raw_frontier_clusters_);
     // Keep short doorway boundaries: stability filtering removes one-frame
     // sensor speckles, while a hard component-size cut discards real maze
     // branches.  A 1--5 cell component is retained only when a full-clearance
@@ -725,6 +727,10 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
     const auto [frontier_x, frontier_y] = CellCenter(
         representative % map_.width, representative / map_.width);
     if (Blacklisted(frontier_x, frontier_y, true)) continue;
+    for (const int cell : cluster) {
+      const auto [cx, cy] = CellCenter(cell % map_.width, cell / map_.width);
+      debug_snapshot_.cells.push_back({cx, cy, cluster_id});
+    }
   const int search = static_cast<int>(std::ceil(config_.maximum_standoff / map_.resolution));
     const auto narrow_viewpoint = [&](int col, int row) {
       // Match SafeViewpoint / CorridorMouthAt: kitchen vestibules are often
@@ -889,7 +895,12 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
         }
       }
     }
-    if (best) goals.push_back(*best);
+    if (best) {
+      goals.push_back(*best);
+      debug_snapshot_.cluster_goals.push_back(
+          {best->x, best->y, best->frontier_x, best->frontier_y, cluster_id,
+           best->score, best->information_gain, best->frontier_cells});
+    }
   }
   // Mature maps: open-space residual fragments (furniture legs, already-seen
   // wall tips) still form >=minimum_frontier_cells clusters with tiny visible
@@ -920,6 +931,24 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
   candidate_frontier_goals_ = mouths.size();
   auto stable = StableGoals(std::move(mouths));
   executable_frontier_goals_ = stable.size();
+  const auto nearest_cluster_id = [&](double fx, double fy) {
+    int best_id = -1;
+    double best_d = std::numeric_limits<double>::infinity();
+    for (const auto& cg : debug_snapshot_.cluster_goals) {
+      const double d = std::hypot(cg.frontier_x - fx, cg.frontier_y - fy);
+      if (d < best_d) {
+        best_d = d;
+        best_id = cg.cluster_id;
+      }
+    }
+    return best_id;
+  };
+  for (const auto& goal : stable) {
+    debug_snapshot_.goals.push_back(
+        {goal.x, goal.y, goal.frontier_x, goal.frontier_y,
+         nearest_cluster_id(goal.frontier_x, goal.frontier_y), goal.score,
+         goal.information_gain, goal.frontier_cells});
+  }
   return stable;
 }
 
