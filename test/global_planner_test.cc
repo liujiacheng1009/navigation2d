@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "navigation2d/geometry/robot_geometry.h"
 #include "navigation2d/planning/astar_planner.h"
 #include "navigation2d/planning/collision_checker.h"
 #include "navigation2d/planning/grid_search.h"
@@ -87,6 +88,25 @@ int main() {
   assert(std::abs(field.distance(2.5, 2.) - .5) < .11);
   assert(!field.CircleCollisionFree(2.26, 2.05, .22));
   assert(field.CircleCollisionFree(3., 3., .22));
+  // A cell beside unknown is a frontier, not a wall. Margin checks must not
+  // see that adjacency as contact; collision queries still do.
+  {
+    const char* frontier_path = "/tmp/navigation2d_frontier_distance.json";
+    std::ofstream frontier_out(frontier_path);
+    frontier_out << R"({"width":5,"height":1,"resolution":0.05,"cells":[0,0,0,0,255]})";
+    frontier_out.close();
+    navigation2d::LayeredCostmap frontier_map(
+        navigation2d::Grid2d::Load(frontier_path), config);
+    const navigation2d::planning_internal::DistanceField as_wall(frontier_map);
+    const navigation2d::planning_internal::DistanceField as_free(
+        frontier_map, /*unknown_is_obstacle=*/false);
+    // Cell beside the unknown frontier: one resolution step, not a wall.
+    assert(std::abs(as_wall.distance(0.175, 0.025) - 0.05) < 1e-6);
+    assert(as_free.distance(0.175, 0.025) > 1.);
+    assert(navigation2d::PathClearsOpen(0.07));
+    assert(!navigation2d::PathClearsOpen(0.));
+    assert(!navigation2d::PathClearsPinch(0.));
+  }
 
   const std::vector<Eigen::Vector2d> rectangle{
       {-.30, -.12}, {.30, -.12}, {.30, .12}, {-.30, .12}};

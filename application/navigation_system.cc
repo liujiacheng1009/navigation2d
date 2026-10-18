@@ -175,7 +175,9 @@ double DistanceToPath(const Path& path, const Pose2d& pose) {
 }
 void AddPathMetrics(const Path& path, const LayeredCostmap& costmap, double robot_radius,
                     GlobalPlanningDiagnostics* diagnostics) {
-  planning_internal::DistanceField field(costmap);
+  // Occupied cells only. Unknown is the frontier being approached; seeding
+  // it here floored path_min_clearance_m to 0 and every doorway was a scrape.
+  planning_internal::DistanceField field(costmap, /*unknown_is_obstacle=*/false);
   diagnostics->path_min_clearance_m = std::numeric_limits<double>::infinity();
   diagnostics->path_max_curvature = 0.;
   // Sample densified chords — vertex-only mins missed corner cuts between

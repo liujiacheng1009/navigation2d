@@ -690,11 +690,10 @@ class AutonomousExplorer final : public rclcpp::Node {
       mapped_obstacle_rejects_ = 0;
       last_path_signature_ = initial_state.path_signature;
       last_path_min_clearance_m_ = initial_state.global_planning.path_min_clearance_m;
-      // path_min_clearance_m is EXTRA margin (dist − robot_radius).
-      // Open: reject wall feet; cool signature and retry OPEN once (same
-      // inflation). Pinch only for true mouths — whole-map pinch on scrape
-      // produced the static-map wall collisions that needed escape.
-      // Margin == 0 must count (dist ≤ body radius).
+      // path_min_clearance_m is EXTRA margin past the planning circle, to
+      // occupied cells only. Any strictly positive margin is executable.
+      // Margin == 0 is the circle itself. Pinch only for true mouths —
+      // whole-map pinch on scrape produced the static-map wall collisions.
       if (!entry_drive && !returning && !retreat_goal_ && !pinch_plan &&
           std::isfinite(last_path_min_clearance_m_) &&
           !navigation2d::PathClearsOpen(last_path_min_clearance_m_)) {

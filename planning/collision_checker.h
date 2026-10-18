@@ -10,7 +10,10 @@ namespace navigation2d::planning_internal {
 
 class DistanceField {
  public:
-  explicit DistanceField(const LayeredCostmap& costmap);
+  // unknown_is_obstacle: collision and smoothing stay clear of unseen cells.
+  // Path-margin checks pass false — a frontier is not a wall.
+  explicit DistanceField(const LayeredCostmap& costmap,
+                         bool unknown_is_obstacle = true);
   double distance(int x, int y) const;
   double distance(double world_x, double world_y) const;
   Eigen::Vector2d gradient(double world_x, double world_y) const;

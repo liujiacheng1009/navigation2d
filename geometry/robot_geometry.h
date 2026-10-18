@@ -21,15 +21,19 @@ inline const double kBodyConeHalfAngle =
     std::atan(kPlanningRadius / kSwingClearance);
 
 // NavigationSystem::AddPathMetrics reports
-//   path_min_clearance_m = dist_to_obstacle - robot_radius
-// i.e. EXTRA free margin beyond the body — not the raw obstacle distance.
+//   path_min_clearance_m = dist_to_occupied - robot_radius
+// i.e. EXTRA free margin beyond the planning circle. Unknown cells are not
+// obstacles in that number: a frontier sits on unknown, and counting it
+// floored every approach to margin 0.
 //
-// Open tier wants one extra body radius off obstacles (mid-aisle when the
-// aisle is wider than the body). Pinch tier only requires the planning
-// circle itself to be clear: any strictly positive extra margin. A fixed
-// door width is not part of this contract.
-inline constexpr double kOpenPreferPathMargin = kPlanningRadius;
+// Both tiers accept any strictly positive extra margin. One extra planning
+// radius used to be required before a path was kept; a 0.70 m door only has
+// about 0.13 m beyond the circle, so every doorway was rejected and the tour
+// hopped. Staying off walls is inflation cost, not a second lethal radius.
+// margin == 0 is the circle itself (distance field floors everything inside).
+inline constexpr double kOpenPreferPathMargin = 0.;
 inline constexpr double kPinchMinPathMargin = 0.;
+static_assert(kOpenPreferPathMargin == kPinchMinPathMargin);
 
 // Trail-reverse distances, in planning-circle diameters. Entry/open leave
 // the cell; a pocket retreat is longer because both axes are inside the
@@ -50,14 +54,11 @@ inline bool AxisSwingClear(double range) {
   return range >= kPlanningRadius;
 }
 
-// Extra path margin. Open-tier paths sit at least one body radius off
-// obstacles. Pinch-tier paths are strictly outside the planning circle;
-// margin == 0 is contact with that circle.
-inline bool PathClearsOpen(double margin) {
-  return std::isfinite(margin) && margin >= kOpenPreferPathMargin;
-}
+// Extra path margin. A path the planner already cleared is executable when
+// it sits strictly outside the planning circle. margin == 0 is contact.
 inline bool PathClearsPinch(double margin) {
   return std::isfinite(margin) && margin > kPinchMinPathMargin;
 }
+inline bool PathClearsOpen(double margin) { return PathClearsPinch(margin); }
 
 }  // namespace navigation2d

@@ -83,14 +83,18 @@ double SegmentDistance(const Eigen::Vector2d& point, const Eigen::Vector2d& firs
 }
 }  // namespace
 
-DistanceField::DistanceField(const LayeredCostmap& costmap) : grid_(&costmap.grid()) {
+DistanceField::DistanceField(const LayeredCostmap& costmap,
+                             bool unknown_is_obstacle)
+    : grid_(&costmap.grid()) {
   const int width = grid_->width(), height = grid_->height();
   std::vector<double> row_input(width), row_output;
   std::vector<double> intermediate(width * height, kLarge);
   for (int y = 0; y < height; ++y) {
     for (int x = 0; x < width; ++x) {
       const auto value = costmap.cost(x, y);
-      row_input[x] = (value == kLethal || value == kUnknown) ? 0. : kLarge;
+      const bool blocked =
+          value == kLethal || (unknown_is_obstacle && value == kUnknown);
+      row_input[x] = blocked ? 0. : kLarge;
     }
     DistanceTransform1d(row_input, &row_output);
     for (int x = 0; x < width; ++x) intermediate[y * width + x] = row_output[x];
