@@ -22,11 +22,6 @@ struct GlobalPlanningDiagnostics {
   bool fallback_used = false;
   double path_min_clearance_m = 0.;
   double path_max_curvature = 0.;
-  // Bottleneck-aware profile (see AnalyzePathClearanceProfile).
-  double open_scrape_length_m = 0.;
-  double bottleneck_min_clearance_m = 0.;
-  bool has_open_wall_scrape = false;
-  bool has_lethal_tip = false;
 };
 
 class GlobalPlanner {

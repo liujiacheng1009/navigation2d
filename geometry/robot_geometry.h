@@ -13,24 +13,12 @@ inline constexpr double kPlanningRadius = .22;
 // Comparing that field to kPlanningRadius would wrongly demand ~0.44 m to
 // walls (corridor width ~0.88 m) and reject ordinary indoor aisles.
 //
-// Bottleneck-aware acceptance (AnalyzePathClearanceProfile):
-//   open / one-sided hug → require kOpenPreferPathMargin
-//   centered throat (both sides ≥ kBottleneckMinSideClearance) → pinch margin
-// Whole-path pinch downgrade is only for no-route, not open wall scrapes.
+// Open tier: prefer mid-aisle; thinner open paths fall through to pinch.
 inline constexpr double kOpenPreferPathMargin = .22;
 // Pinch / doorway: body already fits (planner lethal = kPlanningRadius).
 // A 0.70 m door has half-width 0.35 → margin ≈ 0.13 with kPlanningRadius;
 // the old 0.15 floor rejected those doors as "wall-scrape". Keep this low
 // enough for ~0.60 m mouths (margin ≈ 0.08) but still refuse tip scrapes.
 inline constexpr double kPinchMinPathMargin = .08;
-// Perpendicular free span that counts as "open aisle" (not a door throat).
-// Wall-foot chords in rooms this wide must keep open margin.
-inline constexpr double kOpenFreeWidthMin = 1.00;
-// Typical door/alcove free span upper band (documentation + tests).
-inline constexpr double kBottleneckFreeWidthMax = .95;
-// Minimum side clearance for a "centered" door. One-sided island/corner
-// hugs have min(left,right) below this and must not use pinch margin.
-// 0.60 m throat half-width = 0.30.
-inline constexpr double kBottleneckMinSideClearance = .30;
 
 }  // namespace navigation2d
