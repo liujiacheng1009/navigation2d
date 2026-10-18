@@ -23,6 +23,7 @@
 #include "navigation2d/planning/collision_checker.h"
 #include "navigation2d/planning/astar_planner.h"
 #include "navigation2d/planning/path_smoother.h"
+#include "navigation2d/planning/path_clearance.h"
 
 namespace navigation2d {
 namespace {
@@ -175,13 +176,14 @@ double DistanceToPath(const Path& path, const Pose2d& pose) {
 }
 void AddPathMetrics(const Path& path, const LayeredCostmap& costmap, double robot_radius,
                     GlobalPlanningDiagnostics* diagnostics) {
-  planning_internal::DistanceField field(costmap);
-  diagnostics->path_min_clearance_m = std::numeric_limits<double>::infinity();
+  const PathClearanceProfile profile =
+      AnalyzePathClearanceProfile(path, costmap, robot_radius);
+  diagnostics->path_min_clearance_m = profile.path_min_clearance_m;
+  diagnostics->open_scrape_length_m = profile.open_scrape_length_m;
+  diagnostics->bottleneck_min_clearance_m = profile.bottleneck_min_clearance_m;
+  diagnostics->has_open_wall_scrape = profile.has_open_wall_scrape;
+  diagnostics->has_lethal_tip = profile.has_lethal_tip;
   diagnostics->path_max_curvature = 0.;
-  for (const auto& pose : path)
-    diagnostics->path_min_clearance_m = std::min(
-        diagnostics->path_min_clearance_m,
-        std::max(0., field.distance(X(pose), Y(pose)) - robot_radius));
   for (std::size_t index = 1; index + 1 < path.size(); ++index) {
     const auto first = path[index].translation() - path[index - 1].translation();
     const auto second = path[index + 1].translation() - path[index].translation();

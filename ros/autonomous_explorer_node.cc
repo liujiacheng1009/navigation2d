@@ -23,6 +23,7 @@
 #include "navigation2d/application/navigation_system.h"
 #include "navigation2d/exploration/frontier_explorer.h"
 #include "navigation2d/geometry/robot_geometry.h"
+#include "navigation2d/planning/path_clearance.h"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_msgs/msg/string.hpp"
@@ -639,28 +640,21 @@ class AutonomousExplorer final : public rclcpp::Node {
                     "Navigation2D rejected goal before execution: %s",
                     last_planning_failure_.c_str());
         navigation_.reset();
-        // Pinch is only for sealed door throats (no route / scrape). Never
-        // pinch-retry "goal occupied" — that accepted corner-tip viewpoints
-        // at ~0.18 m and drove the chassis straight into the wall (UI red box).
+        // Pinch only when open/entry finds no route through a sealed throat.
+        // Open wall-scrape must NOT whole-path pinch — that re-plans the
+        // apartment with looser inflation and hugs walls in open rooms.
+        // Never pinch-retry "goal occupied" (corner-tip viewpoints).
         const bool goal_in_obstacle =
             last_planning_failure_.find("goal occupied") != std::string::npos;
         const bool pinch_worthy =
             !goal_in_obstacle &&
             (last_planning_failure_.find("no route") != std::string::npos ||
-             last_planning_failure_.find("no path") != std::string::npos ||
-             last_planning_failure_.find("wall-scrape") != std::string::npos ||
-             last_planning_failure_.find("first-segment") != std::string::npos);
-        // Entry also pinch-retries first-segment: open-tier paths from across
-        // the room grazed jambs and abandoned sealed mouths before open-loop.
+             last_planning_failure_.find("no path") != std::string::npos);
         if (!returning && !retreat_goal_ && !narrow_passage_retry_ &&
-            pinch_worthy &&
-            (!entry_drive ||
-             last_planning_failure_.find("first-segment") != std::string::npos ||
-             last_planning_failure_.find("no route") != std::string::npos ||
-             last_planning_failure_.find("no path") != std::string::npos)) {
+            pinch_worthy) {
           narrow_passage_retry_ = true;
           RCLCPP_INFO(get_logger(),
-                      "%s clearance blocked (%s); retrying pinch clearance",
+                      "%s no route (%s); retrying pinch clearance",
                       entry_drive ? "Entry" : "Open",
                       last_planning_failure_.c_str());
           const bool ok = StartNavigation(goal, returning, latest_map_retry);
@@ -693,44 +687,29 @@ class AutonomousExplorer final : public rclcpp::Node {
       mapped_obstacle_rejects_ = 0;
       last_path_signature_ = initial_state.path_signature;
       last_path_min_clearance_m_ = initial_state.global_planning.path_min_clearance_m;
-      // path_min_clearance_m is EXTRA margin (dist − robot_radius), not raw
-      // obstacle distance. Lethal fit is already kPlanningRadius in the
-      // planner; these checks only prefer mid-aisle (open) or refuse tip
-      // scrapes (pinch). Entry is excluded — mouth crawl is intentionally
-      // close to jambs.
-      // Open: wall-foot chords → fall through to pinch.
-      // Margin == 0 (dist ≤ body radius) must count — requiring "> 0" let
-      // lethal-tight paths start and wedge the chassis mid-corridor (UI tip).
-      if (!entry_drive && !returning && !retreat_goal_ && !pinch_plan &&
-          std::isfinite(last_path_min_clearance_m_) &&
-          last_path_min_clearance_m_ < navigation2d::kOpenPreferPathMargin) {
+      // Bottleneck-aware acceptance: open-aisle samples need open margin;
+      // door-width free_width may keep pinch margin. Entry skips — mouth
+      // crawl is intentionally close to jambs. Open wall-scrape cools the
+      // signature only (no whole-path pinch downgrade).
+      if (!entry_drive && !returning && !retreat_goal_ &&
+          !navigation2d::PathClearanceProfileAcceptable(
+              initial_state.global_planning)) {
         if (initial_state.path_signature != 0)
           cooled_signatures_.insert(initial_state.path_signature);
-        last_planning_failure_ = "wall-scrape path in open clearance";
-        RCLCPP_WARN(get_logger(),
-                    "Navigation2D rejected goal before execution: %s "
-                    "(margin=%.3f)",
-                    last_planning_failure_.c_str(), last_path_min_clearance_m_);
-        navigation_.reset();
-        if (!narrow_passage_retry_) {
-          narrow_passage_retry_ = true;
-          const bool ok = StartNavigation(goal, returning, latest_map_retry);
-          narrow_passage_retry_ = false;
-          if (ok) return true;
+        if (initial_state.global_planning.has_lethal_tip) {
+          last_planning_failure_ = pinch_plan ? "pinch path still tip-scrape"
+                                              : "path tip-scrape";
+        } else {
+          last_planning_failure_ = pinch_plan
+                                       ? "pinch path open wall-scrape"
+                                       : "wall-scrape path in open clearance";
         }
-        return false;
-      }
-      // Pinch may thread a door but must not accept a corner-tip scrape.
-      if (!entry_drive && !returning && !retreat_goal_ && pinch_plan &&
-          std::isfinite(last_path_min_clearance_m_) &&
-          last_path_min_clearance_m_ < navigation2d::kPinchMinPathMargin) {
-        if (initial_state.path_signature != 0)
-          cooled_signatures_.insert(initial_state.path_signature);
-        last_planning_failure_ = "pinch path still wall-scrape";
         RCLCPP_WARN(get_logger(),
                     "Navigation2D rejected goal before execution: %s "
-                    "(margin=%.3f)",
-                    last_planning_failure_.c_str(), last_path_min_clearance_m_);
+                    "(margin=%.3f open_scrape=%.2fm bottleneck_min=%.3f)",
+                    last_planning_failure_.c_str(), last_path_min_clearance_m_,
+                    initial_state.global_planning.open_scrape_length_m,
+                    initial_state.global_planning.bottleneck_min_clearance_m);
         navigation_.reset();
         return false;
       }
