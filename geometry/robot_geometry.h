@@ -15,8 +15,10 @@ inline constexpr double kPlanningRadius = .22;
 //
 // Open tier: prefer mid-aisle; thinner open paths fall through to pinch.
 inline constexpr double kOpenPreferPathMargin = .22;
-// Pinch / doorway: body already fits (planner lethal = kPlanningRadius);
-// only refuse tip scrapes with almost no extra margin.
-inline constexpr double kPinchMinPathMargin = .15;
+// Pinch / doorway: body already fits (planner lethal = kPlanningRadius).
+// A 0.70 m door has half-width 0.35 → margin ≈ 0.13 with kPlanningRadius;
+// the old 0.15 floor rejected those doors as "wall-scrape". Keep this low
+// enough for ~0.60 m mouths (margin ≈ 0.08) but still refuse tip scrapes.
+inline constexpr double kPinchMinPathMargin = .08;
 
 }  // namespace navigation2d

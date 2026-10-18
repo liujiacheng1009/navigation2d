@@ -536,14 +536,17 @@ class AutonomousExplorer final : public rclcpp::Node {
     // Lethal radius stays kPlanningRadius in all tiers; tiers only change
     // soft inflation.
     const bool pinch_plan = narrow_passage_retry_ && !entry_drive && !returning;
+    // Soft inflation must stay below half a typical doorway (~0.35 m for a
+    // 0.70 m mouth). Open 0.42 sealed those doors in cost (UI: tan band fills
+    // the gap) and made pinch/open retries report no path.
     if (entry_drive) {
-      config.inflation_radius = .28;
+      config.inflation_radius = .26;
       config.inflation_cost_scaling = 8.0;
     } else if (pinch_plan) {
-      config.inflation_radius = .32;
+      config.inflation_radius = .28;
       config.inflation_cost_scaling = 7.0;
     } else {
-      config.inflation_radius = .42;
+      config.inflation_radius = .34;
       config.inflation_cost_scaling = 6.0;
     }
     // The global plan already enforces the footprint buffer.  A long local
@@ -1136,22 +1139,30 @@ class AutonomousExplorer final : public rclcpp::Node {
         gap >= .50 && gap <= 1.40;
     std::optional<Goal> probe;
     double used_min_depth = 0.;
+    // Wide mouths with almost no mapped free beyond the jamb (live: gap=0.70
+    // free_depth=0.05) must try a shallow poke first — deep schedules only
+    // return nullopt and abandon an enterable door.
     const double schedules[][2] = {
-        {easy_door ? (.28 + .08 * entry_probe_attempts_)
+        {easy_door ? .10 : (.42 + .10 * entry_probe_attempts_),
+         easy_door ? .30 : (entry_probe_attempts_ == 0 ? 1.30 : 1.60)},
+        {easy_door ? (.22 + .08 * entry_probe_attempts_)
                    : (.42 + .10 * entry_probe_attempts_),
-         easy_door ? 1.05 : (entry_probe_attempts_ == 0 ? 1.30 : 1.60)},
-        {.24, .85},
+         easy_door ? .85 : (entry_probe_attempts_ == 0 ? 1.30 : 1.60)},
         {.18, .55},
+        {.12, .35},
     };
     for (const auto& schedule : schedules) {
       double minimum_depth = schedule[0];
       double maximum_depth = schedule[1];
       if (free_depth > .05) {
         minimum_depth =
-            std::min(minimum_depth, std::max(.18, free_depth - .08));
-        maximum_depth = std::max(maximum_depth, minimum_depth + .12);
-        maximum_depth = std::min(maximum_depth, std::max(minimum_depth + .12,
-                                                         free_depth + .05));
+            std::min(minimum_depth, std::max(.10, free_depth - .05));
+        maximum_depth = std::max(maximum_depth, minimum_depth + .10);
+        maximum_depth = std::min(maximum_depth, std::max(minimum_depth + .10,
+                                                         free_depth + .08));
+      } else if (easy_door) {
+        // Tiny free nose: keep the shallow window, do not demand 0.28 m depth.
+        maximum_depth = std::max(maximum_depth, minimum_depth + .10);
       }
       if (maximum_depth < minimum_depth) continue;
       probe = explorer_.SelectEntryProbe(
