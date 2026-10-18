@@ -1371,6 +1371,9 @@ class AutonomousExplorer final : public rclcpp::Node {
     return any ? minimum : 0.;
   }
 
+  // Body-frame lidar only — no map pose / yaw. LD14 distorts hard while
+  // spinning and localization coasts on odom, so tip escape must prefer
+  // reverse translation over in-place rotate.
   bool TryStartEscape() {
     if (!scan_ || !pose_ || now() < escape_until_) return false;
     const double front = SectorMinRange(0., .45);
@@ -1378,38 +1381,36 @@ class AutonomousExplorer final : public rclcpp::Node {
     const double left = SectorMinRange(+std::acos(-1.) / 2., .45);
     const double right = SectorMinRange(-std::acos(-1.) / 2., .45);
     geometry_msgs::msg::Twist command;
-    double hold_s = 1.0;
-    // Open room with one tight flank: peel into free space instead of
-    // crawling forward along the speck that stalled the monitor.
-    const bool pinched_side =
-        std::min(left, right) < .30 && std::max(left, right) >= .70;
-    const bool wall_tip =
-        front > 0. && front < .35 && back >= .45 &&
-        std::min(left > 0. ? left : 10., right > 0. ? right : 10.) < .55;
-    if (front >= .45) {
-      command.linear.x = pinched_side ? .22 : .18;
-      if (left + .25 < right) command.angular.z = -.55;
-      else if (right + .25 < left) command.angular.z = .55;
+    double hold_s = 1.6;
+    // Mild side bias only (≤0.35 rad/s). Large w during reverse was the
+    // "spin to free" habit that corrupted scan matching mid-escape.
+    const double side_bias =
+        (left > 0. && right > 0. && std::abs(left - right) > .12)
+            ? ((left > right) ? .30 : -.30)
+            : 0.;
+    if (back >= .28) {
+      // Priority 1: back straight out of the tip. Odom coasts fine; map yaw
+      // does not matter.
+      command.linear.x = -.20;
+      command.angular.z = side_bias;
+      hold_s = returning_ ? 2.2 : 1.8;
+    } else if (front >= .50) {
+      // Priority 2: creep forward into open, slight bias off the near wall.
+      command.linear.x = .16;
+      command.angular.z = side_bias;
       hold_s = 1.4;
-    } else if (back >= .35) {
-      // Reverse out of a wall tip. Short 1.4 s peels left the chassis on the
-      // same inflation cell (log: immobility at (-2.45,-0.19) ×7, return stuck
-      // at (-0.47,-4.32) with home_dist=4.3).
-      command.linear.x = wall_tip ? -.22 : -.16;
-      if (left > right + .05) command.angular.z = wall_tip ? .80 : .65;
-      else if (right > left + .05) command.angular.z = wall_tip ? -.80 : -.65;
-      hold_s = wall_tip || returning_ ? 2.4 : 1.4;
-    } else if (std::max(left, right) >= .35) {
-      // Too tight to translate — turn toward the open flank first.
-      command.angular.z = left >= right ? .70 : -.70;
-      hold_s = 1.2;
+    } else if (std::max(left, right) >= .40) {
+      // Priority 3 (last): short body-frame turn toward freer flank, then the
+      // next escape tick will reverse. Keep spin ≤0.8 s.
+      command.angular.z = left >= right ? .55 : -.55;
+      hold_s = .70;
     } else {
       return false;
     }
     escape_command_ = command;
     escape_until_ = now() + rclcpp::Duration::from_seconds(hold_s);
     RCLCPP_WARN(get_logger(),
-                "Starting clearance escape: front=%.2f back=%.2f left=%.2f "
+                "Starting body-frame escape: front=%.2f back=%.2f left=%.2f "
                 "right=%.2f v=%.2f w=%.2f hold=%.1f",
                 front, back, left, right, command.linear.x, command.angular.z,
                 hold_s);
@@ -1419,22 +1420,37 @@ class AutonomousExplorer final : public rclcpp::Node {
   bool TickEscape() {
     if (escape_until_.nanoseconds() == 0) return false;
     if (now() < escape_until_) {
-      // Escape bypasses NavigationSystem's collision filter — gate on lidar so
-      // a peel cannot drive the chassis into the wall it is leaving.
+      // Re-read body-frame lidar every tick. Do not trust the frozen command's
+      // yaw bias after localization has coasted on odom.
       geometry_msgs::msg::Twist command = escape_command_;
       const double front = SectorMinRange(0., .40);
       const double back = SectorMinRange(std::acos(-1.), .40);
+      const double left = SectorMinRange(+std::acos(-1.) / 2., .40);
+      const double right = SectorMinRange(-std::acos(-1.) / 2., .40);
+      if (std::abs(command.linear.x) > .05 && left > 0. && right > 0. &&
+          std::abs(left - right) > .12) {
+        const double bias = (left > right) ? .30 : -.30;
+        // Keep the planned sign of rotation if any; otherwise gently bias.
+        if (std::abs(command.angular.z) < .15) command.angular.z = bias;
+        else if ((command.angular.z > 0.) != (bias > 0.))
+          command.angular.z = .5 * command.angular.z + .5 * bias;
+      }
       if (command.linear.x > 0. && front > 0. &&
           front < navigation2d::kPlanningRadius) {
         command.linear.x = 0.;
-        if (std::abs(command.angular.z) < .20)
-          command.angular.z = command.angular.z >= 0. ? .55 : -.55;
+        // Prefer reverse over spin when the nose closes mid-escape.
+        if (back >= .28) {
+          command.linear.x = -.16;
+          command.angular.z = 0.;
+        } else if (std::abs(command.angular.z) < .20) {
+          command.angular.z = (left >= right) ? .50 : -.50;
+        }
       }
-      if (command.linear.x < 0. && back > 0. && back < .18) {
+      if (command.linear.x < 0. && back > 0. && back < .16) {
         command.linear.x = 0.;
       }
       command_publisher_->publish(command);
-      PublishStatus("RECOVERING", "short clearance translation after first-segment stall");
+      PublishStatus("RECOVERING", "body-frame tip escape (prefer reverse)");
       return true;
     }
     escape_until_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
