@@ -861,6 +861,9 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   void PublishFrontierDebug() {
+    // Cells are captured at SelectGoals time; prune against the live map so
+    // the UI does not keep painting free interior after unknown fills in.
+    explorer_.PruneStaleDebugCells();
     const auto& snap = explorer_.debug_snapshot();
     std::string json = "{\"cells\":[";
     bool first = true;

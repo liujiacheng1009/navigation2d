@@ -448,6 +448,24 @@ bool FrontierExplorer::HasFreeLineOfSight(
   }
 }
 
+void FrontierExplorer::PruneStaleDebugCells() {
+  if (observation_map_.resolution <= 0. || observation_map_.width <= 0 ||
+      observation_map_.height <= 0) {
+    debug_snapshot_.cells.clear();
+    return;
+  }
+  std::vector<FrontierDebugSnapshot::Cell> kept;
+  kept.reserve(debug_snapshot_.cells.size());
+  for (const auto& cell : debug_snapshot_.cells) {
+    const int col = static_cast<int>(std::floor(
+        (cell.x - observation_map_.origin_x) / observation_map_.resolution));
+    const int row = static_cast<int>(std::floor(
+        (cell.y - observation_map_.origin_y) / observation_map_.resolution));
+    if (RawFrontier(col, row)) kept.push_back(cell);
+  }
+  debug_snapshot_.cells = std::move(kept);
+}
+
 std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
     double robot_x, double robot_y) {
   raw_frontier_cells_ = 0;
