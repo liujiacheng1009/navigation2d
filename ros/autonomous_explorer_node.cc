@@ -690,28 +690,43 @@ class AutonomousExplorer final : public rclcpp::Node {
       mapped_obstacle_rejects_ = 0;
       last_path_signature_ = initial_state.path_signature;
       last_path_min_clearance_m_ = initial_state.global_planning.path_min_clearance_m;
-      // Refuse any explore path thinner than kPlanningRadius — including
-      // entry / pinch tiers. Soft inflation may still prefer wider aisles;
-      // lethal fit must remain ≥ kPlanningRadius so tip pockets are not
-      // "hard squeezed".
-      if (!returning && !retreat_goal_ && last_path_min_clearance_m_ > 0. &&
-          last_path_min_clearance_m_ < navigation2d::kPlanningRadius) {
+      // path_min_clearance_m is EXTRA margin (dist − robot_radius), not raw
+      // obstacle distance. Lethal fit is already kPlanningRadius in the
+      // planner; these checks only prefer mid-aisle (open) or refuse tip
+      // scrapes (pinch). Entry is excluded — mouth crawl is intentionally
+      // close to jambs.
+      // Open: wall-foot chords → fall through to pinch.
+      if (!entry_drive && !returning && !retreat_goal_ && !pinch_plan &&
+          last_path_min_clearance_m_ > 0. &&
+          last_path_min_clearance_m_ < navigation2d::kOpenPreferPathMargin) {
         if (initial_state.path_signature != 0)
           cooled_signatures_.insert(initial_state.path_signature);
-        last_planning_failure_ = pinch_plan ? "pinch path still wall-scrape"
-                                            : "wall-scrape path in open clearance";
+        last_planning_failure_ = "wall-scrape path in open clearance";
         RCLCPP_WARN(get_logger(),
                     "Navigation2D rejected goal before execution: %s "
-                    "(clearance=%.3f entry=%d pinch=%d)",
-                    last_planning_failure_.c_str(), last_path_min_clearance_m_,
-                    entry_drive ? 1 : 0, pinch_plan ? 1 : 0);
+                    "(margin=%.3f)",
+                    last_planning_failure_.c_str(), last_path_min_clearance_m_);
         navigation_.reset();
-        if (!entry_drive && !pinch_plan && !narrow_passage_retry_) {
+        if (!narrow_passage_retry_) {
           narrow_passage_retry_ = true;
           const bool ok = StartNavigation(goal, returning, latest_map_retry);
           narrow_passage_retry_ = false;
           if (ok) return true;
         }
+        return false;
+      }
+      // Pinch may thread a door but must not accept a corner-tip scrape.
+      if (!entry_drive && !returning && !retreat_goal_ && pinch_plan &&
+          last_path_min_clearance_m_ > 0. &&
+          last_path_min_clearance_m_ < navigation2d::kPinchMinPathMargin) {
+        if (initial_state.path_signature != 0)
+          cooled_signatures_.insert(initial_state.path_signature);
+        last_planning_failure_ = "pinch path still wall-scrape";
+        RCLCPP_WARN(get_logger(),
+                    "Navigation2D rejected goal before execution: %s "
+                    "(margin=%.3f)",
+                    last_planning_failure_.c_str(), last_path_min_clearance_m_);
+        navigation_.reset();
         return false;
       }
       // Do not classify a frontier from the controller's first sample. At a
@@ -1675,10 +1690,11 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   bool BreakWallScrapeAfterPeel() {
+    // last_path_min_clearance_m_ is EXTRA margin beyond the body.
     const bool scrape =
         recovery_.side_peels > 0 || recovery_.wall_scrapes > 0 ||
         (last_path_min_clearance_m_ > 0. &&
-         last_path_min_clearance_m_ < navigation2d::kPlanningRadius);
+         last_path_min_clearance_m_ < navigation2d::kPinchMinPathMargin);
     if (!scrape) return false;
     return UnstickFromPinch("after wall peel; leave pinch pocket");
   }
