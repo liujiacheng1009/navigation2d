@@ -344,7 +344,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     // The simulator's ground-truth pose guarantees that the complete base
     // footprint is free even when SLAM has not yet converted the cells under
     // the robot from unknown.  Keep that local evidence slightly wider than
-    // the effective planner radius (robot radius + raster half-diagonal), so
+    // the planner radius (the body circle), so
     // a valid current pose is not rejected as "start occupied" on a replan
     // after a tight-corner approach.  This only clears the measured current
     // footprint; all cells ahead remain lethal unless observed free.

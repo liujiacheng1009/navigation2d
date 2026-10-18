@@ -107,13 +107,13 @@ bool PathFootprintValid(const Path& path, const LayeredCostmap& costmap, double 
   return true;
 }
 
-// GridSearch and the continuous controller must agree on the clearance of a
-// route.  `LayeredCostmap::lethal` evaluates continuous poses against raster
-// cell boxes; reserve one cell half-diagonal in the planning contract so a
-// path accepted by A*/Theta* is not rejected at the first RPP arc sample.
+// Planning clearance is the body circle. `LayeredCostmap::lethal` already
+// measures distance to the occupied cell box, so adding another half-cell
+// diagonal seals a passage the chassis fits (a door whose free half-width
+// sits between kPlanningRadius and kPlanningRadius + half-diagonal).
 double EffectivePlanningRadius(const NavigationConfig& config,
-                               const LayeredCostmap& costmap) {
-  return config.robot_radius + std::sqrt(.5) * costmap.grid().resolution();
+                               const LayeredCostmap&) {
+  return config.robot_radius;
 }
 
 std::unique_ptr<GlobalPlanner> MakePlannerWithEffectiveRadius(

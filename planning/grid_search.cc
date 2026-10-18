@@ -111,13 +111,10 @@ Path GridSearch(const LayeredCostmap& costmap, const Pose2d& start,
     throw std::runtime_error(message.str());
   };
   reject_occupied(start, "start", clearance);
-  // Path search keeps the half-cell raster margin in `clearance`.  The
-  // terminal pose does not: explorers place doorway goals with ClearAt(robot
-  // radius) (~0.22 m).  Requiring the inflated planning radius (~0.255 m)
-  // rejected every 0.70 m kitchen entry with "goal occupied, nearest 0.23 m".
-  const double goal_clearance =
-      std::max(0., clearance - std::sqrt(.5) * grid.resolution());
-  reject_occupied(goal, "goal", goal_clearance);
+  // Same body circle as the path. Doorway goals are placed with
+  // ClearAt(kPlanningRadius); a tighter goal check rejects a mouth the
+  // chassis can stand in, a looser one accepts a pose inside the body.
+  reject_occupied(goal, "goal", clearance);
   if (gx >= 0 && gy >= 0 && gx < grid.width() && gy < grid.height() &&
       costmap.cost(gx, gy) == kUnknown)
     throw std::runtime_error("goal occupied, cell is unknown");
