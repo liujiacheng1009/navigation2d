@@ -757,6 +757,9 @@ class AutonomousExplorer final : public rclcpp::Node {
       goal_started_ = now();
       best_goal_path_progress_m_ = 0.;
       last_goal_path_progress_time_ = now();
+      immobility_open_replans_ = 0;
+      scrape_reject_goal_.reset();
+      scrape_reject_count_ = 0;
       PublishStatus(returning ? "RETURNING" :
                         (goal.leftover_approach ? "COMPLETING" : "NAVIGATING"),
                     returning ? "returning to exploration start" :
@@ -1785,11 +1788,11 @@ class AutonomousExplorer final : public rclcpp::Node {
                 "%s; wall_scrapes=%d clearance=%.3f signature=%llu", reason,
                 recovery_.wall_scrapes, last_path_min_clearance_m_,
                 static_cast<unsigned long long>(last_path_signature_));
-    // Open aisle beside a wall foot: leave on the first scrape — a centered
-    // replan just parks CARROT on the tip again (下方卡住太久).
-    const double front = SectorMinRange(0., .50);
-    if (front >= .70 || recovery_.wall_scrapes >= 2 ||
-        last_path_min_clearance_m_ < .05 || recovery_.side_peels > 0) {
+    // First scrape: same-goal latest-map replan. Second scrape / prior peel /
+    // lethal tip → demote. Do not unstick on first open-front scrape (that
+    // burned tour goals via "driving scrape path into corner tip").
+    if (recovery_.wall_scrapes >= 2 || recovery_.side_peels > 0 ||
+        last_path_min_clearance_m_ < .05) {
       return UnstickFromPinch(reason);
     }
     latest_map_replans_ = 0;
@@ -1800,6 +1803,8 @@ class AutonomousExplorer final : public rclcpp::Node {
           last_path_min_clearance_m_ < .16) {
         if (last_path_signature_ != 0)
           cooled_signatures_.insert(last_path_signature_);
+        // Count as a failed replan scrape; next BreakWallScrapeThrash demotes.
+        ++recovery_.wall_scrapes;
         return UnstickFromPinch("replanned path still pinch-scrape");
       }
       PublishStatus("NAVIGATING", "replanned off wall after scrape stop");
@@ -2047,11 +2052,43 @@ class AutonomousExplorer final : public rclcpp::Node {
         next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
         return;
       }
-      // Viewpoint-only cool: frontier blacklist here poisoned sealed-room
-      // mouths a metre away (gap≈2.15 open-wall spam → candidates=0).
+      // Soft scrape rejects: rotate to tour tail without RecordAttempt so
+      // failed_goals does not explode (live: 2 completed / 17 failed).
+      const bool scrape_reject =
+          last_planning_failure_.find("wall-scrape") != std::string::npos ||
+          last_planning_failure_.find("tip-scrape") != std::string::npos;
+      if (scrape_reject) {
+        if (last_path_signature_ != 0)
+          cooled_signatures_.insert(last_path_signature_);
+        const bool same_vp =
+            scrape_reject_goal_ &&
+            (std::hypot(goal.x - scrape_reject_goal_->x,
+                        goal.y - scrape_reject_goal_->y) < 1.20 ||
+             std::hypot(goal.frontier_x - scrape_reject_goal_->frontier_x,
+                        goal.frontier_y - scrape_reject_goal_->frontier_y) <
+                 1.50);
+        if (!same_vp) {
+          scrape_reject_goal_ = goal;
+          scrape_reject_count_ = 1;
+        } else {
+          ++scrape_reject_count_;
+        }
+        if (scrape_reject_count_ < 2) {
+          committed_tour_.push_back(goal);
+          RCLCPP_WARN(get_logger(),
+                      "Open-wall scrape reject (%s); rotate tour (soft %d/2) "
+                      "gap=%.2f",
+                      last_planning_failure_.c_str(), scrape_reject_count_,
+                      explorer_.MouthGapWidth(goal.frontier_x, goal.frontier_y));
+          continue;
+        }
+      }
+      // Hard demote: occupied / no path / scrape soft budget exhausted.
       explorer_.RecordAttempt(goal, false, true, false);
       recently_demoted_ = goal;
       recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(10.0);
+      scrape_reject_goal_.reset();
+      scrape_reject_count_ = 0;
       RCLCPP_WARN(get_logger(),
                   "Open-wall goal rejected (%s); demoting, not entry-locking "
                   "gap=%.2f corridor=%s",
@@ -2574,14 +2611,28 @@ class AutonomousExplorer final : public rclcpp::Node {
     NotePoseMotion();
     if (!navigation_ || !pose_ || !pose_motion_initialized_) return false;
     const bool entry_drive = pending_entry_goal_ || locked_entry_mouth_;
-    // Entry crawls past jambs are slow; the old 8 s / 6 s path-stall fired while
-    // progress was still advancing and yanked the robot back to the junction.
-    // Non-entry tips must not sit 8+ s on ROT before peel (下方卡住太久).
-    const double min_goal_s = entry_drive ? 14.0 : 4.0;
+    const double front = SectorMinRange(0., .50);
+    const double left = SectorMinRange(+std::acos(-1.) / 2., .40);
+    const double right = SectorMinRange(-std::acos(-1.) / 2., .40);
+    const double side =
+        std::min(left > 0. ? left : 10., right > 0. ? right : 10.);
+    const double path_clear =
+        state.global_planning.path_min_clearance_m > 0.
+            ? state.global_planning.path_min_clearance_m
+            : last_path_min_clearance_m_;
+    const bool tip_wedged =
+        !entry_drive &&
+        IsPinchGeometryStall(path_clear, front, side);
+    // Open-front slow crawl (RPP near inflation) is not a tip. Use longer
+    // stalls and never peel/demote — static maps were thrashing on front≥1.5.
+    const bool open_slow = !entry_drive && !tip_wedged && front >= .70;
+    const double min_goal_s =
+        entry_drive ? 14.0 : (open_slow ? 8.0 : 4.0);
     if ((now() - goal_started_).seconds() < min_goal_s) return false;
     const bool pose_stuck = (now() - pose_motion_stamp_).seconds() >=
-                            (entry_drive ? 10.0 : 3.5);
-    const double path_stall_s = entry_drive ? 12.0 : 3.5;
+                            (entry_drive ? 10.0 : (open_slow ? 7.5 : 3.5));
+    const double path_stall_s =
+        entry_drive ? 12.0 : (open_slow ? 7.5 : 3.5);
     const bool path_stuck =
         state.path_progress_m < .05 ||
         (last_goal_path_progress_time_.nanoseconds() > 0 &&
@@ -2595,10 +2646,11 @@ class AutonomousExplorer final : public rclcpp::Node {
     ++immobility_recoveries_;
     RCLCPP_WARN(get_logger(),
                 "Pose immobility watchdog: stuck=(%.2f,%.2f) recoveries=%d "
-                "returning=%s entry=%s progress=%.2f",
+                "returning=%s entry=%s progress=%.2f tip=%s front=%.2f",
                 pose_->pose.position.x, pose_->pose.position.y,
                 immobility_recoveries_, returning_ ? "yes" : "no",
-                pending_entry_goal_ ? "yes" : "no", state.path_progress_m);
+                pending_entry_goal_ ? "yes" : "no", state.path_progress_m,
+                tip_wedged ? "yes" : "no", front);
     geometry_msgs::msg::Twist stop;
     command_publisher_->publish(stop);
     navigation_.reset();
@@ -2645,51 +2697,40 @@ class AutonomousExplorer final : public rclcpp::Node {
       next_selection_ = now();
       return true;
     }
-    // Tip immobility: leave on the first recovery — waiting for ≥2 parked
-    // the chassis in the bottom tip until PARTIAL.
-    if (immobility_recoveries_ >= 1 && pose_) {
-      explorer_.RecordAttempt(active_goal_, false);
-      recently_demoted_ = active_goal_;
-      recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(6.0);
-      explorer_.CoolRegion(active_goal_.x, active_goal_.y, 0.80, 1800u);
-      explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 0.80,
-                           1800u);
-      ClearEntryMouthLock();
-      retreat_attempted_ = false;
-      clear_start_pinch_ = true;
-      next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
-      if (EscapeOrShortRetreat(
-              "immobility at wall tip; peel out of inflation",
-              "immobility at wall tip; short trail retreat"))
-        return true;
-      if (TryRescueDistantMouths("immobility tip; rescue distant mouths"))
-        return true;
-      DemoteActiveGoal("immobility tip thrash; demoting cooled viewpoint");
-      return true;
-    }
-    retreat_attempted_ = false;
-    clear_start_pinch_ = true;
-    {
-      const double front = SectorMinRange(0., .50);
-      const double left = SectorMinRange(+std::acos(-1.) / 2., .40);
-      const double right = SectorMinRange(-std::acos(-1.) / 2., .40);
-      const double side =
-          std::min(left > 0. ? left : 10., right > 0. ? right : 10.);
-      const double path_clear =
-          state.global_planning.path_min_clearance_m > 0.
-              ? state.global_planning.path_min_clearance_m
-              : last_path_min_clearance_m_;
-      if (IsOpenWallScrape(path_clear, side, front >= .70) ||
-          IsCornerTipStall(path_clear, front, side)) {
-        BreakWallScrapeThrash(front >= .70 ? "immobility wall-scrape"
-                                           : "immobility corner-tip");
+    // Open / non-tip stall: same-goal replan only — never peel (live: front
+    // 1.96 still started body-frame escape and burned the tour).
+    if (!tip_wedged) {
+      if (last_path_signature_ != 0)
+        cooled_signatures_.insert(last_path_signature_);
+      if (immobility_open_replans_ < 1 &&
+          StartNavigation(active_goal_, false, true)) {
+        ++immobility_open_replans_;
+        PublishStatus("NAVIGATING", "immobility open-front; replanned goal");
         return true;
       }
-    }
-    if (EscapeOrShortRetreat("immobility; peel then continue",
-                             "immobility; short trail retreat"))
+      immobility_open_replans_ = 0;
+      next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+      PublishStatus("SELECTING", "immobility open-front; reselect without peel");
       return true;
-    DemoteActiveGoal("immobility watchdog demoting viewpoint");
+    }
+    // True tip wedge: peel + demote after the first confirmed tip stall.
+    explorer_.RecordAttempt(active_goal_, false);
+    recently_demoted_ = active_goal_;
+    recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(6.0);
+    explorer_.CoolRegion(active_goal_.x, active_goal_.y, 0.80, 1800u);
+    explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 0.80,
+                         1800u);
+    ClearEntryMouthLock();
+    retreat_attempted_ = false;
+    clear_start_pinch_ = true;
+    next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+    if (EscapeOrShortRetreat(
+            "immobility at wall tip; peel out of inflation",
+            "immobility at wall tip; short trail retreat"))
+      return true;
+    if (TryRescueDistantMouths("immobility tip; rescue distant mouths"))
+      return true;
+    DemoteActiveGoal("immobility tip thrash; demoting cooled viewpoint");
     return true;
   }
 
@@ -4105,6 +4146,10 @@ class AutonomousExplorer final : public rclcpp::Node {
   double last_motion_x_ = 0., last_motion_y_ = 0.;
   rclcpp::Time pose_motion_stamp_{0, 0, RCL_ROS_TIME};
   int immobility_recoveries_ = 0;
+  int immobility_open_replans_ = 0;
+  // Soft wall-scrape rejects: rotate tour twice before RecordAttempt demote.
+  std::optional<Goal> scrape_reject_goal_;
+  int scrape_reject_count_ = 0;
   bool tip_rescue_attempted_ = false;
   geometry_msgs::msg::Twist escape_command_;
   rclcpp::Time escape_until_{0, 0, RCL_ROS_TIME};
