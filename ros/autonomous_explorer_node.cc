@@ -426,9 +426,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         }
       }
     }
-    // Same opening the explorer uses for the viewpoint. Without this, a
-    // doorway goal that ClearAt(0.22) accepted sits next to unknown jambs on
-    // the raw SLAM grid and Navigation2D rejects it as "goal occupied".
+    // Planning uses mapper occupancy as-is (no door-seal carving).
     navigation2d::ExplorationGrid planning_grid;
     planning_grid.width = static_cast<int>(map_->info.width);
     planning_grid.height = static_cast<int>(map_->info.height);
@@ -436,7 +434,6 @@ class AutonomousExplorer final : public rclcpp::Node {
     planning_grid.origin_x = map_->info.origin.position.x;
     planning_grid.origin_y = map_->info.origin.position.y;
     planning_grid.cells = map_->data;
-    navigation2d::OpenPassableOpenings(&planning_grid);
     // Locked-mouth entry: paint unknown along frontier → this navigation goal
     // (the room-side probe). Hallway-standoff→frontier pointed the wrong way
     // when the locked mouth was already room-side.
@@ -514,7 +511,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     // footprint radius ~0.207 m. Match production navigation2d_node (+margin).
     // Locked-mouth entry: circular inscribed radius (no rectangular footprint)
     // so CollisionMonitor BodyHalfWidth matches the planner throat instead of
-    // latching STOP on jambs at ~0.15 m while the OpenPassable gap is 0.64 m.
+    // latching STOP on jambs at ~0.15 m while the free gap is wider.
     const bool entry_drive = pending_entry_goal_ || locked_entry_mouth_;
     // Entry: A* only. Theta* long chords cut nearby wall tips even when the
     // locked mouth is metres wide (live: gap=2.15 Entry probe rejected
@@ -576,7 +573,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     // Soft target in open space: pull paths off speckles/walls when the room
     // is wide. Doorways cannot reach 0.50 m clearance — that smoother pulled
     // entry chords into jambs / PathCuts rejects (live: probe rejected
-    // path-intersects while the OpenPassable throat was free).
+    // path-intersects while the free throat was clear).
     if (entry_drive) {
       // No soft pull on entry — smoother bows cut wall tips and PathCuts then
       // rejects a perfectly wide mouth (live gap=2.15 thrash).
@@ -663,9 +660,8 @@ class AutonomousExplorer final : public rclcpp::Node {
         }
         return false;
       }
-      // Always reject structural through-wall chords (UI dashed purple through
-      // solid black). Entry uses the same OpenPassable grid so real door seals
-      // still pass; skipping this for entry_drive reintroduced 穿墙.
+      // Always reject through-wall chords on the live map (UI dashed purple
+      // through solid black). SLAM occupied is never carved open for entry.
       if (PathCutsMappedObstacle()) {
         last_planning_failure_ = "path intersects mapped obstacle";
         RCLCPP_WARN(get_logger(),
@@ -786,7 +782,6 @@ class AutonomousExplorer final : public rclcpp::Node {
     planning_grid.origin_x = map_->info.origin.position.x;
     planning_grid.origin_y = map_->info.origin.position.y;
     planning_grid.cells.assign(map_->data.begin(), map_->data.end());
-    navigation2d::OpenPassableOpenings(&planning_grid);
 
     nav_msgs::msg::OccupancyGrid input = *map_;
     input.header.stamp = now();
@@ -867,9 +862,8 @@ class AutonomousExplorer final : public rclcpp::Node {
     pending_entry_goal_ = mouth;
     entry_probe_attempts_ = 0;
     entry_open_loop_ticks_ = 0;
-    // Latch easy/corridor at lock time — OpenPassable flood can make both
-    // free-run axes hit the probe cap and flip IsCorridorMouth false mid
-    // approach, which abandoned real sealed rooms (candidates=0 → PARTIAL).
+    // Latch easy/corridor at lock time so mid-approach map growth cannot flip
+    // IsCorridorMouth false and abandon a real doorway.
     locked_entry_easy_ = explorer_.IsCorridorMouth(mouth.frontier_x,
                                                    mouth.frontier_y) &&
                          explorer_.MouthGapWidth(mouth.frontier_x,
@@ -1932,8 +1926,8 @@ class AutonomousExplorer final : public rclcpp::Node {
           StartCompletingProbe();
           return;
         }
-        // Completing probe can fail while OpenPassable still opens sealed
-        // mouths into unknown rooms. Returning here left kitchen/side rooms
+        // Completing probe can fail while sealed mouths still open into
+        // unknown rooms on later map updates. Returning here left rooms
         // unexplored with PARTIAL and unresolved frontiers.
         if (ShouldKeepWaitingForFrontiers()) {
           PublishStatus("SELECTING",
@@ -2795,11 +2789,8 @@ class AutonomousExplorer final : public rclcpp::Node {
 
   bool PathCutsMappedObstacle(bool execution_tick = false) const {
     (void)execution_tick;
-    // Live-map check always runs (including entry). Do NOT paint unknown→free
-    // before PathCuts: that free↔free strip made thin structural walls look
-    // like door seals and let GLOBAL paths pierce solid black (穿墙).
-    // OpenPassable alone opens real door seals; unknown past a true throat is
-    // flooded by OpenPassableOpenings.
+    // Live-map check always runs (including entry). SLAM occupied is lethal;
+    // unknown is not. No planning-side carve or flood before PathCuts.
     if (!navigation_ || !map_ || map_->info.resolution <= 0.) return false;
     const auto& route = navigation_->path();
     if (route.size() < 2) return false;

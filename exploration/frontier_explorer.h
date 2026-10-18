@@ -20,21 +20,8 @@ struct ExplorationGrid {
   std::vector<std::int8_t> cells;
 };
 
-// Carve door-width SLAM seals, widen undersized free-gap jambs to the planning
-// footprint, and flood unknown through those throats. Solid walls with no free
-// gap are never opened.
-void OpenPassableOpenings(ExplorationGrid* grid);
-
-// True when this occupied cell is a door-width SLAM seal (passable on both
-// passage sides, lateral span in [0.32, 1.40] m, wall mass/jambs on both
-// lateral ends). Unknown-touching seals may be up to ~0.45 m thick; free↔free
-// seals stay ≤0.30 m. Long exterior walls and alcove partition tips (free
-// wrap at an end) are not seals.
-bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row);
-
-// True when a world-frame polyline puts the body on a cell that remains
-// occupied after OpenPassableOpenings. Matches the planner so kitchen free-gap
-// / seal entry is not rejected; structural through-wall chords still fail.
+// True when a world-frame polyline puts the body on a live occupied cell.
+// Unknown is not lethal. SLAM occupied is never carved open for passage.
 bool PathCutsLiveOccupied(const ExplorationGrid& live,
                           const std::vector<std::pair<double, double>>& path_xy,
                           double robot_x, double robot_y,
@@ -174,10 +161,9 @@ class FrontierExplorer {
                   std::size_t required_known_growth = 2500u);
   void ClearBlacklist() { blacklist_.clear(); }
   bool CompletionEligible(std::size_t initial_known_cells) const;
-  // Unknown cells that are reachable through the planner's safe graph,
-  // including only narrow openings explicitly opened by OpenPassableOpenings.
-  // This distinguishes an unvisited room entrance from unknown space behind
-  // a wall or outside the observed map boundary.
+  // Unknown cells that are reachable through the planner's safe graph on the
+  // observed occupancy map (no door-seal carving). Distinguishes an unvisited
+  // room entrance from unknown space behind a wall or outside the map.
   std::size_t ReachableUnknownCells(double robot_x, double robot_y) const;
   std::size_t RegionFrontierCells(double anchor_x, double anchor_y,
                                   double radius_m) const;

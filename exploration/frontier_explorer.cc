@@ -18,15 +18,6 @@ constexpr double kNarrowMinWidth = .32;
 constexpr double kNarrowMaxWidth = 1.40;
 constexpr double kPlanningRadius = .22;
 constexpr double kNarrowClearance = kPlanningRadius;
-// Free spans at least this wide with unknown beyond count as pinched mouths.
-constexpr double kDoorPinchMinWidth = .18;
-// When a real free throat is narrower than the planning footprint after SLAM
-// thickens the jambs, erode only those posts (never a sealed solid wall) until
-// the free span reaches this width.
-// Planning footprint is 0.22 m radius; keep a little slack past 2×radius so
-// PathCuts / ClearAt still fit after SLAM thickens both posts.
-constexpr double kDoorCarveTargetWidth = .64;
-constexpr int kDoorJambErodeMaxCells = 5;
 // Narrow doorway floor: close enough to see through a kitchen mouth, but not
 // the old 0.08 m rim that parked the chassis on the wall. Open-space goals
 // use config.minimum_standoff (much larger); this only unlocks corridor poses.
@@ -94,9 +85,8 @@ double OccupiedClearanceAt(const ExplorationGrid& map, int col, int row) {
 // an open-boundary wall expansion. Used to prefer unfinished rooms over
 // nearby hallway frontier crawling.
 // True when unknown extends ≥0.55 m past a free↔unknown frontier — a room
-// pocket — rather than a 1-cell open-wall fringe. Used so wide doorways that
-// hit the free-run probe cap after OpenPassable floods are not demoted to
-// "open wall" (live: left sealed rooms left PARTIAL with candidates=0).
+// pocket — rather than a 1-cell open-wall fringe. Wide doorways that hit the
+// free-run probe cap still count as mouths when a room lies beyond.
 bool UnknownRoomBeyond(const ExplorationGrid& map, int col, int row) {
   if (map.resolution <= 0.) return false;
   const int need =
@@ -160,124 +150,13 @@ bool CorridorMouthAt(const ExplorationGrid& map, double frontier_x,
 
 
 
-int OpeningCells(const ExplorationGrid& grid, int col, int row, int step_col, int step_row) {
-  if (grid.resolution <= 0.) return -1;
-  const int limit = static_cast<int>(std::floor(kNarrowMaxWidth / grid.resolution)) + 1;
-  const int min_cells = static_cast<int>(std::ceil(kNarrowMinWidth / grid.resolution));
-  auto value_at = [&](int c, int r) -> std::int8_t {
-    return grid.cells[static_cast<std::size_t>(r) * grid.width + c];
-  };
-  auto inside = [&](int c, int r) {
-    return c >= 0 && r >= 0 && c < grid.width && r < grid.height;
-  };
-  if (!inside(col, row) || value_at(col, row) > 0) return -1;
-  int count = 1;
-  for (const int sign : {-1, 1}) {
-    int c = col + sign * step_col;
-    int r = row + sign * step_row;
-    while (inside(c, r) && value_at(c, r) <= 0) {
-      ++count;
-      if (count > limit) return -1;
-      c += sign * step_col;
-      r += sign * step_row;
-    }
-    if (!inside(c, r) || value_at(c, r) <= 0) return -1;
-  }
-  return count >= min_cells ? count : -1;
-}
-
 }  // namespace
-
-bool IsOpenableDoorSealCell(const ExplorationGrid& grid, int col, int row) {
-  if (grid.resolution <= 0. || grid.width <= 2 || grid.height <= 2 ||
-      col < 0 || row < 0 || col >= grid.width || row >= grid.height ||
-      grid.cells.size() != static_cast<std::size_t>(grid.width) * grid.height)
-    return false;
-  if (grid.cells[static_cast<std::size_t>(row) * grid.width + col] <= 0) return false;
-  const int width = grid.width;
-  const int height = grid.height;
-  // Match OpenPassableOpenings: unknown-touching door bleed may be ~0.45 m;
-  // free↔free SLAM seals thicken to ~0.30 m once both rooms are mapped
-  // (live: 0.20 m contract left kitchen bars uncarved → entry no-path).
-  const int max_thick_free =
-      std::max(1, static_cast<int>(std::ceil(.30 / grid.resolution)));
-  const int max_thick_unknown =
-      std::max(1, static_cast<int>(std::ceil(.45 / grid.resolution)));
-  const int min_lat = static_cast<int>(std::ceil(kNarrowMinWidth / grid.resolution));
-  const int max_lat = static_cast<int>(std::floor(kNarrowMaxWidth / grid.resolution));
-  auto value_at = [&](int c, int r) -> std::int8_t {
-    if (c < 0 || r < 0 || c >= width || r >= height) return 100;
-    return grid.cells[static_cast<std::size_t>(r) * width + c];
-  };
-  auto passable = [&](int c, int r) { return value_at(c, r) <= 0; };
-  auto thickness_ok = [&](int c, int r, int px, int py, int max_thick) {
-    int thick = 1;
-    for (int s = 1; s <= max_thick; ++s) {
-      if (value_at(c + s * px, r + s * py) <= 0) break;
-      ++thick;
-    }
-    for (int s = 1; s <= max_thick; ++s) {
-      if (value_at(c - s * px, r - s * py) <= 0) break;
-      ++thick;
-    }
-    return thick <= max_thick;
-  };
-  auto thin_passage_cell = [&](int c, int r, int px, int py, int max_thick) {
-    if (c < 0 || r < 0 || c >= width || r >= height) return false;
-    if (value_at(c, r) <= 0) return false;
-    if (!passable(c - px, r - py) || !passable(c + px, r + py)) return false;
-    return thickness_ok(c, r, px, py, max_thick);
-  };
-  auto door_width_span = [&](int c, int r, int px, int py, int max_thick) {
-    const int lx = py, ly = px;
-    int span_pos = 0;
-    int span_neg = 0;
-    for (int s = 1; s <= max_lat; ++s) {
-      if (!thin_passage_cell(c + s * lx, r + s * ly, px, py, max_thick)) break;
-      ++span_pos;
-    }
-    for (int s = 1; s <= max_lat; ++s) {
-      if (!thin_passage_cell(c - s * lx, r - s * ly, px, py, max_thick)) break;
-      ++span_neg;
-    }
-    const int span = 1 + span_pos + span_neg;
-    if (span < min_lat || span > max_lat) return false;
-    // Real doors sit between wall mass (jambs). Alcove partition tips / fins
-    // are free↔free thin strips that *end in free wrap* — carving those let
-    // Theta*/smoother publish GLOBAL paths through solid black (UI 穿墙).
-    const int pos_end_c = c + (span_pos + 1) * lx;
-    const int pos_end_r = r + (span_pos + 1) * ly;
-    const int neg_end_c = c - (span_neg + 1) * lx;
-    const int neg_end_r = r - (span_neg + 1) * ly;
-    if (value_at(pos_end_c, pos_end_r) <= 0) return false;
-    if (value_at(neg_end_c, neg_end_r) <= 0) return false;
-    return true;
-  };
-  // Passage axis (px,py); seal runs perpendicular. Door-width lateral span is
-  // required for every mouth type so long exterior walls stay blocked, but
-  // unknown-touching seals must use the same thickness as OpenPassable or
-  // PathCuts rejects real kitchen/alcove doors the planner just carved open.
-  auto seal_on_axis = [&](int px, int py) {
-    if (!passable(col - px, row - py) || !passable(col + px, row + py))
-      return false;
-    const std::int8_t neg = value_at(col - px, row - py);
-    const std::int8_t pos = value_at(col + px, row + py);
-    const bool mouth = (neg == 0 && pos < 0) || (neg < 0 && pos == 0) ||
-                       (neg < 0 && pos < 0) || (neg == 0 && pos == 0);
-    if (!mouth) return false;
-    const int max_thick =
-        (neg < 0 || pos < 0) ? max_thick_unknown : max_thick_free;
-    if (!thin_passage_cell(col, row, px, py, max_thick)) return false;
-    return door_width_span(col, row, px, py, max_thick);
-  };
-  return seal_on_axis(0, 1) || seal_on_axis(1, 0);
-}
 
 bool PreferTipAbandonAfterPathCut(int mapped_obstacle_rejects,
                                   double path_min_clearance_m) {
   (void)path_min_clearance_m;
   // Only leave after repeated live-occupied cuts. A single low-clearance
-  // chord near a passable door jamb must replan, not abandon the room.
+  // chord near a door jamb must replan, not abandon the room.
   return mapped_obstacle_rejects >= 2;
 }
 
@@ -289,24 +168,22 @@ bool PathCutsLiveOccupied(const ExplorationGrid& live,
       live.cells.size() != static_cast<std::size_t>(live.width) * live.height ||
       path_xy.size() < 2 || body_radius <= 0.)
     return false;
-  // Judge the same opened grid the planner uses: door-width seal carve +
-  // free-gap jamb erode. Structural walls (no free throat) stay lethal.
-  ExplorationGrid opened = live;
-  OpenPassableOpenings(&opened);
   const double resolution = live.resolution;
   const int width = live.width;
   const int height = live.height;
   const auto lethal = [&](int col, int row) {
     if (col < 0 || row < 0 || col >= width || row >= height) return true;
-    return opened.cells[static_cast<std::size_t>(row) * width + col] > 0;
+    return live.cells[static_cast<std::size_t>(row) * width + col] > 0;
   };
   const auto hits_body = [&](double world_x, double world_y) {
     if (std::hypot(world_x - robot_x, world_y - robot_y) < under_robot_m)
       return false;
-    const int col = static_cast<int>(std::floor((world_x - live.origin_x) / resolution));
-    const int row = static_cast<int>(std::floor((world_y - live.origin_y) / resolution));
-    const int reach = static_cast<int>(std::ceil(
-        (body_radius + std::sqrt(.5) * resolution) / resolution));
+    const int col =
+        static_cast<int>(std::floor((world_x - live.origin_x) / resolution));
+    const int row =
+        static_cast<int>(std::floor((world_y - live.origin_y) / resolution));
+    const int reach = static_cast<int>(
+        std::ceil((body_radius + std::sqrt(.5) * resolution) / resolution));
     for (int dy = -reach; dy <= reach; ++dy) {
       for (int dx = -reach; dx <= reach; ++dx) {
         const int x = col + dx, y = row + dy;
@@ -314,8 +191,10 @@ bool PathCutsLiveOccupied(const ExplorationGrid& live,
         const double center_x = live.origin_x + (x + .5) * resolution;
         const double center_y = live.origin_y + (y + .5) * resolution;
         const double half = .5 * resolution;
-        const double nearest_x = std::max(std::abs(world_x - center_x) - half, 0.);
-        const double nearest_y = std::max(std::abs(world_y - center_y) - half, 0.);
+        const double nearest_x =
+            std::max(std::abs(world_x - center_x) - half, 0.);
+        const double nearest_y =
+            std::max(std::abs(world_y - center_y) - half, 0.);
         if (std::hypot(nearest_x, nearest_y) <= body_radius) return true;
       }
     }
@@ -324,291 +203,32 @@ bool PathCutsLiveOccupied(const ExplorationGrid& live,
   const auto hits_centerline = [&](double world_x, double world_y) {
     if (std::hypot(world_x - robot_x, world_y - robot_y) < under_robot_m)
       return false;
-    const int col = static_cast<int>(std::floor((world_x - live.origin_x) / resolution));
-    const int row = static_cast<int>(std::floor((world_y - live.origin_y) / resolution));
+    const int col =
+        static_cast<int>(std::floor((world_x - live.origin_x) / resolution));
+    const int row =
+        static_cast<int>(std::floor((world_y - live.origin_y) / resolution));
     if (col < 0 || row < 0 || col >= width || row >= height) return true;
     return lethal(col, row);
-  };
-  // Raw occupied: only a jamb-bounded door seal that OpenPassable actually
-  // freed may be crossed. Partition tips / fins are not seals (see
-  // IsOpenableDoorSealCell), so GLOBAL chords through them stay 穿墙.
-  const double structural_radius = std::max(.18, body_radius);
-  const double skip_under = std::min(under_robot_m, .12);
-  const auto carved_door_seal = [&](int x, int y) {
-    return IsOpenableDoorSealCell(live, x, y) && !lethal(x, y);
-  };
-  const auto hits_raw_centerline = [&](double world_x, double world_y) {
-    if (std::hypot(world_x - robot_x, world_y - robot_y) < skip_under)
-      return false;
-    const int col =
-        static_cast<int>(std::floor((world_x - live.origin_x) / resolution));
-    const int row =
-        static_cast<int>(std::floor((world_y - live.origin_y) / resolution));
-    if (col < 0 || row < 0 || col >= width || row >= height) return true;
-    if (live.cells[static_cast<std::size_t>(row) * width + col] <= 0)
-      return false;
-    // Centerline on raw occupied that was not a carved door = hard 穿墙.
-    return !carved_door_seal(col, row);
-  };
-  const auto hits_raw_structural = [&](double world_x, double world_y) {
-    if (std::hypot(world_x - robot_x, world_y - robot_y) < skip_under)
-      return false;
-    const int col =
-        static_cast<int>(std::floor((world_x - live.origin_x) / resolution));
-    const int row =
-        static_cast<int>(std::floor((world_y - live.origin_y) / resolution));
-    const int reach = static_cast<int>(std::ceil(
-        (structural_radius + std::sqrt(.5) * resolution) / resolution));
-    for (int dy = -reach; dy <= reach; ++dy) {
-      for (int dx = -reach; dx <= reach; ++dx) {
-        const int x = col + dx, y = row + dy;
-        if (x < 0 || y < 0 || x >= width || y >= height) {
-          if (std::hypot(static_cast<double>(dx), static_cast<double>(dy)) *
-                  resolution <=
-              structural_radius)
-            return true;
-          continue;
-        }
-        if (live.cells[static_cast<std::size_t>(y) * width + x] <= 0) continue;
-        if (carved_door_seal(x, y)) continue;
-        const double center_x = live.origin_x + (x + .5) * resolution;
-        const double center_y = live.origin_y + (y + .5) * resolution;
-        const double half = .5 * resolution;
-        const double nearest_x = std::max(std::abs(world_x - center_x) - half, 0.);
-        const double nearest_y = std::max(std::abs(world_y - center_y) - half, 0.);
-        if (std::hypot(nearest_x, nearest_y) <= structural_radius) return true;
-      }
-    }
-    return false;
   };
   for (std::size_t index = 0; index < path_xy.size(); ++index) {
     const double x = path_xy[index].first;
     const double y = path_xy[index].second;
-    if (hits_body(x, y) || hits_centerline(x, y) || hits_raw_centerline(x, y) ||
-        hits_raw_structural(x, y))
-      return true;
+    if (hits_body(x, y) || hits_centerline(x, y)) return true;
     if (index == 0) continue;
     const double x0 = path_xy[index - 1].first;
     const double y0 = path_xy[index - 1].second;
     const double length = std::hypot(x - x0, y - y0);
-    // Dense samples so smooth Theta* arcs cannot sneak between cells.
     const int samples = std::max(
-        2, static_cast<int>(std::ceil(length / std::max(.01, .35 * resolution))));
+        2, static_cast<int>(
+               std::ceil(length / std::max(.01, .35 * resolution))));
     for (int sample = 1; sample <= samples; ++sample) {
       const double ratio = static_cast<double>(sample) / samples;
       const double wx = x0 + ratio * (x - x0);
       const double wy = y0 + ratio * (y - y0);
-      if (hits_body(wx, wy) || hits_centerline(wx, wy) ||
-          hits_raw_centerline(wx, wy) || hits_raw_structural(wx, wy))
-        return true;
+      if (hits_body(wx, wy) || hits_centerline(wx, wy)) return true;
     }
   }
   return false;
-}
-
-void OpenPassableOpenings(ExplorationGrid* grid) {
-  if (grid == nullptr || grid->resolution <= 0. || grid->width <= 2 || grid->height <= 2 ||
-      grid->cells.size() != static_cast<std::size_t>(grid->width) * grid->height) return;
-  const int width = grid->width;
-  const int height = grid->height;
-  auto value_at = [&](int col, int row) -> std::int8_t {
-    return grid->cells[static_cast<std::size_t>(row) * width + col];
-  };
-  auto set_free = [&](int col, int row) {
-    if (col < 0 || row < 0 || col >= width || row >= height) return;
-    grid->cells[static_cast<std::size_t>(row) * width + col] = 0;
-  };
-  // Carve only door-width SLAM seals. Do not run the old loose run-length
-  // carve that ate structural walls.
-  {
-    std::vector<std::uint8_t> clear(grid->cells.size(), 0);
-    for (int row = 0; row < height; ++row) {
-      for (int col = 0; col < width; ++col) {
-        if (!IsOpenableDoorSealCell(*grid, col, row)) continue;
-        clear[static_cast<std::size_t>(row) * width + col] = 1;
-      }
-    }
-    for (std::size_t index = 0; index < clear.size(); ++index)
-      if (clear[index]) grid->cells[index] = 0;
-  }
-  // Flood unknown through an already-free wall-to-wall gap. If SLAM thickened
-  // the posts so the free throat is under the footprint, erode only those
-  // posts. Live log: y≈3.0 free span was 0.25 m with known free on BOTH sides
-  // of the mouth — unknown_beyond alone skipped erode and ClearAt(0.22) / entry
-  // probes returned no path while the UI still showed an open doorway.
-  auto unknown_beyond = [&](bool horizontal, int fixed, int begin, int end) {
-    const int mid = (begin + end) / 2;
-    for (const int delta : {-1, 1}) {
-      for (int step = 1; step <= 12; ++step) {
-        const int col = horizontal ? mid : fixed + delta * step;
-        const int row = horizontal ? fixed + delta * step : mid;
-        if (col < 0 || row < 0 || col >= width || row >= height) break;
-        const std::int8_t value = value_at(col, row);
-        if (value < 0) return true;
-        if (value > 0) break;
-      }
-    }
-    return false;
-  };
-  auto free_beyond_both = [&](bool horizontal, int fixed, int begin, int end) {
-    const int mid = (begin + end) / 2;
-    bool neg = false;
-    bool pos = false;
-    for (const int delta : {-1, 1}) {
-      for (int step = 1; step <= 12; ++step) {
-        const int col = horizontal ? mid : fixed + delta * step;
-        const int row = horizontal ? fixed + delta * step : mid;
-        if (col < 0 || row < 0 || col >= width || row >= height) break;
-        const std::int8_t value = value_at(col, row);
-        if (value == 0 || value < 0) {
-          if (delta < 0)
-            neg = true;
-          else
-            pos = true;
-          break;
-        }
-        if (value > 0) break;
-      }
-    }
-    return neg && pos;
-  };
-  auto erode_jambs = [&](bool horizontal, int fixed, int* begin, int* end) {
-    if (!unknown_beyond(horizontal, fixed, *begin, *end) &&
-        !free_beyond_both(horizontal, fixed, *begin, *end))
-      return;
-    double gap_m = static_cast<double>(*end - *begin) * grid->resolution;
-    if (gap_m >= kDoorCarveTargetWidth) return;
-    // Posts must already be occupied wall cells bounding a free throat.
-    if (horizontal) {
-      if (*begin <= 0 || *end >= width) return;
-      if (value_at(*begin - 1, fixed) <= 0 || value_at(*end, fixed) <= 0) return;
-    } else {
-      if (*begin <= 0 || *end >= height) return;
-      if (value_at(fixed, *begin - 1) <= 0 || value_at(fixed, *end) <= 0) return;
-    }
-    const int need = static_cast<int>(std::ceil(
-        (kDoorCarveTargetWidth - gap_m) / (2. * grid->resolution)));
-    const int erode = std::max(1, std::min(kDoorJambErodeMaxCells, need));
-    for (int step = 1; step <= erode; ++step) {
-      if (horizontal) {
-        set_free(*begin - step, fixed);
-        set_free(*end + step - 1, fixed);
-      } else {
-        set_free(fixed, *begin - step);
-        set_free(fixed, *end + step - 1);
-      }
-    }
-    *begin -= erode;
-    *end += erode;
-  };
-  std::vector<int> budget(grid->cells.size(), -1);
-  auto seed_span = [&](bool horizontal, int fixed, int begin, int end) {
-    int span_begin = begin;
-    int span_end = end;
-    const int pinch_cells =
-        static_cast<int>(std::ceil(kDoorPinchMinWidth / grid->resolution));
-    const int sample_col = horizontal ? begin : fixed;
-    const int sample_row = horizontal ? fixed : begin;
-    if (sample_col < 0 || sample_row < 0 || sample_col >= width ||
-        sample_row >= height)
-      return;
-    const bool shaped =
-        OpeningCells(*grid, sample_col, sample_row, horizontal ? 1 : 0,
-                     horizontal ? 0 : 1) > 0;
-    const double gap_m =
-        static_cast<double>(end - begin) * grid->resolution;
-    const bool pinch =
-        (end - begin) >= pinch_cells && gap_m <= kNarrowMaxWidth &&
-        (unknown_beyond(horizontal, fixed, begin, end) ||
-         free_beyond_both(horizontal, fixed, begin, end));
-    if (!shaped && !pinch) return;
-    // Widen only true free pinches. Never invent a gap through solid wall.
-    if (pinch && gap_m < kDoorCarveTargetWidth)
-      erode_jambs(horizontal, fixed, &span_begin, &span_end);
-    const int span = std::max(1, span_end - span_begin);
-    bool known_free = false;
-    bool unknown = false;
-    for (int cursor = span_begin; cursor < span_end; ++cursor) {
-      const int col = horizontal ? cursor : fixed;
-      const int row = horizontal ? fixed : cursor;
-      if (col < 0 || row < 0 || col >= width || row >= height) continue;
-      const std::int8_t value = value_at(col, row);
-      if (value == 0) known_free = true;
-      else if (value < 0) unknown = true;
-    }
-    // A gap that is already entirely free is an observed corridor. Unknown
-    // beyond it is the next room, not a missing piece of this opening.
-    if (!known_free || !unknown) return;
-    // Prefer a longer flood budget so the kitchen / bedroom nose clears the
-    // jambs and the planner can step into still-white rooms.
-    const int max_span_cells =
-        static_cast<int>(std::floor(kNarrowMaxWidth / grid->resolution));
-    const int flood_budget = std::max(
-        std::min(span, max_span_cells),
-        static_cast<int>(std::ceil(1.20 / grid->resolution)));
-    for (int cursor = span_begin; cursor < span_end; ++cursor) {
-      const int col = horizontal ? cursor : fixed;
-      const int row = horizontal ? fixed : cursor;
-      if (col < 0 || row < 0 || col >= width || row >= height) continue;
-      if (value_at(col, row) >= 0) continue;
-      const std::size_t index = static_cast<std::size_t>(row) * width + col;
-      budget[index] = std::max(budget[index], flood_budget);
-    }
-  };
-  for (int row = 0; row < height; ++row) {
-    int col = 0;
-    while (col < width) {
-      if (value_at(col, row) <= 0) { ++col; continue; }
-      const int begin = col + 1;
-      int end = begin;
-      while (end < width && value_at(end, row) <= 0) ++end;
-      if (end < width && value_at(end, row) > 0)
-        seed_span(true, row, begin, end);
-      col = std::max(end, col + 1);
-    }
-  }
-  for (int col = 0; col < width; ++col) {
-    int row = 0;
-    while (row < height) {
-      if (value_at(col, row) <= 0) { ++row; continue; }
-      const int begin = row + 1;
-      int end = begin;
-      while (end < height && value_at(col, end) <= 0) ++end;
-      if (end < height && value_at(col, end) > 0)
-        seed_span(false, col, begin, end);
-      row = std::max(end, row + 1);
-    }
-  }
-  std::deque<int> queue;
-  for (std::size_t index = 0; index < budget.size(); ++index)
-    if (budget[index] >= 0) queue.push_back(static_cast<int>(index));
-  constexpr int cardinal_col[] = {-1, 1, 0, 0};
-  constexpr int cardinal_row[] = {0, 0, -1, 1};
-  while (!queue.empty()) {
-    const int current = queue.front();
-    queue.pop_front();
-    if (budget[static_cast<std::size_t>(current)] == 0) continue;
-    const int row = current / width;
-    const int col = current % width;
-    for (int direction = 0; direction < 4; ++direction) {
-      const int next_col = col + cardinal_col[direction];
-      const int next_row = row + cardinal_row[direction];
-      if (next_col < 0 || next_row < 0 || next_col >= width || next_row >= height) continue;
-      const int next = next_row * width + next_col;
-      if (value_at(next_col, next_row) >= 0) continue;
-      // Seeds are already passable openings. Keep flooding unknown with the
-      // remaining budget even after the cell is no longer "opening-shaped":
-      // requiring OpeningCells here stopped at the jambs, left the kitchen
-      // unknown, and made every entry probe unplannable (planner cannot step
-      // into unknown). Budget reaches ~1.20 m into the next room.
-      const int next_budget = budget[static_cast<std::size_t>(current)] - 1;
-      if (next_budget <= budget[static_cast<std::size_t>(next)]) continue;
-      budget[static_cast<std::size_t>(next)] = next_budget;
-      queue.push_back(next);
-    }
-  }
-  for (std::size_t index = 0; index < budget.size(); ++index)
-    if (budget[index] >= 0) grid->cells[index] = 0;
 }
 
 FrontierExplorer::FrontierExplorer(FrontierExplorerConfig config)
@@ -617,10 +237,10 @@ FrontierExplorer::FrontierExplorer(FrontierExplorerConfig config)
 void FrontierExplorer::UpdateMap(ExplorationGrid map) {
   observation_map_ = map;
   unresolved_frontier_cells_ = CountRawFrontierCells();
-  // Partition observed free space into topological regions before carving.
-  // Door necks stay as edges between rooms so DFS can finish one room first.
+  // Partition observed free space into topological regions. Door necks stay
+  // as edges between rooms so DFS can finish one room first. Planning uses
+  // the same occupancy as the mapper — SLAM occupied is never carved open.
   regions_.Update(observation_map_, kPlanningRadius);
-  OpenPassableOpenings(&map);
   map_ = std::move(map);
 }
 
@@ -688,8 +308,7 @@ bool FrontierExplorer::SafeViewpoint(int col, int row) const {
   // The search graph stays on known free cells. Unknown may lie inside the
   // clearance disk, but the viewpoint itself is not placed in unknown space.
   if (!Free(col, row)) return false;
-  // Tour goals must sit on mapper-observed free, not OpenPassable-flooded
-  // unknown. Flooded noses past exterior walls looked like "GOAL outside map".
+  // Tour goals must sit on mapper-observed free (planning map == observation).
   if (!RawFree(col, row)) return false;
   if (ClearAt(col, row, config_.footprint_clearance)) return true;
   // Narrow-passage candidate: permit only the physical footprint radius when
@@ -1885,16 +1504,12 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
   direction_x /= approach_length;
   direction_y /= approach_length;
   // Entry traverse/goal clearance matches the locked-mouth planner radius
-  // (0.14 m). Requiring the open-space 0.22 m left OpenPassable noses
-  // unselectable while the flooded throat was already Free (live: frontier
-  // (2.86,4.70) × dozens with attempts stuck at 1).
+  // (0.14 m); open-space 0.22 m is too strict in door throats.
   constexpr double kEntryTraverseClearance = .14;
   constexpr double kEntryGoalClearance = .14;
   const auto near_observed_free = [&](int col, int row) {
     if (RawFree(col, row)) return true;
-    // Short OpenPassable nose into the next room may not be RawFree yet; keep
-    // only cells that still touch observed free so probes cannot jump into
-    // flooded void past an exterior wall ("GOAL outside map").
+    // Allow cells that touch observed free so probes stay near mapped space.
     for (int dy = -2; dy <= 2; ++dy) {
       for (int dx = -2; dx <= 2; ++dx) {
         if (RawFree(col + dx, row + dy)) return true;
@@ -1931,9 +1546,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
   }
   if (start < 0) return std::nullopt;
 
-  // The entry probe is allowed to use only the planning copy. OpenPassable-
-  // Openings() converts a narrow, partly observed doorway — and a short free
-  // nose into the next room — so theta* can step past the frontier.
+  // Entry probe walks the planning map (same occupancy as the mapper).
   std::vector<int> distance(map_.cells.size(), -1);
   std::deque<int> queue{start};
   distance[start] = 0;
@@ -2006,8 +1619,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
   }
   if (best) return best;
   // Geometric fallback: place the probe on the approach axis when BFS cannot
-  // reach a candidate. Uses planning Free (incl. OpenPassable flood). Prefer
-  // the lateral with the largest jamb clearance, not the first hit.
+  // reach a candidate. Prefer the lateral with the largest jamb clearance.
   const double lateral_unit_x = -direction_y;
   const double lateral_unit_y = direction_x;
   std::optional<ExplorationGoal> fallback;

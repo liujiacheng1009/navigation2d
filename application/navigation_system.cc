@@ -360,8 +360,8 @@ class NavigationSystem::Impl {
         }
       }
       // Keep Theta* long chords when they stay footprint-valid. Narrow-door
-      // entry is owned by OpenPassable / pinch clearance, not by swapping
-      // planners for a few centimetres of clearance (that made sawtooth GLOBAL).
+      // entry uses a tighter radius / A*, not a planner swap for a few
+      // centimetres of clearance (that made sawtooth GLOBAL).
       // A replan is a new ordered route contract. Reset the controller's
       // internal projection state even when the new path has similar endpoints.
       controller = MakeController(config);
