@@ -511,32 +511,35 @@ class AutonomousExplorer final : public rclcpp::Node {
     config.max_reverse_velocity = .10;
     // CAD: chassis 290×230 mm, wheel envelope half-width 0.147 m, max
     // footprint radius ~0.207 m. Match production navigation2d_node (+margin).
-    // Locked-mouth entry: circular inscribed radius (no rectangular footprint)
-    // so CollisionMonitor BodyHalfWidth matches the planner throat instead of
-    // latching STOP on jambs at ~0.15 m while the free gap is wider.
+    // Always plan at the chassis planning radius (0.22 m). The old entry
+    // 0.14 m / pinch acceptance <0.15 m let GLOBAL thread furniture V-gaps
+    // the body cannot fit (UI: yellow path hard-squeezing a tip pocket).
     const bool entry_drive = pending_entry_goal_ || locked_entry_mouth_;
     // Entry: A* only. Theta* long chords cut nearby wall tips even when the
     // locked mouth is metres wide (live: gap=2.15 Entry probe rejected
     // path-intersects → abandon → tour loop → failed_goals thrash).
     config.planner = entry_drive ? "astar" : "theta_star";
-    config.robot_radius = entry_drive ? .14 : .22;
+    config.robot_radius = .22;
     if (entry_drive) {
+      // Circular inscribed footprint for mouth crawl (monitor / RPP), but
+      // keep the same 0.22 m radius as open explore.
       config.footprint.clear();
     } else {
       config.footprint = {{-.145, -.147}, {.115, -.147}, {.145, -.132},
                           {.145, .132}, {.115, .147}, {-.145, .147}};
     }
     // Clearance tiers (strategy, not scene knobs):
-    //   entry  — locked mouth crawl (tightest)
+    //   entry  — locked mouth crawl (softer inflation only)
     //   pinch  — automatic retry when open-tier finds no route through a
     //            door-width throat (any map, not kitchen-specific)
     //   open   — default explore: prefer mid-aisle over wall feet
+    // Lethal radius stays 0.22 in all tiers; tiers only change soft inflation.
     const bool pinch_plan = narrow_passage_retry_ && !entry_drive && !returning;
     if (entry_drive) {
-      config.inflation_radius = .20;
+      config.inflation_radius = .28;
       config.inflation_cost_scaling = 8.0;
     } else if (pinch_plan) {
-      config.inflation_radius = .28;
+      config.inflation_radius = .32;
       config.inflation_cost_scaling = 7.0;
     } else {
       config.inflation_radius = .42;
@@ -686,38 +689,27 @@ class AutonomousExplorer final : public rclcpp::Node {
       mapped_obstacle_rejects_ = 0;
       last_path_signature_ = initial_state.path_signature;
       last_path_min_clearance_m_ = initial_state.global_planning.path_min_clearance_m;
-      // Open-tier wall-foot chords: refuse and fall through to pinch.
-      // Open-tier paths that graze partition tips (~0.18–0.21 m) still park
-      // CARROT on the corner; require a clearer aisle before accepting.
-      if (!entry_drive && !returning && !retreat_goal_ && !pinch_plan &&
-          last_path_min_clearance_m_ > 0. && last_path_min_clearance_m_ < .22) {
+      // Refuse any explore path thinner than the planning radius — including
+      // entry / pinch tiers. Soft inflation may still prefer wider aisles;
+      // lethal fit must remain ≥0.22 m so tip pockets are not "hard squeezed".
+      if (!returning && !retreat_goal_ && last_path_min_clearance_m_ > 0. &&
+          last_path_min_clearance_m_ < .22) {
         if (initial_state.path_signature != 0)
           cooled_signatures_.insert(initial_state.path_signature);
-        last_planning_failure_ = "wall-scrape path in open clearance";
+        last_planning_failure_ = pinch_plan ? "pinch path still wall-scrape"
+                                            : "wall-scrape path in open clearance";
         RCLCPP_WARN(get_logger(),
                     "Navigation2D rejected goal before execution: %s "
-                    "(clearance=%.3f)",
-                    last_planning_failure_.c_str(), last_path_min_clearance_m_);
+                    "(clearance=%.3f entry=%d pinch=%d)",
+                    last_planning_failure_.c_str(), last_path_min_clearance_m_,
+                    entry_drive ? 1 : 0, pinch_plan ? 1 : 0);
         navigation_.reset();
-        if (!narrow_passage_retry_) {
+        if (!entry_drive && !pinch_plan && !narrow_passage_retry_) {
           narrow_passage_retry_ = true;
           const bool ok = StartNavigation(goal, returning, latest_map_retry);
           narrow_passage_retry_ = false;
           if (ok) return true;
         }
-        return false;
-      }
-      // Pinch may thread a door (~0.14 m) but must not accept a corner-tip
-      // scrape (live: clearance=0.13 into south wall pocket).
-      if (!entry_drive && !returning && !retreat_goal_ && pinch_plan &&
-          last_path_min_clearance_m_ > 0. && last_path_min_clearance_m_ < .15) {
-        if (initial_state.path_signature != 0)
-          cooled_signatures_.insert(initial_state.path_signature);
-        last_planning_failure_ = "pinch path still wall-scrape";
-        RCLCPP_WARN(get_logger(),
-                    "Navigation2D rejected pinch path: clearance=%.3f",
-                    last_path_min_clearance_m_);
-        navigation_.reset();
         return false;
       }
       // Do not classify a frontier from the controller's first sample. At a
@@ -2872,14 +2864,10 @@ class AutonomousExplorer final : public rclcpp::Node {
     }
     const double robot_x = pose_ ? pose_->pose.position.x : path_xy.front().first;
     const double robot_y = pose_ ? pose_->pose.position.y : path_xy.front().second;
-    // Entry may use a slightly slimmer body on the opened throat, but never
-    // below 0.14 m — 0.10 m missed diagonal corner cuts through raw walls
-    // (UI: GLOBAL path through solid black). Structural checks inside
-    // PathCutsLiveOccupied still use ≥0.14 m regardless.
-    const double body =
-        (pending_entry_goal_ || locked_entry_mouth_) ? .14 : .22;
+    // Same body as the planner radius — entry no longer uses a 0.14 m
+    // exemption that let GLOBAL squeeze tip gaps PathCuts would otherwise cut.
     return navigation2d::PathCutsLiveOccupied(live, path_xy, robot_x, robot_y,
-                                              body);
+                                              .22);
   }
 
   bool TourSegmentCutsWall(double x0, double y0, double x1, double y1) const {
