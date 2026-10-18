@@ -546,8 +546,10 @@ class AutonomousExplorer final : public rclcpp::Node {
       config.inflation_radius = .28;
       config.inflation_cost_scaling = 7.0;
     } else {
-      config.inflation_radius = .34;
-      config.inflation_cost_scaling = 6.0;
+      // Stronger soft inflation than pinch: mid-aisle preference. Doors that
+      // open-tier cannot thread still fall through via no-route → pinch.
+      config.inflation_radius = .36;
+      config.inflation_cost_scaling = 9.0;
     }
     // The global plan already enforces the footprint buffer.  A long local
     // collision projection into sparse unknown cells caused false stops in
@@ -639,28 +641,23 @@ class AutonomousExplorer final : public rclcpp::Node {
                     "Navigation2D rejected goal before execution: %s",
                     last_planning_failure_.c_str());
         navigation_.reset();
-        // Pinch is only for sealed door throats (no route / scrape). Never
-        // pinch-retry "goal occupied" — that accepted corner-tip viewpoints
-        // at ~0.18 m and drove the chassis straight into the wall (UI red box).
+        // Pinch only when open/entry finds NO route (sealed throat). Never
+        // pinch-retry wall-scrape — that re-plans the whole map with looser
+        // inflation and accepts wall-foot GLOBAL (static-map collisions).
+        // Never pinch-retry "goal occupied" (corner-tip viewpoints).
         const bool goal_in_obstacle =
             last_planning_failure_.find("goal occupied") != std::string::npos;
         const bool pinch_worthy =
             !goal_in_obstacle &&
             (last_planning_failure_.find("no route") != std::string::npos ||
              last_planning_failure_.find("no path") != std::string::npos ||
-             last_planning_failure_.find("wall-scrape") != std::string::npos ||
-             last_planning_failure_.find("first-segment") != std::string::npos);
-        // Entry also pinch-retries first-segment: open-tier paths from across
-        // the room grazed jambs and abandoned sealed mouths before open-loop.
+             (entry_drive &&
+              last_planning_failure_.find("first-segment") != std::string::npos));
         if (!returning && !retreat_goal_ && !narrow_passage_retry_ &&
-            pinch_worthy &&
-            (!entry_drive ||
-             last_planning_failure_.find("first-segment") != std::string::npos ||
-             last_planning_failure_.find("no route") != std::string::npos ||
-             last_planning_failure_.find("no path") != std::string::npos)) {
+            pinch_worthy) {
           narrow_passage_retry_ = true;
           RCLCPP_INFO(get_logger(),
-                      "%s clearance blocked (%s); retrying pinch clearance",
+                      "%s no route (%s); retrying pinch clearance",
                       entry_drive ? "Entry" : "Open",
                       last_planning_failure_.c_str());
           const bool ok = StartNavigation(goal, returning, latest_map_retry);
@@ -693,14 +690,11 @@ class AutonomousExplorer final : public rclcpp::Node {
       mapped_obstacle_rejects_ = 0;
       last_path_signature_ = initial_state.path_signature;
       last_path_min_clearance_m_ = initial_state.global_planning.path_min_clearance_m;
-      // path_min_clearance_m is EXTRA margin (dist − robot_radius), not raw
-      // obstacle distance. Lethal fit is already kPlanningRadius in the
-      // planner; these checks only prefer mid-aisle (open) or refuse tip
-      // scrapes (pinch). Entry is excluded — mouth crawl is intentionally
-      // close to jambs.
-      // Open: wall-foot chords → fall through to pinch.
-      // Margin == 0 (dist ≤ body radius) must count — requiring "> 0" let
-      // lethal-tight paths start and wedge the chassis mid-corridor (UI tip).
+      // path_min_clearance_m is EXTRA margin (dist − robot_radius).
+      // Open: reject wall feet; cool signature and retry OPEN once (same
+      // inflation). Pinch only for true mouths — whole-map pinch on scrape
+      // produced the static-map wall collisions that needed escape.
+      // Margin == 0 must count (dist ≤ body radius).
       if (!entry_drive && !returning && !retreat_goal_ && !pinch_plan &&
           std::isfinite(last_path_min_clearance_m_) &&
           last_path_min_clearance_m_ < navigation2d::kOpenPreferPathMargin) {
@@ -712,8 +706,18 @@ class AutonomousExplorer final : public rclcpp::Node {
                     "(margin=%.3f)",
                     last_planning_failure_.c_str(), last_path_min_clearance_m_);
         navigation_.reset();
-        if (!narrow_passage_retry_) {
+        if (!open_scrape_open_retry_) {
+          open_scrape_open_retry_ = true;
+          const bool ok = StartNavigation(goal, returning, latest_map_retry);
+          open_scrape_open_retry_ = false;
+          if (ok) return true;
+        }
+        // Door mouths: open inflation may only fit with thin margin — pinch.
+        if (!narrow_passage_retry_ && PassableMouthGoal(goal)) {
           narrow_passage_retry_ = true;
+          RCLCPP_INFO(get_logger(),
+                      "Open scrape on corridor mouth (margin=%.3f); pinch",
+                      last_path_min_clearance_m_);
           const bool ok = StartNavigation(goal, returning, latest_map_retry);
           narrow_passage_retry_ = false;
           if (ok) return true;
@@ -4128,6 +4132,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   int mapped_obstacle_rejects_ = 0;
   bool mapped_obstacle_retry_ = false;
   bool narrow_passage_retry_ = false;
+  bool open_scrape_open_retry_ = false;
   bool reject_pose_valid_ = false;
   int reject_cell_x_ = 0;
   int reject_cell_y_ = 0;

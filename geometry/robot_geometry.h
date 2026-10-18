@@ -13,7 +13,8 @@ inline constexpr double kPlanningRadius = .22;
 // Comparing that field to kPlanningRadius would wrongly demand ~0.44 m to
 // walls (corridor width ~0.88 m) and reject ordinary indoor aisles.
 //
-// Open tier: prefer mid-aisle; thinner open paths fall through to pinch.
+// Open tier: prefer mid-aisle (hard accept). Thin open paths cool signature
+// and retry open; pinch only for no-route or PassableMouth scrape.
 inline constexpr double kOpenPreferPathMargin = .22;
 // Pinch / doorway: body already fits (planner lethal = kPlanningRadius).
 // A 0.70 m door has half-width 0.35 → margin ≈ 0.13 with kPlanningRadius;
