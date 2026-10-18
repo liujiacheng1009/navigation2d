@@ -1565,10 +1565,10 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
   if (approach_length < .05) return std::nullopt;
   direction_x /= approach_length;
   direction_y /= approach_length;
-  // Match the planning radius. The old 0.14 m floor let SelectGoals / entry
-  // push poses into V-tip pinches the chassis cannot traverse.
-  constexpr double kEntryTraverseClearance = kPlanningRadius;
-  constexpr double kEntryGoalClearance = kPlanningRadius;
+  // Door probes use the body width. Open-space nomination stays on the
+  // corner circle so a V-gap the chassis cannot turn through is not a goal.
+  constexpr double kEntryTraverseClearance = kBodyHalfWidth;
+  constexpr double kEntryGoalClearance = kBodyHalfWidth;
   const auto near_observed_free = [&](int col, int row) {
     if (RawFree(col, row)) return true;
     // Allow cells that touch observed free so probes stay near mapped space.
@@ -1664,7 +1664,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
       // frontier or an unrelated free cell behind a nearby wall.
       if (std::hypot(relative_x, relative_y) > maximum_depth_m + .20) continue;
       const double clearance = OccupiedClearanceAt(map_, col, row);
-      if (clearance < kPlanningRadius) continue;
+      if (clearance < kBodyHalfWidth) continue;
       // Clearance dominates: mid-gap beats a deeper jamb-hugging cell.
       const double score = 0.35 * depth + 5.5 * clearance - 3.0 * lateral -
                            .01 * static_cast<double>(distance[index]);
@@ -1697,7 +1697,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
       const int row = static_cast<int>(std::floor((y - map_.origin_y) / map_.resolution));
       if (!entry_goal(col, row)) continue;
       const double clearance = OccupiedClearanceAt(map_, col, row);
-      if (clearance < kPlanningRadius) continue;
+      if (clearance < kBodyHalfWidth) continue;
       if (clearance > fallback_clear) {
         fallback_clear = clearance;
         ExplorationGoal probe = frontier_goal;
@@ -1708,7 +1708,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
         fallback = probe;
       }
     }
-    if (fallback && fallback_clear >= kPlanningRadius) return fallback;
+    if (fallback && fallback_clear >= kBodyHalfWidth) return fallback;
   }
   return fallback;
 }
