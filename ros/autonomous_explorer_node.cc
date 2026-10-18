@@ -861,9 +861,10 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   void PublishFrontierDebug() {
-    // Cells are captured at SelectGoals time; prune against the live map so
-    // the UI does not keep painting free interior after unknown fills in.
-    explorer_.PruneStaleDebugCells();
+    // Rebuild FR cells from the live map every publish. SelectGoals snapshots
+    // go stale while navigating (unknown→free), which left the overlay empty
+    // after prune-only. CG/SG markers still come from the last SelectGoals.
+    explorer_.RefreshDebugFrontierCells();
     const auto& snap = explorer_.debug_snapshot();
     std::string json = "{\"cells\":[";
     bool first = true;

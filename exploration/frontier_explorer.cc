@@ -448,22 +448,57 @@ bool FrontierExplorer::HasFreeLineOfSight(
   }
 }
 
-void FrontierExplorer::PruneStaleDebugCells() {
-  if (observation_map_.resolution <= 0. || observation_map_.width <= 0 ||
-      observation_map_.height <= 0) {
-    debug_snapshot_.cells.clear();
+void FrontierExplorer::RefreshDebugFrontierCells() {
+  debug_snapshot_.cells.clear();
+  if (observation_map_.resolution <= 0. || observation_map_.width <= 2 ||
+      observation_map_.height <= 2 ||
+      observation_map_.cells.size() !=
+          static_cast<std::size_t>(observation_map_.width *
+                                   observation_map_.height))
     return;
+  const int width = observation_map_.width;
+  const int height = observation_map_.height;
+  std::vector<unsigned char> frontier(
+      static_cast<std::size_t>(width * height), 0);
+  std::vector<unsigned char> visited(
+      static_cast<std::size_t>(width * height), 0);
+  for (int row = 0; row < height; ++row)
+    for (int col = 0; col < width; ++col)
+      if (RawFrontier(col, row))
+        frontier[static_cast<std::size_t>(row * width + col)] = 1;
+  int cluster_id = 0;
+  for (int seed = 0; seed < width * height; ++seed) {
+    if (!frontier[static_cast<std::size_t>(seed)] ||
+        visited[static_cast<std::size_t>(seed)])
+      continue;
+    ++cluster_id;
+    std::deque<int> queue{seed};
+    visited[static_cast<std::size_t>(seed)] = 1;
+    while (!queue.empty()) {
+      const int current = queue.front();
+      queue.pop_front();
+      const int row = current / width;
+      const int col = current % width;
+      // Use observation origins (RawFrontier source), not planning map_.
+      const double x =
+          observation_map_.origin_x + (col + .5) * observation_map_.resolution;
+      const double y =
+          observation_map_.origin_y + (row + .5) * observation_map_.resolution;
+      debug_snapshot_.cells.push_back({x, y, cluster_id});
+      for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+          const int nr = row + dy;
+          const int nc = col + dx;
+          if (nr < 0 || nc < 0 || nr >= height || nc >= width) continue;
+          const int next = nr * width + nc;
+          if (!frontier[static_cast<std::size_t>(next)] ||
+              visited[static_cast<std::size_t>(next)])
+            continue;
+          visited[static_cast<std::size_t>(next)] = 1;
+          queue.push_back(next);
+        }
+    }
   }
-  std::vector<FrontierDebugSnapshot::Cell> kept;
-  kept.reserve(debug_snapshot_.cells.size());
-  for (const auto& cell : debug_snapshot_.cells) {
-    const int col = static_cast<int>(std::floor(
-        (cell.x - observation_map_.origin_x) / observation_map_.resolution));
-    const int row = static_cast<int>(std::floor(
-        (cell.y - observation_map_.origin_y) / observation_map_.resolution));
-    if (RawFrontier(col, row)) kept.push_back(cell);
-  }
-  debug_snapshot_.cells = std::move(kept);
 }
 
 std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(

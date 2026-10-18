@@ -203,9 +203,9 @@ class FrontierExplorer {
   std::size_t candidate_frontier_goals() const { return candidate_frontier_goals_; }
   // Last SelectGoals geometry for the debug UI (cells / clusters / goals).
   const FrontierDebugSnapshot& debug_snapshot() const { return debug_snapshot_; }
-  // Drop debug cells that are no longer RawFrontier on the live observation
-  // map (unknown stripes get filled in between SelectGoals calls).
-  void PruneStaleDebugCells();
+  // Rebuild frontier-cell overlay from the live observation map (RawFrontier
+  // 8-connected components). Keeps last SelectGoals cluster_goals / goals.
+  void RefreshDebugFrontierCells();
 
  private:
   bool Free(int col, int row) const;
