@@ -699,8 +699,10 @@ class AutonomousExplorer final : public rclcpp::Node {
       // scrapes (pinch). Entry is excluded — mouth crawl is intentionally
       // close to jambs.
       // Open: wall-foot chords → fall through to pinch.
+      // Margin == 0 (dist ≤ body radius) must count — requiring "> 0" let
+      // lethal-tight paths start and wedge the chassis mid-corridor (UI tip).
       if (!entry_drive && !returning && !retreat_goal_ && !pinch_plan &&
-          last_path_min_clearance_m_ > 0. &&
+          std::isfinite(last_path_min_clearance_m_) &&
           last_path_min_clearance_m_ < navigation2d::kOpenPreferPathMargin) {
         if (initial_state.path_signature != 0)
           cooled_signatures_.insert(initial_state.path_signature);
@@ -720,7 +722,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       }
       // Pinch may thread a door but must not accept a corner-tip scrape.
       if (!entry_drive && !returning && !retreat_goal_ && pinch_plan &&
-          last_path_min_clearance_m_ > 0. &&
+          std::isfinite(last_path_min_clearance_m_) &&
           last_path_min_clearance_m_ < navigation2d::kPinchMinPathMargin) {
         if (initial_state.path_signature != 0)
           cooled_signatures_.insert(initial_state.path_signature);
@@ -1715,9 +1717,8 @@ class AutonomousExplorer final : public rclcpp::Node {
         (side_range < .30 && front_range > 0. && front_range < .70) ||
         (side_range < .40 && front_range >= .70);  // open-forward wall foot
     if (!tip_close) return false;
-    // clearance==0 (no path / goal occupied) still counts — that was the
-    // live doorway thrash: IsCornerTipStall rejected <=0 and never demoted.
-    if (path_clearance_m > 0. && path_clearance_m >= .20) return false;
+    // Margin 0 = body already at lethal distance — still a scrape.
+    if (std::isfinite(path_clearance_m) && path_clearance_m >= .20) return false;
     return true;
   }
 
@@ -1795,7 +1796,8 @@ class AutonomousExplorer final : public rclcpp::Node {
     const int scrapes = recovery_.wall_scrapes;
     if (StartNavigation(active_goal_, false, true)) {
       recovery_.wall_scrapes = scrapes;  // Begin must not erase the budget
-      if (last_path_min_clearance_m_ > 0. && last_path_min_clearance_m_ < .16) {
+      if (std::isfinite(last_path_min_clearance_m_) &&
+          last_path_min_clearance_m_ < .16) {
         if (last_path_signature_ != 0)
           cooled_signatures_.insert(last_path_signature_);
         return UnstickFromPinch("replanned path still pinch-scrape");
@@ -1810,7 +1812,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     // last_path_min_clearance_m_ is EXTRA margin beyond the body.
     const bool scrape =
         recovery_.side_peels > 0 || recovery_.wall_scrapes > 0 ||
-        (last_path_min_clearance_m_ > 0. &&
+        (std::isfinite(last_path_min_clearance_m_) &&
          last_path_min_clearance_m_ < navigation2d::kPinchMinPathMargin);
     if (!scrape) return false;
     return UnstickFromPinch("after wall peel; leave pinch pocket");
@@ -3410,7 +3412,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       const double right = SectorMinRange(-std::acos(-1.) / 2., .40);
       const double side =
           std::min(left > 0. ? left : 10., right > 0. ? right : 10.);
-      if (path_clear > 0. && path_clear < .15 && goal_dist < 1.60 &&
+      if (std::isfinite(path_clear) && path_clear < .15 && goal_dist < 1.60 &&
           state.path_progress_m >= .25 &&
           IsCornerTipStall(path_clear, front, side)) {
         geometry_msgs::msg::Twist stop;
@@ -3811,7 +3813,8 @@ class AutonomousExplorer final : public rclcpp::Node {
                 ? state.global_planning.path_min_clearance_m
                 : last_path_min_clearance_m_;
         if (IsOpenWallScrape(path_clear, side_range, true) ||
-            (side_range < .35 && path_clear > 0. && path_clear < .18)) {
+            (side_range < .35 && std::isfinite(path_clear) &&
+             path_clear < .18)) {
           BreakWallScrapeThrash("open-forward wall-scrape STOP");
           return;
         }
@@ -3852,7 +3855,7 @@ class AutonomousExplorer final : public rclcpp::Node {
                 : last_path_min_clearance_m_;
         // Prefer ban+replan over peel when the committed path itself scrapes.
         if (IsOpenWallScrape(path_clear, side_range, forward_clearly_open) ||
-            (path_clear > 0. && path_clear < .14)) {
+            (std::isfinite(path_clear) && path_clear < .14)) {
           BreakWallScrapeThrash("side speck wall-scrape path");
           return;
         }
