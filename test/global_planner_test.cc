@@ -523,4 +523,37 @@ int main() {
       hug_then_door, rooms_map, navigation2d::kPlanningRadius);
   assert(hug_profile.has_open_wall_scrape);
   assert(!navigation2d::PathClearanceProfileAcceptable(hug_profile));
+
+  // Convex island corner in an open room: one-sided hug must scrape even when
+  // local free_width looks "door-sized" on a single perpendicular.
+  const char* island_path = "/tmp/navigation2d_island_corner_profile_test.json";
+  {
+    std::ofstream island_output(island_path);
+    constexpr int kW = 80, kH = 60;  // 4.0 m x 3.0 m
+    island_output << R"({"width":80,"height":60,"resolution":0.05,"cells":[)";
+    for (int i = 0; i < kW * kH; ++i) {
+      const int col = i % kW, row = i / kW;
+      const bool wall = row == 0 || row == kH - 1 || col == 0 || col == kW - 1;
+      // Island block around (2.0, 1.5).
+      const bool island = col >= 35 && col <= 45 && row >= 25 && row <= 35;
+      island_output << (i ? "," : "") << ((wall || island) ? 100 : 0);
+    }
+    island_output << "]}";
+  }
+  navigation2d::NavigationConfig island_config;
+  island_config.robot_radius = navigation2d::kPlanningRadius;
+  island_config.inflation_radius = .34;
+  navigation2d::LayeredCostmap island_map(navigation2d::Grid2d::Load(island_path),
+                                          island_config);
+  // Path grazes the SW corner of the island (near x=1.70, y=1.20).
+  navigation2d::Path corner_hug{
+      navigation2d::MakePose2d(.50, 1.20, 0.),
+      navigation2d::MakePose2d(1.20, 1.20, 0.),
+      navigation2d::MakePose2d(1.70, 1.20, 0.),
+      navigation2d::MakePose2d(1.70, 1.70, 0.),
+      navigation2d::MakePose2d(1.70, 2.40, 0.)};
+  const auto corner_profile = navigation2d::AnalyzePathClearanceProfile(
+      corner_hug, island_map, navigation2d::kPlanningRadius);
+  assert(corner_profile.has_open_wall_scrape || corner_profile.has_lethal_tip);
+  assert(!navigation2d::PathClearanceProfileAcceptable(corner_profile));
 }

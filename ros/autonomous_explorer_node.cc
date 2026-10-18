@@ -1788,12 +1788,10 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   bool BreakWallScrapeAfterPeel() {
-    // last_path_min_clearance_m_ is EXTRA margin beyond the body.
-    const bool scrape =
-        recovery_.side_peels > 0 || recovery_.wall_scrapes > 0 ||
-        (std::isfinite(last_path_min_clearance_m_) &&
-         last_path_min_clearance_m_ < navigation2d::kPinchMinPathMargin);
-    if (!scrape) return false;
+    // Only when this peel was started from an active scrape session.
+    // Stale last_path_min_clearance_m_==0 after UnstickFromPinch::Clear()
+    // used to re-enter here forever (UI: tip escape thrash at fixed pose).
+    if (recovery_.side_peels <= 0 && recovery_.wall_scrapes <= 0) return false;
     return UnstickFromPinch("after wall peel; leave pinch pocket");
   }
 
