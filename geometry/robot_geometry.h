@@ -4,35 +4,20 @@
 
 namespace navigation2d {
 
-// Chassis outline. Lateral half-width is what limits a straight doorway;
-// the corner radius is what limits a turn or an unknown heading.
-// Footprint (metres): rear/front ±kBodyHalfLength, sides ±kBodyHalfWidth,
-// nose chamfer at (kBodyNoseChamferX, ±kBodyNoseChamferY).
-inline constexpr double kBodyHalfLength = .145;
-inline constexpr double kBodyHalfWidth = .147;
-inline constexpr double kBodyNoseChamferX = .115;
-inline constexpr double kBodyNoseChamferY = .132;
-constexpr double DetailSqrt(double x) {
-  double guess = x;
-  for (int i = 0; i < 12; ++i) guess = 0.5 * (guess + x / guess);
-  return guess;
-}
+// Inscribed planning radius for the chassis (CAD max footprint ~0.207 m +
+// margin). Explorer nomination, PathCuts, and autonomous explore Navigation
+// configs share this value — do not scatter bare 0.22 literals.
+inline constexpr double kPlanningRadius = .22;
 
-// Corner of that rectangle. Open-space planning uses this circle so a
-// diagonal approach cannot clip. Door passage uses kBodyHalfWidth.
-inline constexpr double kCornerRadius = DetailSqrt(
-    kBodyHalfLength * kBodyHalfLength + kBodyHalfWidth * kBodyHalfWidth);
-inline constexpr double kPlanningRadius = kCornerRadius;
-
-// One corner-circle diameter of free space. A lidar hit closer than this
-// means the chassis cannot yaw clear of that obstacle. At or beyond it,
-// that axis is open. Not a room or doorway width.
+// One body diameter of free space. A lidar hit closer than this means the
+// chassis cannot yaw clear of that obstacle. At or beyond it, that axis is
+// open. Derived from the planning circle — not a room or doorway width.
 inline constexpr double kSwingClearance = 2. * kPlanningRadius;
 
 // Cone half-angle whose lateral span at kSwingClearance equals one body
 // radius: atan(kPlanningRadius / kSwingClearance) = atan(1/2).
 // Every forward/side stall sample uses this aperture.
-inline constexpr double kBodyConeHalfAngle =
+inline const double kBodyConeHalfAngle =
     std::atan(kPlanningRadius / kSwingClearance);
 
 // NavigationSystem::AddPathMetrics reports
@@ -46,7 +31,8 @@ inline constexpr double kBodyConeHalfAngle =
 inline constexpr double kOpenPreferPathMargin = kPlanningRadius;
 inline constexpr double kPinchMinPathMargin = 0.;
 
-// Trail-reverse distances, in corner-circle diameters.
+// Trail-reverse distances, in body diameters. Entry/open leave the cell;
+// a pocket retreat is longer because both axes are inside kSwingClearance.
 inline constexpr double kEntryRetreat = 2. * kSwingClearance;
 inline constexpr double kOpenRetreat = 3. * kSwingClearance;
 inline constexpr double kPocketRetreat = 4. * kSwingClearance;

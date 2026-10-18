@@ -510,44 +510,45 @@ class AutonomousExplorer final : public rclcpp::Node {
     // Prefer forward tracking, but allow a short reverse so a U-alcove tip
     // can back out a few tens of centimetres while turning toward the exit.
     config.max_reverse_velocity = .10;
-    // Open space uses the corner circle so a diagonal approach cannot clip.
-    // A doorway is limited by the body width: the corner circle (about
-    // 0.41 m across) makes a 0.70 m door look tight even though the chassis
-    // is only 2 * kBodyHalfWidth wide. Width radius is entry, and pinch
-    // only when the goal is a real mouth — not every no-route V-gap.
+    // CAD: chassis 290×230 mm, wheel envelope half-width 0.147 m, max
+    // footprint radius ~0.207 m. Match production navigation2d_node (+margin).
+    // Always plan at kPlanningRadius. The old entry 0.14 m / pinch acceptance
+    // <0.15 m let GLOBAL thread furniture V-gaps the body cannot fit.
     const bool entry_drive = pending_entry_goal_ || locked_entry_mouth_;
     // Entry: A* only. Theta* long chords cut nearby wall tips even when the
     // locked mouth is metres wide (live: gap=2.15 Entry probe rejected
     // path-intersects → abandon → tour loop → failed_goals thrash).
     config.planner = entry_drive ? "astar" : "theta_star";
-    const bool pinch_plan = narrow_passage_retry_ && !entry_drive && !returning;
-    const bool width_passage =
-        entry_drive || (pinch_plan && PassableMouthGoal(goal));
-    config.robot_radius = width_passage ? navigation2d::kBodyHalfWidth
-                                         : navigation2d::kPlanningRadius;
+    config.robot_radius = navigation2d::kPlanningRadius;
     if (entry_drive) {
-      // Circle of the body half-width for the mouth crawl (monitor / RPP).
+      // Circular inscribed footprint for mouth crawl (monitor / RPP), same
+      // lethal radius as open explore.
       config.footprint.clear();
     } else {
-      const double hx = navigation2d::kBodyHalfLength;
-      const double hy = navigation2d::kBodyHalfWidth;
-      const double cx = navigation2d::kBodyNoseChamferX;
-      const double cy = navigation2d::kBodyNoseChamferY;
-      config.footprint = {{-hx, -hy}, {cx, -hy}, {hx, -cy},
-                          {hx, cy}, {cx, hy}, {-hx, hy}};
+      config.footprint = {{-.145, -.147}, {.115, -.147}, {.145, -.132},
+                          {.145, .132}, {.115, .147}, {-.145, .147}};
     }
-    // Clearance tiers:
-    //   width passage — lethal = body half-width; soft cost out to the corner
-    //   open          — lethal = corner circle; stronger soft inflation
-    // Soft inflation is a cost, not a second lethal radius.
-    if (width_passage) {
-      config.inflation_radius = navigation2d::kPlanningRadius;
+    // Clearance tiers (strategy, not scene knobs):
+    //   entry  — locked mouth crawl (softer inflation only)
+    //   pinch  — automatic retry when open-tier finds no route through a
+    //            door-width throat (any map, not kitchen-specific)
+    //   open   — default explore: prefer mid-aisle over wall feet
+    // Lethal radius stays kPlanningRadius in all tiers; tiers only change
+    // soft inflation.
+    const bool pinch_plan = narrow_passage_retry_ && !entry_drive && !returning;
+    // Soft inflation must stay below half a typical doorway (~0.35 m for a
+    // 0.70 m mouth). Open 0.42 sealed those doors in cost (UI: tan band fills
+    // the gap) and made pinch/open retries report no path.
+    if (entry_drive) {
+      config.inflation_radius = .26;
       config.inflation_cost_scaling = 8.0;
+    } else if (pinch_plan) {
+      config.inflation_radius = .28;
+      config.inflation_cost_scaling = 7.0;
     } else {
       // Stronger soft inflation than pinch: mid-aisle preference. Doors that
       // open-tier cannot thread still fall through via no-route → pinch.
-      config.inflation_radius =
-          navigation2d::kPlanningRadius + navigation2d::kBodyHalfWidth;
+      config.inflation_radius = .36;
       config.inflation_cost_scaling = 9.0;
     }
     // The global plan already enforces the footprint buffer.  A long local
@@ -590,9 +591,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       config.smoother_enabled = false;
     } else if (pinch_plan) {
       // Enough to thread a certified doorway; not a wall-foot preference.
-      config.smoother_min_clearance = width_passage
-                                          ? navigation2d::kBodyHalfWidth
-                                          : navigation2d::kPlanningRadius;
+      config.smoother_min_clearance = .28;
       config.smoother_obstacle_weight = 1.0;
       config.smoother_data_weight = .08;
       config.smoother_max_deviation = .40;
@@ -829,8 +828,8 @@ class AutonomousExplorer final : public rclcpp::Node {
     planning_input_publisher_->publish(input);
 
     nav_msgs::msg::OccupancyGrid inflated = input;
-    const double kRobotRadius = navigation2d::kPlanningRadius;
-    const double kInflationRadius = navigation2d::kPlanningRadius + navigation2d::kBodyHalfWidth;
+    constexpr double kRobotRadius = navigation2d::kPlanningRadius;
+    constexpr double kInflationRadius = .30;
     constexpr double kInflationCostScaling = 8.;
     const int inflation_cells =
         static_cast<int>(std::ceil(kInflationRadius / map_->info.resolution));
