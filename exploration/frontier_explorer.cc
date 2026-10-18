@@ -804,10 +804,10 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
              !(narrow_viewpoint(col, row) && standoff >= kCloseStandoff))) continue;
         if (!HasFreeLineOfSight(col, row, representative % map_.width,
                                 representative / map_.width)) continue;
-        // Simple clearance: open ≥ planning radius; narrow door ≥ 0.16 m.
+        // Same floor as SafeViewpoint / planner radius — 0.16 m nominated
+        // tip pinches the chassis cannot enter (UI: SG forced into a V-gap).
         const double clearance = OccupiedClearanceAt(map_, col, row);
-        if (clearance < (narrow_viewpoint(col, row) ? .16 : kPlanningRadius))
-          continue;
+        if (clearance < kPlanningRadius) continue;
         const double travel = travel_cells[viewpoint_index] * map_.resolution;
         const double information_gain = std::max(
             visible_unknown_gain(col, row),
@@ -844,8 +844,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
           });
           if (!sees_component) continue;
           const double clearance = OccupiedClearanceAt(map_, col, row);
-          if (clearance < (narrow_viewpoint(col, row) ? .16 : kPlanningRadius))
-            continue;
+          if (clearance < kPlanningRadius) continue;
           const double travel = travel_cells[viewpoint_index] * map_.resolution;
           const double information_gain = std::max(
               visible_unknown_gain(col, row),
@@ -878,7 +877,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
           const double standoff = std::hypot(x - frontier_x, y - frontier_y);
           if (standoff < kCloseStandoff || standoff > 1.5) continue;
           const double clearance = OccupiedClearanceAt(map_, col, row);
-          if (clearance < .16) continue;
+          if (clearance < kPlanningRadius) continue;
           const double travel = travel_cells[viewpoint_index] * map_.resolution;
           const double information_gain = std::max(
               visible_unknown_gain(col, row),
@@ -1263,7 +1262,7 @@ std::vector<ExplorationGoal> FrontierExplorer::OneGoalPerMouth(
                                         (y - goal.frontier_y) * dir_x);
         if (lateral > .28 || depth < -.10 || depth > .55) continue;
         const double clearance = OccupiedClearanceAt(map_, col, row);
-        if (clearance < .16) continue;
+        if (clearance < kPlanningRadius) continue;
         const double score = 5.0 * clearance - 2.0 * lateral + 0.4 * depth;
         if (score > best_score) {
           best_score = score;
@@ -1567,10 +1566,10 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
   if (approach_length < .05) return std::nullopt;
   direction_x /= approach_length;
   direction_y /= approach_length;
-  // Entry traverse/goal clearance matches the locked-mouth planner radius
-  // (0.14 m); open-space 0.22 m is too strict in door throats.
-  constexpr double kEntryTraverseClearance = .14;
-  constexpr double kEntryGoalClearance = .14;
+  // Match the planning radius. The old 0.14 m floor let SelectGoals / entry
+  // push poses into V-tip pinches the chassis cannot traverse.
+  constexpr double kEntryTraverseClearance = kPlanningRadius;
+  constexpr double kEntryGoalClearance = kPlanningRadius;
   const auto near_observed_free = [&](int col, int row) {
     if (RawFree(col, row)) return true;
     // Allow cells that touch observed free so probes stay near mapped space.
@@ -1666,7 +1665,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
       // frontier or an unrelated free cell behind a nearby wall.
       if (std::hypot(relative_x, relative_y) > maximum_depth_m + .20) continue;
       const double clearance = OccupiedClearanceAt(map_, col, row);
-      if (clearance < .14) continue;
+      if (clearance < kPlanningRadius) continue;
       // Clearance dominates: mid-gap beats a deeper jamb-hugging cell.
       const double score = 0.35 * depth + 5.5 * clearance - 3.0 * lateral -
                            .01 * static_cast<double>(distance[index]);
@@ -1699,7 +1698,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
       const int row = static_cast<int>(std::floor((y - map_.origin_y) / map_.resolution));
       if (!entry_goal(col, row)) continue;
       const double clearance = OccupiedClearanceAt(map_, col, row);
-      if (clearance < .14) continue;
+      if (clearance < kPlanningRadius) continue;
       if (clearance > fallback_clear) {
         fallback_clear = clearance;
         ExplorationGoal probe = frontier_goal;
@@ -1710,7 +1709,7 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
         fallback = probe;
       }
     }
-    if (fallback && fallback_clear >= .18) return fallback;
+    if (fallback && fallback_clear >= kPlanningRadius) return fallback;
   }
   return fallback;
 }
