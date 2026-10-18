@@ -3321,25 +3321,17 @@ class AutonomousExplorer final : public rclcpp::Node {
           return;
         }
         ++entry_open_loop_ticks_;
-        const Goal& mouth = *pending_entry_goal_;
         const double rx = pose_->pose.position.x;
         const double ry = pose_->pose.position.y;
-        double into_x = active_goal_.x - mouth.frontier_x;
-        double into_y = active_goal_.y - mouth.frontier_y;
-        double into_len = std::hypot(into_x, into_y);
-        if (into_len < .05) {
-          into_x = mouth.frontier_x - mouth.x;
-          into_y = mouth.frontier_y - mouth.y;
-          into_len = std::hypot(into_x, into_y);
-        }
         geometry_msgs::msg::Twist crawl;
-        if (into_len > .05) {
-          into_x /= into_len;
-          into_y /= into_len;
-          // Crawl past the 0.50 m EntryProbeSatisfied depth, not just the jamb.
-          const double tx = mouth.frontier_x + .58 * into_x;
-          const double ty = mouth.frontier_y + .58 * into_y;
-          if (TourSegmentCutsWall(rx, ry, tx, ty)) {
+        {
+          // Stop at the planned goal. A point 0.58 m past the frontier is
+          // beyond that contract, and the centerline test does not cover the
+          // planning circle, so the crawl walked into the wall.
+          const double tx = active_goal_.x;
+          const double ty = active_goal_.y;
+          if (std::hypot(tx - rx, ty - ry) <= navigation2d::kPlanningRadius ||
+              TourSegmentCutsWall(rx, ry, tx, ty)) {
             entry_open_loop_ticks_ = 0;
             AbandonLockedEntryMouth(
                 "open-loop crawl blocked by wall; leaving mouth");
@@ -3510,47 +3502,37 @@ class AutonomousExplorer final : public rclcpp::Node {
             navigation2d::CollisionMonitorAction::kStop ||
         state.collision_monitor_action ==
             navigation2d::CollisionMonitorAction::kBlindZoneStop;
-    // Near a locked mouth, RPP often accel-limits to <0.05 m/s. Crawl toward a
-    // point just past the frontier — never straight through a structural wall
-    // toward a deep probe (that looked like 穿墙 + 往回跑).
-    // CRITICAL: when the monitor already zeroed the command, abs(linear)<0.12
-    // is true — the old crawl then forced 0.16 m/s into the wall (LOC on wall).
+    // Near a locked mouth, RPP often accel-limits below 0.12 m/s. A short
+    // crawl may finish the remaining distance to the planned goal. It must
+    // not run after arrival: the success command is already zero, and the
+    // old target 0.58 m past the frontier then drove into the wall.
     if (!safety_held && (pending_entry_goal_ || locked_entry_mouth_) && pose_ &&
-        !retreat_goal_) {
+        !retreat_goal_ &&
+        state.status != navigation2d::NavigationStatus::kSucceeded) {
       const Goal& mouth = pending_entry_goal_.value_or(*locked_entry_mouth_);
       const double rx = pose_->pose.position.x;
       const double ry = pose_->pose.position.y;
       const double mouth_range =
           std::hypot(rx - mouth.frontier_x, ry - mouth.frontier_y);
+      const double goal_dist =
+          std::hypot(rx - active_goal_.x, ry - active_goal_.y);
       const double front_clear = ReadBodyRanges().front;
-      if (mouth_range < 1.20 && std::abs(command.linear.x) < .12 &&
+      if (mouth_range < 1.20 &&
+          goal_dist > navigation2d::kPlanningRadius &&
+          std::abs(command.linear.x) < .12 &&
           (front_clear <= 0. ||
-           front_clear >= navigation2d::kPlanningRadius)) {
-        double into_x = active_goal_.x - mouth.frontier_x;
-        double into_y = active_goal_.y - mouth.frontier_y;
-        double into_len = std::hypot(into_x, into_y);
-        if (into_len < .05) {
-          into_x = mouth.frontier_x - mouth.x;
-          into_y = mouth.frontier_y - mouth.y;
-          into_len = std::hypot(into_x, into_y);
-        }
-        if (into_len > .05) {
-          into_x /= into_len;
-          into_y /= into_len;
-          const double tx = mouth.frontier_x + .58 * into_x;
-          const double ty = mouth.frontier_y + .58 * into_y;
-          if (!TourSegmentCutsWall(rx, ry, tx, ty)) {
-            const double bearing = std::atan2(ty - ry, tx - rx);
-            const double err =
-                NormalizeAngle(bearing - Yaw(pose_->pose.orientation));
-            if (std::abs(err) < .90) {
-              command.linear.x = .16;
-              command.angular.z = std::clamp(1.6 * err, -.70, .70);
-            } else {
-              command.linear.x = 0.;
-              command.angular.z = std::clamp(1.9 * err, -.90, .90);
-            }
-          }
+           front_clear >= navigation2d::kPlanningRadius) &&
+          !TourSegmentCutsWall(rx, ry, active_goal_.x, active_goal_.y)) {
+        const double bearing =
+            std::atan2(active_goal_.y - ry, active_goal_.x - rx);
+        const double err =
+            NormalizeAngle(bearing - Yaw(pose_->pose.orientation));
+        if (std::abs(err) < .90) {
+          command.linear.x = .16;
+          command.angular.z = std::clamp(1.6 * err, -.70, .70);
+        } else {
+          command.linear.x = 0.;
+          command.angular.z = std::clamp(1.9 * err, -.90, .90);
         }
       }
     }
