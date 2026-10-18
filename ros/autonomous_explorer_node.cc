@@ -1506,12 +1506,17 @@ class AutonomousExplorer final : public rclcpp::Node {
                   "Completing probe found no leftover approach: raw_cells=%zu rounds=%d",
                   explorer_.raw_frontier_cells(), completing_probe_rounds_);
       phase_ = MissionPhase::kExploring;
+      // Tip pocket + empty leftovers: leave immediately and hunt far mouths
+      // instead of burning completing rounds while wedged (下方卡住).
+      if (TipPinchedNow() &&
+          TryRescueDistantMouths("completing empty while tip-pinched"))
+        return;
       if (ShouldKeepWaitingForFrontiers()) {
         PublishStatus("SELECTING",
                       "unresolved boundary; waiting for map before return");
         return;
       }
-      BeginReturn(explorer_.raw_frontier_cells() > 0);
+      BeginReturnOrRescue(explorer_.raw_frontier_cells() > 0);
       return;
     }
     for (const auto& leftover : leftovers) {
@@ -1545,21 +1550,101 @@ class AutonomousExplorer final : public rclcpp::Node {
     // Keep exploring while raw frontiers remain — one failed leftover must
     // not abandon unfinished alcoves/rooms.
     phase_ = MissionPhase::kExploring;
+    if (TipPinchedNow() &&
+        TryRescueDistantMouths("leftovers unplannable while tip-pinched"))
+      return;
     if (ShouldKeepWaitingForFrontiers()) {
       PublishStatus("SELECTING",
                     "leftover blocked; waiting for map update before return");
       return;
     }
-    BeginReturn(explorer_.raw_frontier_cells() > 0 ||
-                explorer_.ReachableUnknownCells(pose_->pose.position.x,
-                                                pose_->pose.position.y) > 0);
+    BeginReturnOrRescue(explorer_.raw_frontier_cells() > 0 ||
+                        explorer_.ReachableUnknownCells(
+                            pose_->pose.position.x, pose_->pose.position.y) > 0);
   }
 
   bool ShouldKeepWaitingForFrontiers() const {
     if (explorer_.raw_frontier_cells() == 0) return false;
-    // Allow several completing rounds on distinct mouths before giving up.
-    if (completing_probe_rounds_ < 5) return true;
-    return no_executable_frontier_cycles_ < 36;
+    // Cap empty SELECTING loops. The old 36-cycle budget left the chassis
+    // wedged in a tip for tens of seconds before PARTIAL (UI: 下方卡住).
+    if (completing_probe_rounds_ < 3) return true;
+    return no_executable_frontier_cycles_ < 8;
+  }
+
+  bool TipPinchedNow() const {
+    if (!scan_ || !pose_) return false;
+    const double front = SectorMinRange(0., .50);
+    const double left = SectorMinRange(+std::acos(-1.) / 2., .40);
+    const double right = SectorMinRange(-std::acos(-1.) / 2., .40);
+    const double side =
+        std::min(left > 0. ? left : 10., right > 0. ? right : 10.);
+    return IsPinchGeometryStall(last_path_min_clearance_m_, front, side) ||
+           (side < .32 && front > 0. && front < .85);
+  }
+
+  // Leave a tip pocket and re-queue far corridor mouths (kitchen) instead of
+  // PARTIAL while raw frontiers remain. One shot per mission.
+  bool TryRescueDistantMouths(const char* why) {
+    if (tip_rescue_attempted_ || returning_ ||
+        phase_ == MissionPhase::kReturning || !pose_)
+      return false;
+    if (explorer_.raw_frontier_cells() == 0) return false;
+    tip_rescue_attempted_ = true;
+    RCLCPP_WARN(get_logger(),
+                "Tip/tour rescue (%s): peel + retry distant mouths; raw=%zu",
+                why, explorer_.raw_frontier_cells());
+    recently_demoted_.reset();
+    recently_demoted_until_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    cooled_signatures_.clear();
+    explorer_.ClearFailedBlacklist();
+    completing_probe_rounds_ = 0;
+    no_executable_frontier_cycles_ = 0;
+    reject_streak_ = 0;
+    ClearEntryMouthLock();
+    navigation_.reset();
+    ClearPublishedNavPaths();
+    ClearDisplayedGoal();
+    recovery_.Clear();
+    if (TipPinchedNow() &&
+        EscapeOrShortRetreat("tip rescue; peel into free",
+                             "tip rescue; short trail retreat")) {
+      PublishStatus("RECOVERING", why);
+      next_selection_ = now() + rclcpp::Duration::from_seconds(0.6);
+      return true;
+    }
+    const double rx = pose_->pose.position.x;
+    const double ry = pose_->pose.position.y;
+    BuildTour();
+    std::deque<Goal> distant;
+    for (const auto& goal : committed_tour_) {
+      if (RecentlyDemoted(goal)) continue;
+      if (std::hypot(goal.x - rx, goal.y - ry) < 1.8) continue;
+      distant.push_back(goal);
+    }
+    auto leftovers = explorer_.SelectLeftoverApproaches(rx, ry, 8);
+    leftovers = explorer_.OrderByRegion(std::move(leftovers), rx, ry,
+                                        Yaw(pose_->pose.orientation));
+    for (auto& goal : leftovers) {
+      if (std::hypot(goal.x - rx, goal.y - ry) < 1.5) continue;
+      if (!explorer_.IsCorridorMouth(goal.frontier_x, goal.frontier_y) &&
+          explorer_.MouthGapWidth(goal.frontier_x, goal.frontier_y) < .50)
+        continue;
+      distant.push_front(std::move(goal));
+    }
+    committed_tour_.clear();
+    for (auto& goal : distant) committed_tour_.push_back(std::move(goal));
+    if (committed_tour_.empty()) {
+      RCLCPP_WARN(get_logger(), "Tip rescue found no distant mouth to retry");
+      return false;
+    }
+    phase_ = MissionPhase::kExploring;
+    SelectNextGoal();
+    return navigation_ != nullptr || pending_entry_goal_ || locked_entry_mouth_;
+  }
+
+  void BeginReturnOrRescue(bool force_partial) {
+    if (force_partial && TryRescueDistantMouths("before PARTIAL return")) return;
+    BeginReturn(force_partial);
   }
 
   void FinishCompleting() {
@@ -1573,7 +1658,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       SelectNextGoal();
       return;
     }
-    if (explorer_.raw_frontier_cells() > 0 && completing_probe_rounds_ < 5) {
+    if (explorer_.raw_frontier_cells() > 0 && completing_probe_rounds_ < 3) {
       StartCompletingProbe();
       return;
     }
@@ -1582,7 +1667,7 @@ class AutonomousExplorer final : public rclcpp::Node {
                     "completing emptied tour; waiting for unresolved frontiers");
       return;
     }
-    BeginReturn(explorer_.raw_frontier_cells() > 0);
+    BeginReturnOrRescue(explorer_.raw_frontier_cells() > 0);
   }
 
   // True pinch peel. Never fall back to trail reverse while a mouth is locked:
@@ -1648,7 +1733,8 @@ class AutonomousExplorer final : public rclcpp::Node {
         std::isfinite(active_goal_.x) && std::isfinite(active_goal_.y)) {
       explorer_.RecordAttempt(pending_entry_goal_.value_or(active_goal_), false);
       recently_demoted_ = pending_entry_goal_.value_or(active_goal_);
-      recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(20.0);
+      // Short cool — 20 s kept re-queuing the same tip while kitchen waited.
+      recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(6.0);
       explorer_.CoolRegion(active_goal_.x, active_goal_.y, 0.70, 1500u);
       explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 0.70,
                            1500u);
@@ -1665,7 +1751,10 @@ class AutonomousExplorer final : public rclcpp::Node {
       PublishStatus("RECOVERING", reason);
       return true;
     }
-    next_selection_ = now() + rclcpp::Duration::from_seconds(0.8);
+    // After peel fails, immediately hunt a far mouth instead of SELECTING
+    // idle in the tip until completing rounds burn out.
+    if (TryRescueDistantMouths(reason)) return true;
+    next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
     PublishStatus("SELECTING", reason);
     return true;
   }
@@ -1679,10 +1768,11 @@ class AutonomousExplorer final : public rclcpp::Node {
                 "%s; wall_scrapes=%d clearance=%.3f signature=%llu", reason,
                 recovery_.wall_scrapes, last_path_min_clearance_m_,
                 static_cast<unsigned long long>(last_path_signature_));
-    // Second scrape, zero-clearance (goal occupied / no path), or already
-    // peeled once → leave the pocket. One centered replan only.
-    if (recovery_.wall_scrapes >= 2 || last_path_min_clearance_m_ < .05 ||
-        recovery_.side_peels > 0) {
+    // Open aisle beside a wall foot: leave on the first scrape — a centered
+    // replan just parks CARROT on the tip again (下方卡住太久).
+    const double front = SectorMinRange(0., .50);
+    if (front >= .70 || recovery_.wall_scrapes >= 2 ||
+        last_path_min_clearance_m_ < .05 || recovery_.side_peels > 0) {
       return UnstickFromPinch(reason);
     }
     latest_map_replans_ = 0;
@@ -1998,19 +2088,23 @@ class AutonomousExplorer final : public rclcpp::Node {
           explorer_.candidate_frontier_goals() == 0 || tour_unplannable ||
           tour_empty_with_candidates;
       if (explorer_.raw_frontier_cells() > 0 && no_executable_mouths) {
-        if (completing_probe_rounds_ < 5) {
+        if (completing_probe_rounds_ < 3) {
           StartCompletingProbe();
           return;
         }
         // Completing probe can fail while sealed mouths still open into
         // unknown rooms on later map updates. Returning here left rooms
         // unexplored with PARTIAL and unresolved frontiers.
+        if (TipPinchedNow() &&
+            TryRescueDistantMouths("no-executable while tip-pinched"))
+          return;
         if (ShouldKeepWaitingForFrontiers()) {
           PublishStatus("SELECTING",
                         "openable unknown remains; waiting for map update");
           return;
         }
-        BeginReturn(reachable_unknown > 0 || explorer_.raw_frontier_cells() > 0);
+        BeginReturnOrRescue(reachable_unknown > 0 ||
+                            explorer_.raw_frontier_cells() > 0);
         return;
       }
       // Failed mouths were already RecordAttempt'd. Wait for the next map
@@ -2019,17 +2113,23 @@ class AutonomousExplorer final : public rclcpp::Node {
       ClearPublishedNavPaths();
       PublishStatus("SELECTING",
                     "frontiers locally blocked; waiting for map update");
-      // Open room with only unplannable mouths: do not sit mid-aisle for a
-      // dozen empty cycles while a ghost GOAL hangs outside painted free.
+      // Tip / open aisle: do not sit through a long empty budget — peel and
+      // rescue distant mouths (kitchen) before PARTIAL.
       const int wait_budget =
-          (attempted > 0 && SectorMinRange(0., .50) >= .70) ? 4 : 12;
+          TipPinchedNow() ? 2
+                          : ((attempted > 0 && SectorMinRange(0., .50) >= .70)
+                                 ? 3
+                                 : 6);
       if (no_executable_frontier_cycles_ >= wait_budget) {
-        if (completing_probe_rounds_ < 5 && explorer_.raw_frontier_cells() > 0) {
+        if (TipPinchedNow() &&
+            TryRescueDistantMouths("wait-budget tip; rescue distant"))
+          return;
+        if (completing_probe_rounds_ < 3 && explorer_.raw_frontier_cells() > 0) {
           StartCompletingProbe();
           return;
         }
         if (ShouldKeepWaitingForFrontiers()) return;
-        BeginReturn(true);
+        BeginReturnOrRescue(true);
       }
       return;
     }
@@ -2460,11 +2560,12 @@ class AutonomousExplorer final : public rclcpp::Node {
     const bool entry_drive = pending_entry_goal_ || locked_entry_mouth_;
     // Entry crawls past jambs are slow; the old 8 s / 6 s path-stall fired while
     // progress was still advancing and yanked the robot back to the junction.
-    const double min_goal_s = entry_drive ? 14.0 : 8.0;
+    // Non-entry tips must not sit 8+ s on ROT before peel (下方卡住太久).
+    const double min_goal_s = entry_drive ? 14.0 : 4.0;
     if ((now() - goal_started_).seconds() < min_goal_s) return false;
     const bool pose_stuck = (now() - pose_motion_stamp_).seconds() >=
-                            (entry_drive ? 10.0 : 7.0);
-    const double path_stall_s = entry_drive ? 12.0 : 6.0;
+                            (entry_drive ? 10.0 : 3.5);
+    const double path_stall_s = entry_drive ? 12.0 : 3.5;
     const bool path_stuck =
         state.path_progress_m < .05 ||
         (last_goal_path_progress_time_.nanoseconds() > 0 &&
@@ -2528,22 +2629,24 @@ class AutonomousExplorer final : public rclcpp::Node {
       next_selection_ = now();
       return true;
     }
-    // Repeated tip immobility: demote the tip only. Cooling the robot pose
-    // froze the exit corridor and left the chassis on the wall (回不去).
-    if (immobility_recoveries_ >= 2 && pose_) {
+    // Tip immobility: leave on the first recovery — waiting for ≥2 parked
+    // the chassis in the bottom tip until PARTIAL.
+    if (immobility_recoveries_ >= 1 && pose_) {
       explorer_.RecordAttempt(active_goal_, false);
       recently_demoted_ = active_goal_;
-      recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(10.0);
+      recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(6.0);
       explorer_.CoolRegion(active_goal_.x, active_goal_.y, 0.80, 1800u);
       explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 0.80,
                            1800u);
       ClearEntryMouthLock();
       retreat_attempted_ = false;
       clear_start_pinch_ = true;
-      next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
+      next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
       if (EscapeOrShortRetreat(
               "immobility at wall tip; peel out of inflation",
               "immobility at wall tip; short trail retreat"))
+        return true;
+      if (TryRescueDistantMouths("immobility tip; rescue distant mouths"))
         return true;
       DemoteActiveGoal("immobility tip thrash; demoting cooled viewpoint");
       return true;
@@ -3985,6 +4088,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   double last_motion_x_ = 0., last_motion_y_ = 0.;
   rclcpp::Time pose_motion_stamp_{0, 0, RCL_ROS_TIME};
   int immobility_recoveries_ = 0;
+  bool tip_rescue_attempted_ = false;
   geometry_msgs::msg::Twist escape_command_;
   rclcpp::Time escape_until_{0, 0, RCL_ROS_TIME};
   int reported_recoveries_ = 0;
