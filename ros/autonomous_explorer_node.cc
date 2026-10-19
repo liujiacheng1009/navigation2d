@@ -640,7 +640,14 @@ class AutonomousExplorer final : public rclcpp::Node {
     // Keep their completion contracts separate: return must converge to the
     // recorded ground-truth start instead of stopping at the edge of the
     // ordinary navigation tolerance disk.
-    config.goal_xy_tolerance = returning ? .04 : kExploreGoalTolerance;
+    // Breadcrumb hops are waypoints, not the dock: docking each 0.44 m hop to
+    // 4 cm made the return stop-and-creep at every trail sample.
+    bool home_goal = false;
+    if (returning && start_pose_) {
+      const Goal home = MakeHomeGoal();
+      home_goal = std::hypot(goal.x - home.x, goal.y - home.y) <= map_->info.resolution;
+    }
+    config.goal_xy_tolerance = home_goal ? .04 : kExploreGoalTolerance;
     // LD14 observes 360 degrees, so frontier visits need no stop-and-turn
     // terminal orientation. Preserve precise heading only when docking home.
     // Backtrack edges are positional checkpoints; requiring a docking yaw at
@@ -3942,10 +3949,17 @@ class AutonomousExplorer final : public rclcpp::Node {
         const double home_dist =
             std::hypot(pose_->pose.position.x - home.x, pose_->pose.position.y - home.y);
         if (breadcrumb_returning_ && home_dist > .40) {
-          if (StartBreadcrumbTowardHome()) return;
+          // A hop moved the robot past whatever blocked the direct route;
+          // go straight home from here when the map allows, and only keep
+          // retracing the trail when it still does not.
           paint_driven_corridor_ = true;
           paint_trail_budget_m_ = 80.0;
-          if (StartNavigation(home, true)) return;
+          if (StartNavigation(home, true)) {
+            breadcrumb_returning_ = false;
+            PublishStatus("RETURNING", "direct route home available after breadcrumb hop");
+            return;
+          }
+          if (StartBreadcrumbTowardHome()) return;
         }
         breadcrumb_returning_ = false;
         Finish(true, partial_return_
