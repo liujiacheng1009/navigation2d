@@ -3548,6 +3548,12 @@ class AutonomousExplorer final : public rclcpp::Node {
         }
         return;
       }
+      // No route and no crawl: drop the last approach command. Leaving it
+      // running while the next goal is planned rolls the chassis from the
+      // viewpoint into the planning circle (live: arrived, then
+      // "start occupied, nearest obstacle 0.19 m").
+      geometry_msgs::msg::Twist stop;
+      command_publisher_->publish(stop);
       if (now() >= next_selection_) {
         next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
         SelectNextGoal();
@@ -3594,6 +3600,8 @@ class AutonomousExplorer final : public rclcpp::Node {
                                           active_goal_.y - pose_->pose.position.y);
       if (goal_dist < .28 && state.path_progress_m >= .05) {
         navigation_.reset();
+        geometry_msgs::msg::Twist stop;
+        command_publisher_->publish(stop);
         // A doorway peek moves the frontier past the 0.35 m association disk.
         // The viewpoint is not done while a room of unknown is still beyond it.
         const bool room_beyond = explorer_.UnenteredRoomBeyond(active_goal_);
@@ -4210,19 +4218,12 @@ class AutonomousExplorer final : public rclcpp::Node {
           BreakWallScrapeThrash("room-side / doorway pinch stall");
           return;
         }
-        // Returning already owns the home path.  A short clearance jiggle
-        // here only changes the start cell, so the next plan looks new and
-        // the same first-segment stall repeats until the mission times out.
-        if (phase_ != MissionPhase::kReturning && !returning_ && TryStartEscape()) {
-          navigation_.reset();
-          if (force_return) {
-            committed_tour_.clear();
-            escape_then_return_ = true;
-          } else if (!committed_tour_.empty()) {
-            committed_tour_.pop_front();
-          }
-          return;
-        }
+        // Not a pinch: the viewpoint was reached and the next route simply
+        // did not start (live: nose 0.90 m open, "start occupied, nearest
+        // obstacle 0.19 m" after rolling into the wall). Reversing here
+        // drives the tail into the wall the goal was placed against. A real
+        // pinch already returned through BreakWallScrapeThrash above.
+        // Fall through and skip this viewpoint.
         if (force_return && !returning_) {
           navigation_.reset();
           committed_tour_.clear();
