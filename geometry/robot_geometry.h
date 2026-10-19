@@ -9,6 +9,14 @@ namespace navigation2d {
 // configs share this value — do not scatter bare 0.22 literals.
 inline constexpr double kPlanningRadius = .22;
 
+// Radius the 290×230 mm chassis sweeps when it turns in place (CAD max
+// footprint). An executing route is dropped only when a newly mapped cell
+// would touch this body; planning keeps the larger kPlanningRadius, so a
+// wall that grows by part of a cell beside an accepted route does not
+// invalidate it.
+inline constexpr double kChassisRadius = .207;
+static_assert(kChassisRadius < kPlanningRadius);
+
 // The lidar is mounted this far forward of the chassis centre, so a backward
 // ray overstates the tail clearance by exactly this much. Escape compares
 // body-frame ranges with the planning circle as if they were centred on the

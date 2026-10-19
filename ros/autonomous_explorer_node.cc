@@ -407,6 +407,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       clear_start_pinch_ = false;
     }
     const bool entry_plan = pending_entry_goal_ || locked_entry_mouth_;
+    plan_trail_budget_m_ = 0.;
     if (paint_driven_corridor_ && map_->info.resolution > 0. && trajectory_.size() >= 2) {
       // The chassis already drove this corridor. A later scan can pinch the
       // costmap below the planning radius and trap the robot; reopen the
@@ -418,6 +419,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       const double trail_budget_m =
           paint_trail_budget_m_ > 0. ? paint_trail_budget_m_ : 2.0;
       paint_trail_budget_m_ = 0.;
+      plan_trail_budget_m_ = trail_budget_m;
       const double paint_radius_m =
           entry_plan ? .12 : ((returning || trail_budget_m > 4.) ? .28 : .16);
       const int radius = static_cast<int>(std::ceil(paint_radius_m / map_->info.resolution));
@@ -492,6 +494,12 @@ class AutonomousExplorer final : public rclcpp::Node {
         }
       }
     }
+    plan_free_mask_.assign(planning_grid.cells.size(), 0);
+    plan_grid_width_ = planning_grid.width;
+    plan_grid_height_ = planning_grid.height;
+    plan_grid_resolution_ = planning_grid.resolution;
+    plan_grid_origin_x_ = navigation_origin_x_;
+    plan_grid_origin_y_ = navigation_origin_y_;
     for (std::size_t index = 0; index < planning_grid.cells.size(); ++index) {
       if (index) output << ',';
       // Free is 0. A real obstacle is 254 and inflates. Unknown is 255:
@@ -514,6 +522,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       const bool unknown_near_robot = under_robot && cell < 0;
       const bool forced_free = cell == 0 || under_body || unknown_near_robot ||
                                lidar_evidence || driven;
+      plan_free_mask_[index] = forced_free;
       output << (forced_free ? 0 : (cell < 0 ? 255 : 254));
     }
     output << "]}";
@@ -3193,10 +3202,14 @@ class AutonomousExplorer final : public rclcpp::Node {
     return true;
   }
 
+  // Live-map check of the active route. SLAM occupied is lethal, unknown is
+  // not. It must agree with the plan it checks: every cell the planner was
+  // told is free (body disk, lidar interiors, painted trail) stays free here,
+  // otherwise the checker vetoes routes the planner was right to take (live:
+  // about one accepted route in four dropped mid-drive, return retraced in
+  // 0.44 m hops). While driving, only the part ahead of the robot matters and
+  // a cut needs a new cell touching the chassis, not the planning circle.
   bool PathCutsMappedObstacle(bool execution_tick = false) const {
-    (void)execution_tick;
-    // Live-map check always runs (including entry). SLAM occupied is lethal;
-    // unknown is not. No planning-side carve or flood before PathCuts.
     if (!navigation_ || !map_ || map_->info.resolution <= 0.) return false;
     const auto& route = navigation_->path();
     if (route.size() < 2) return false;
@@ -3225,11 +3238,37 @@ class AutonomousExplorer final : public rclcpp::Node {
     }
     const double robot_x = pose_ ? pose_->pose.position.x : path_xy.front().first;
     const double robot_y = pose_ ? pose_->pose.position.y : path_xy.front().second;
-    // The planner already treats the body disk, lidar interiors, and (on the
-    // way home) the driven trail as free. Checking the raw grid afterwards
-    // rejected that same path: a thickened kitchen jamb sat inside the
-    // planning circle while the lidar still saw the throat open, so every
-    // return chord was "path intersects mapped obstacle".
+    if (plan_free_mask_.size() ==
+            static_cast<std::size_t>(plan_grid_width_) * plan_grid_height_ &&
+        plan_grid_resolution_ > 0.) {
+      for (int row = 0; row < live.height; ++row) {
+        for (int col = 0; col < live.width; ++col) {
+          auto& cell = live.cells[static_cast<std::size_t>(row) * live.width + col];
+          if (cell <= 0) continue;
+          const double wx = live.origin_x + (col + .5) * live.resolution;
+          const double wy = live.origin_y + (row + .5) * live.resolution;
+          const int pc = static_cast<int>(
+              std::floor((wx - plan_grid_origin_x_) / plan_grid_resolution_));
+          const int pr = static_cast<int>(
+              std::floor((wy - plan_grid_origin_y_) / plan_grid_resolution_));
+          if (pc < 0 || pr < 0 || pc >= plan_grid_width_ || pr >= plan_grid_height_)
+            continue;
+          if (plan_free_mask_[static_cast<std::size_t>(pr) * plan_grid_width_ + pc])
+            cell = 0;
+        }
+      }
+    }
+    if (execution_tick) {
+      std::size_t nearest = 0;
+      double nearest_d = std::numeric_limits<double>::infinity();
+      for (std::size_t i = 0; i < path_xy.size(); ++i) {
+        const double d = std::hypot(path_xy[i].first - robot_x, path_xy[i].second - robot_y);
+        if (d < nearest_d) { nearest_d = d; nearest = i; }
+      }
+      if (nearest > 0)
+        path_xy.erase(path_xy.begin(), path_xy.begin() + static_cast<std::ptrdiff_t>(nearest - 1));
+      if (path_xy.size() < 2) return false;
+    }
     const auto force_free = [&](int col, int row) {
       if (col < 0 || row < 0 || col >= live.width || row >= live.height) return;
       auto& cell = live.cells[static_cast<std::size_t>(row) * live.width + col];
@@ -3247,10 +3286,12 @@ class AutonomousExplorer final : public rclcpp::Node {
       }
     };
     free_disk(robot_x, robot_y, navigation2d::kPlanningRadius);
-    if (scan_ && pose_) {
+    // A cell the current scan passes through is free now; a new occupied
+    // mark there is mapper noise, not a wall on the route.
+    if (execution_tick && scan_ && pose_) {
       const double yaw = Yaw(pose_->pose.orientation);
-      const double sensor_x = robot_x + .18 * std::cos(yaw);
-      const double sensor_y = robot_y + .18 * std::sin(yaw);
+      const double sensor_x = robot_x + navigation2d::kLidarForwardOffset * std::cos(yaw);
+      const double sensor_y = robot_y + navigation2d::kLidarForwardOffset * std::sin(yaw);
       const double evidence_range = std::min(3.0, static_cast<double>(scan_->range_max));
       const double step = std::max(.5 * live.resolution, .02);
       for (std::size_t beam = 0; beam < scan_->ranges.size(); ++beam) {
@@ -3269,25 +3310,11 @@ class AutonomousExplorer final : public rclcpp::Node {
         }
       }
     }
-    if (returning_ && trajectory_.size() >= 2) {
-      // Same corridor StartNavigation paints for the home plan (80 m at
-      // 0.28 m). Exempting only the last kPocketRetreat (1.76 m) dropped the
-      // direct home path at the first doorway the planner had already
-      // reopened, and the return then retraced the outbound trail in
-      // 0.44 m hops (live: accepted, dropped 11 s later, goal=(0.01,0.01)).
-      double walked = 0.;
-      for (std::size_t i = trajectory_.size(); i-- > 0;) {
-        if (i + 1 < trajectory_.size())
-          walked += std::hypot(trajectory_[i].first - trajectory_[i + 1].first,
-                                trajectory_[i].second - trajectory_[i + 1].second);
-        if (walked > 80.) break;
-        free_disk(trajectory_[i].first, trajectory_[i].second, .28);
-      }
-    }
-    // Same body as the planner radius — entry no longer uses a 0.14 m
-    // exemption that let GLOBAL squeeze tip gaps PathCuts would otherwise cut.
+    // Accepting a plan uses the planner's own circle, so a Theta* chord that
+    // grazes a corner is still caught. Driving uses the chassis.
     return navigation2d::PathCutsLiveOccupied(
-        live, path_xy, robot_x, robot_y, navigation2d::kPlanningRadius);
+        live, path_xy, robot_x, robot_y,
+        execution_tick ? navigation2d::kChassisRadius : navigation2d::kPlanningRadius);
   }
 
   bool TourSegmentCutsWall(double x0, double y0, double x1, double y1) const {
@@ -4330,6 +4357,15 @@ class AutonomousExplorer final : public rclcpp::Node {
   int retreat_cell_y_ = 0;
   bool paint_driven_corridor_ = false;
   double paint_trail_budget_m_ = 0.;
+  // Trail budget the active plan was painted with (0 = not painted).
+  double plan_trail_budget_m_ = 0.;
+  // Per cell of the active plan's snapshot: 1 where the planner was told free.
+  std::vector<std::uint8_t> plan_free_mask_;
+  int plan_grid_width_ = 0;
+  int plan_grid_height_ = 0;
+  double plan_grid_resolution_ = 0.;
+  double plan_grid_origin_x_ = 0.;
+  double plan_grid_origin_y_ = 0.;
   bool clear_start_pinch_ = false;
   std::unordered_set<std::size_t> driven_corridor_;
   bool escape_then_return_ = false;
