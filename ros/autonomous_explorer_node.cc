@@ -338,6 +338,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       latest_map_replans_ = 0;
       cut_replans_ = 0;
     }
+    start_occupied_ = false;
     Goal goal = requested_goal;
     if (!returning) {
       if (const auto settled = explorer_.SettleGoal(goal)) {
@@ -677,6 +678,8 @@ class AutonomousExplorer final : public rclcpp::Node {
         last_planning_failure_ = initial_state.planning_failure_reason.empty()
                                      ? "no route"
                                      : initial_state.planning_failure_reason;
+        start_occupied_ =
+            last_planning_failure_.find("start occupied") != std::string::npos;
         RCLCPP_WARN(get_logger(),
                     "Navigation2D rejected goal before execution: %s",
                     last_planning_failure_.c_str());
@@ -1481,9 +1484,21 @@ class AutonomousExplorer final : public rclcpp::Node {
   // Body-frame lidar only — no map pose / yaw. LD14 distorts hard while
   // spinning and localization coasts on odom, so tip escape must prefer
   // reverse translation over in-place rotate.
+  // Blind body-frame motion is only for a robot the planner cannot move:
+  // boxed in on both axes, or its latest plan failed because the start sits
+  // in an obstacle. Anywhere else a plan is the safer way out; escaping in
+  // open space drove the tail into walls it could not see.
   bool TryStartEscape() {
     if (!scan_ || !pose_ || now() < escape_until_) return false;
     const BodyRanges body = ReadBodyRanges();
+    const bool boxed_in = navigation2d::HitBlocksSwing(body.front) &&
+                          navigation2d::HitBlocksSwing(body.side);
+    if (!boxed_in && !start_occupied_) {
+      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+                  "Escape skipped: not boxed in and start is plannable "
+                  "(front=%.2f side=%.2f)", body.front, body.side);
+      return false;
+    }
     const double front = body.front;
     const double back = body.back;
     const double left = body.left;
@@ -2114,8 +2129,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       ++attempted;
       // Start pinched in wall-corner inflation: every other goal fails the same
       // start check. Do not entry-probe / rebuild-tour — leave the pinch first.
-      const bool start_pinched =
-          last_planning_failure_.find("start occupied") != std::string::npos;
+      const bool start_pinched = start_occupied_;
       if (start_pinched) {
         ++reject_streak_;
         clear_start_pinch_ = true;
@@ -4434,6 +4448,8 @@ class AutonomousExplorer final : public rclcpp::Node {
   std::string last_maneuver_ = "tracking";
   std::string last_monitor_action_ = "none";
   std::string last_planning_failure_;
+  // Most recent StartNavigation was rejected with the start in an obstacle.
+  bool start_occupied_ = false;
   double last_path_progress_m_ = 0.;
   double last_path_length_m_ = 0.;
   double last_path_min_clearance_m_ = 0.;
