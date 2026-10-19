@@ -713,35 +713,20 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
     }
     ++raw_frontier_clusters_;
     const int cluster_id = static_cast<int>(raw_frontier_clusters_);
-    // Keep short doorway boundaries: stability filtering removes one-frame
-    // sensor speckles, while a hard component-size cut discards real maze
-    // branches.  A 1--5 cell component is retained only when a full-clearance
-    // viewpoint is already beside it. The narrow-passage exception is not
-    // used here: an open-room speck shortens one free run and would otherwise
-    // look like a doorway. The stability observer still rejects one-frame
-    // lidar speckles.
+    // Clusters below the minimum stay out of the exploring tour unless a cell
+    // is a passable door or still has a room of unknown behind it.
+    bool cluster_is_door = false;
     if (cluster.size() < static_cast<std::size_t>(config_.minimum_frontier_cells)) {
-      bool doorway_component = false;
-      if (!cluster.empty()) {
-        for (const int cell : cluster) {
-          const int cell_row = cell / map_.width, cell_col = cell % map_.width;
-          for (int dy = -2; dy <= 2 && !doorway_component; ++dy) {
-            for (int dx = -2; dx <= 2; ++dx) {
-              if (ClearAt(cell_col + dx, cell_row + dy, discovery_clearance)) {
-                doorway_component = true;
-                goto doorway_viewpoint_found;
-              }
-            }
-          }
+      for (const int cell : cluster) {
+        const int cell_row = cell / map_.width, cell_col = cell % map_.width;
+        const auto [cx, cy] = CellCenter(cell_col, cell_row);
+        if (CorridorMouthAt(map_, cx, cy) ||
+            UnknownRoomBeyond(map_, cell_col, cell_row)) {
+          cluster_is_door = true;
+          break;
         }
       }
-      doorway_viewpoint_found:
-      // Once the map is mature, a 1--5 cell component is almost always a
-      // residual ray/raster fragment from an already observed boundary. Keep
-      // the doorway exception only during the initial map phase; real narrow
-      // entrances are represented by their larger connected boundary after
-      // the first scan through them.
-      if (!doorway_component || KnownCells() >= 10000) continue;
+      if (!cluster_is_door) continue;
     }
     double mean_col = 0., mean_row = 0.;
     for (int index : cluster) { mean_col += index % map_.width; mean_row += index / map_.width; }
@@ -929,31 +914,28 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
       }
     }
     if (best) {
+      ExploringGoalFacts facts;
+      facts.frontier_cells = best->frontier_cells;
+      facts.information_gain = best->information_gain;
+      facts.cell_area = map_.resolution * map_.resolution;
+      facts.passable_mouth =
+          CorridorMouthAt(map_, best->frontier_x, best->frontier_y);
+      const int frontier_col = static_cast<int>(std::floor(
+          (best->frontier_x - map_.origin_x) / map_.resolution));
+      const int frontier_row = static_cast<int>(std::floor(
+          (best->frontier_y - map_.origin_y) / map_.resolution));
+      facts.unentered_room =
+          UnknownRoomBeyond(map_, frontier_col, frontier_row) ||
+          UnenteredRoomBeyond(*best);
+      if (!AdmitExploringGoal(facts, config_.minimum_frontier_cells) ||
+          tips_.Blocked(best->frontier_x, best->frontier_y)) {
+        continue;
+      }
       goals.push_back(*best);
       debug_snapshot_.cluster_goals.push_back(
           {best->x, best->y, best->frontier_x, best->frontier_y, cluster_id,
            best->score, best->information_gain, best->frontier_cells});
     }
-  }
-  // Mature maps: open-space residual fragments (furniture legs, already-seen
-  // wall tips) still form >=minimum_frontier_cells clusters with tiny visible
-  // unknown. Those viewpoints land in blue explored junctions and starve
-  // unfinished alcoves. Keep corridor mouths and meaningful unknown pockets.
-  if (KnownCells() >= 10000) {
-    constexpr double kMinOpenResidualGain = 1.5;
-    constexpr int kMinOpenResidualCells = 18;
-    goals.erase(std::remove_if(goals.begin(), goals.end(),
-                               [&](const ExplorationGoal& goal) {
-                                 if (CorridorMouthAt(map_, goal.frontier_x,
-                                                     goal.frontier_y))
-                                   return false;
-                                 if (goal.information_gain >= kMinOpenResidualGain)
-                                   return false;
-                                 if (goal.frontier_cells >= kMinOpenResidualCells)
-                                   return false;
-                                 return true;
-                               }),
-                goals.end());
   }
   std::sort(goals.begin(), goals.end(),
             [](const auto& a, const auto& b) { return a.score > b.score; });
@@ -1063,7 +1045,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectLeftoverApproaches(
   // frontier_cells=0 retreat ping-pong and never escapes.
   const std::size_t known_now = KnownCells();
   const auto leftover_suppressed = [&](double x, double y) {
-    if (PersistentlyBlacklisted(x, y)) return true;
+    if (tips_.Blocked(x, y) || PersistentlyBlacklisted(x, y)) return true;
     return std::any_of(blacklist_.begin(), blacklist_.end(), [&](const auto& entry) {
       if (entry.persistent || entry.radius < 1.5) return false;
       if (known_now >= entry.known_cells + entry.required_growth) return false;
@@ -1304,36 +1286,18 @@ std::vector<ExplorationGoal> FrontierExplorer::OneGoalPerMouth(
 
 std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
     double robot_x, double robot_y, double robot_yaw) {
-  // Mouth collapse / entry posing already happened in SelectGoals. Region
-  // scheduling owns inter-room order: stay in the active room until its
-  // executable observations are gone, then BFS to an adjacent unfinished room.
+  // Exploring work is admitted goals only. Residuals wait for the coverage
+  // pass. While a room is open, the tour does not include other rooms.
   auto remaining = SelectGoals(robot_x, robot_y);
-  const RegionId active = regions_.ActiveRegion();
-  const auto active_it = active ? regions_.regions().find(active)
-                                : regions_.regions().end();
-  const bool active_unfinished =
-      active_it != regions_.regions().end() && active_it->second.frontier_cells > 0;
-  if (active_unfinished) {
-    // Pinched tips often fail SelectGoals ClearAt while still showing a red
-    // frontier arc. Always merge leftover approaches for the active context
-    // so a far forward mouth in the same room cannot hide the local tip.
-    auto leftovers = SelectLeftoverApproaches(robot_x, robot_y, 5);
-    for (auto& leftover : leftovers) {
-      if (!GoalInActiveRegion(leftover)) continue;
-      // Do not promote open-space residual leftovers into the exploring tour
-      // on a mature map — that re-queued GOAL/CARROT in already-explored
-      // junctions while unfinished rooms stayed white. Completing still uses
-      // SelectLeftoverApproaches directly for true tip finish-up.
-      if (KnownCells() >= 10000 &&
-          !CorridorMouthAt(map_, leftover.frontier_x, leftover.frontier_y))
-        continue;
-      const bool duplicate = std::any_of(
-          remaining.begin(), remaining.end(), [&](const ExplorationGoal& prior) {
-            return std::hypot(prior.frontier_x - leftover.frontier_x,
-                              prior.frontier_y - leftover.frontier_y) < .80 ||
-                   std::hypot(prior.x - leftover.x, prior.y - leftover.y) < .80;
-          });
-      if (!duplicate) remaining.push_back(std::move(leftover));
+  RefreshPassages();
+  if (ActiveRegion()) {
+    std::vector<ExplorationGoal> local;
+    for (auto& goal : remaining) {
+      if (GoalInActiveRegion(goal)) local.push_back(std::move(goal));
+    }
+    if (ActiveHoldsPassage() || !local.empty()) {
+      if (local.empty()) return {};
+      return regions_.Order(std::move(local), robot_x, robot_y, robot_yaw);
     }
   }
   if (remaining.empty()) return {};
@@ -1344,7 +1308,41 @@ std::vector<ExplorationGoal> FrontierExplorer::OrderByRegion(
     std::vector<ExplorationGoal> goals, double robot_x, double robot_y,
     double robot_yaw) {
   if (goals.empty()) return goals;
+  RefreshPassages();
   return regions_.Order(std::move(goals), robot_x, robot_y, robot_yaw);
+}
+
+void FrontierExplorer::RefreshPassages() {
+  regions_.ClearPassages();
+  if (map_.width <= 0 || map_.height <= 0 || map_.resolution <= 0.) return;
+  for (int row = 0; row < map_.height; ++row) {
+    for (int col = 0; col < map_.width; ++col) {
+      if (!RawFrontier(col, row)) continue;
+      const auto [x, y] = CellCenter(col, row);
+      if (tips_.Blocked(x, y) || PersistentlyBlacklisted(x, y)) continue;
+      if (!CorridorMouthAt(map_, x, y)) continue;
+      const RegionId id = regions_.RegionAt(x, y);
+      if (id) regions_.MarkPassage(id);
+    }
+  }
+}
+
+bool FrontierExplorer::ActiveHoldsPassage() const {
+  const RegionId active = ActiveRegion();
+  if (!active) return false;
+  for (const auto& [id, region] : regions_.regions()) {
+    if (region.passage && regions_.InActiveContext(id)) return true;
+  }
+  return false;
+}
+
+bool FrontierExplorer::HasExploringWork() const {
+  return candidate_frontier_goals_ > 0 || ActiveHoldsPassage();
+}
+
+bool FrontierExplorer::ShouldCoverResiduals() const {
+  return ::navigation2d::ShouldCoverResiduals(
+      HasExploringWork(), config_.cover_residuals, raw_frontier_cells_ > 0);
 }
 
 void FrontierExplorer::CommitRegion(const ExplorationGoal& goal) {
@@ -1804,13 +1802,18 @@ void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded
   // A distant standoff must never create a room-sized exclusion disk around
   // its frontier; other safe viewpoints on the same boundary remain useful.
   const std::size_t known = KnownCells();
+  const bool door = CorridorMouthAt(map_, goal.frontier_x, goal.frontier_y) ||
+                    UnenteredRoomBeyond(goal);
   if (succeeded) {
+    if (!door && GoalRegionStillFrontier(goal)) tips_.NoteNoNewArea(goal.frontier_x, goal.frontier_y);
+    else tips_.NoteProgress(goal.frontier_x, goal.frontier_y);
     blacklist_.push_back({goal.frontier_x, goal.frontier_y,
                           kVisitedFrontierRadius, known, 20000u, true});
     blacklist_.push_back({goal.x, goal.y, kVisitedViewpointRadius,
                           known, 20000u, true});
     if (region_complete) ++completed_goals_;
   } else {
+    tips_.NoteUnreached(goal.frontier_x, goal.frontier_y, door);
     // A failed route is evidence about the doorway/frontier, not just the
     // exact viewpoint.  Only cooling the pose lets the next map revision
     // regenerate the same three poses around one mouth, which produced the
@@ -1828,6 +1831,11 @@ void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded
           {goal.frontier_x, goal.frontier_y, 1.10, known, 4000u, false});
     }
     ++failed_goals_;
+  }
+  if (tips_.Blocked(goal.frontier_x, goal.frontier_y)) {
+    blacklist_.push_back({goal.frontier_x, goal.frontier_y,
+                          std::max(config_.blacklist_radius, kSameTipM), known,
+                          20000u, true});
   }
 }
 

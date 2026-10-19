@@ -195,6 +195,7 @@ void RegionScheduler::Update(const ExplorationGrid& g, double clearance) {
   for (auto& [id, r] : regions_) {
     (void)id;
     r.visible = false; r.free_cells = r.frontier_cells = r.candidates = 0;
+    r.passage = false;
     r.neighbors.clear();
   }
   std::map<RegionId, std::uint64_t> hashes;
@@ -310,6 +311,24 @@ void RegionScheduler::Enter(const ExplorationGoal& goal) {
   it->second.state = RegionState::kActive;
 }
 
+void RegionScheduler::ClearPassages() {
+  for (auto& [id, r] : regions_) {
+    (void)id;
+    r.passage = false;
+  }
+}
+
+void RegionScheduler::MarkPassage(RegionId id) {
+  const auto it = regions_.find(id);
+  if (it == regions_.end() || !it->second.visible) return;
+  it->second.passage = true;
+}
+
+bool RegionScheduler::HasPassage(RegionId id) const {
+  const auto it = regions_.find(id);
+  return it != regions_.end() && it->second.passage;
+}
+
 bool RegionScheduler::InActiveContext(RegionId id) const {
   if (!id) return false;
   if (stack_.empty()) return true;
@@ -340,8 +359,10 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
   for (auto& [id, r] : regions_) if (r.visible) {
     (void)id;
     if (r.candidates) r.state = RegionState::kPending;
-    else if (r.frontier_cells) r.state = RegionState::kBlocked;
-    else if (r.state != RegionState::kComplete) r.state = RegionState::kWaiting;
+    else if (r.passage) r.state = RegionState::kBlocked;
+    else if (r.frontier_cells == 0 && r.state != RegionState::kComplete)
+      r.state = RegionState::kWaiting;
+    else if (r.state == RegionState::kBlocked) r.state = RegionState::kPending;
   }
   auto descendant = [&](RegionId id, RegionId ancestor) {
     std::set<RegionId> seen;
@@ -358,12 +379,9 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
     const bool child_work = std::any_of(goals.begin(), goals.end(), [&](const auto& g) {
       return descendant(g.region_id, r.id);
     });
-    // Keep the DFS lock while the room still has raw free↔unknown cells,
-    // even when SelectGoals found no SafeViewpoint (pinched alcove tip).
-    // Popping on candidates==0 was the "ran away before finishing" bug.
-    if (r.candidates || child_work || r.state == RegionState::kWaiting ||
-        r.frontier_cells > 0)
-      break;
+    // A passable door holds the room. Raw frontier cells do not.
+    if (r.candidates || child_work || r.passage) break;
+    if (r.state == RegionState::kWaiting && goals.empty()) break;
     last_region_ = stack_.back(); stack_.pop_back();
   }
   RegionId preferred = stack_.empty() ? 0 : stack_.back();
@@ -375,70 +393,21 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
   // may wait here. The navigation planner remains authoritative for safety.
   if (preferred && regions_.at(preferred).state == RegionState::kWaiting &&
       goals.empty()) return {};
-  // Unfinished PENDING/ACTIVE rooms hard-lock while they still have executable
-  // mouths. BLOCKED tips (raw frontiers, often unproductive tip thrash) must
-  // soft-unlock: hard-locking them discarded large unfinished sibling rooms
-  // and returned an empty tour (PARTIAL) while white alcoves remained visible.
-  // Soft-unlock prefers nearby siblings, but keeps farther unfinished rooms
-  // when nothing is within range — the old 4 m erase returned {} at ~4–8 m.
-  bool soft_unlocked = false;
-  if (preferred && regions_.at(preferred).frontier_cells > 0) {
-    const bool preferred_has_mouths =
-        regions_.at(preferred).candidates > 0 ||
-        std::any_of(goals.begin(), goals.end(), [&](const ExplorationGoal& g) {
-          return descendant(g.region_id, preferred);
-        });
-    const bool hard_lock =
-        preferred_has_mouths &&
-        regions_.at(preferred).state != RegionState::kBlocked;
-    if (hard_lock) {
-      goals.erase(std::remove_if(goals.begin(), goals.end(),
-                                 [&](const ExplorationGoal& g) {
-                                   return !descendant(g.region_id, preferred);
-                                 }),
-                  goals.end());
-      if (goals.empty()) return {};
-    } else {
-      soft_unlocked = true;
-      constexpr double kSoftUnlockPreferM = 4.0;
-      // When tip-local mouths force a leave, still prefer unfinished rooms in
-      // the local wing (~8 m) over apartment-crossing hops (log: tip at
-      // (-4.8,-2.2) → (-0.3,4.1) while siblings sat a few metres away).
-      constexpr double kSoftUnlockLocalWingM = 8.0;
-      std::vector<ExplorationGoal> nearby;
-      std::vector<ExplorationGoal> far;
-      nearby.reserve(goals.size());
-      far.reserve(goals.size());
-      for (const auto& g : goals) {
-        if (std::hypot(g.x - x, g.y - y) <= kSoftUnlockPreferM)
-          nearby.push_back(g);
-        else
-          far.push_back(g);
-      }
-      if (!nearby.empty() && !far.empty() &&
-          regions_.at(preferred).state == RegionState::kBlocked) {
-        const bool nearby_only_tip = std::all_of(
-            nearby.begin(), nearby.end(), [&](const ExplorationGoal& g) {
-              return descendant(g.region_id, preferred);
-            });
-        // Tip-local mouths alone would win the nearby filter forever; leave
-        // the exhausted pocket for unfinished rooms elsewhere.
-        if (nearby_only_tip) {
-          std::vector<ExplorationGoal> wing;
-          for (const auto& g : far) {
-            if (std::hypot(g.x - x, g.y - y) <= kSoftUnlockLocalWingM)
-              wing.push_back(g);
-          }
-          goals = !wing.empty() ? std::move(wing) : std::move(far);
-        } else {
-          goals = std::move(nearby);
-        }
-      } else if (!nearby.empty()) {
-        goals = std::move(nearby);
-      }
-      // else: keep all goals (far-only unfinished rooms)
-      if (goals.empty()) return {};
-    }
+  // Admitted goals or a passable door keep the tour inside this room.
+  // Residuals do not soft-unlock into a sibling.
+  const bool room_open =
+      preferred &&
+      (regions_.at(preferred).candidates > 0 || regions_.at(preferred).passage ||
+       std::any_of(goals.begin(), goals.end(), [&](const ExplorationGoal& g) {
+         return descendant(g.region_id, preferred);
+       }));
+  if (room_open) {
+    goals.erase(std::remove_if(goals.begin(), goals.end(),
+                               [&](const ExplorationGoal& g) {
+                                 return !descendant(g.region_id, preferred);
+                               }),
+                goals.end());
+    if (goals.empty()) return {};
   }
   RegionId origin = last_region_;
   if (!origin || !regions_.at(origin).visible) origin = RegionAt(x, y);
@@ -475,19 +444,13 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
     constexpr double kLocalPocketM = 2.5;
     const bool far_pocket =
         std::min(distance, frontier_range) > kLocalPocketM;
-    // Soft-unlock: any large reverse is a wasted U-turn; hard-lock keeps the
-    // older "local tip behind OK" contract. BLOCKED tip mouths sort after
-    // unfinished sibling rooms so tip thrash cannot starve coverage.
-    const bool reverse = use_heading && turn > 1.75 &&
-                         (soft_unlocked || far_pocket);
-    const bool tip_mouth =
-        soft_unlocked && preferred && descendant(g.region_id, preferred);
-    return std::tuple(tip_mouth,
-                      !soft_unlocked && preferred &&
-                          !descendant(g.region_id, preferred),
-                      soft_unlocked && reverse, far_pocket, reverse, turn,
-                      depth(g.region_id), distance - .20 * gain_per_meter,
-                      -gain_per_meter, g.region_id, g.x, g.y);
+    // A local tip behind the robot stays ahead of a far forward mouth.
+    const bool reverse = use_heading && turn > 1.75 && far_pocket;
+    const bool outside =
+        preferred && !descendant(g.region_id, preferred);
+    return std::tuple(outside, far_pocket, reverse, turn, depth(g.region_id),
+                      distance - .20 * gain_per_meter, -gain_per_meter,
+                      g.region_id, g.x, g.y);
   };
   std::stable_sort(goals.begin(), goals.end(), [&](const auto& a, const auto& b) {
     return rank(a) < rank(b);

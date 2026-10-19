@@ -1,5 +1,6 @@
 #pragma once
 
+#include "navigation2d/exploration/exploration_policy.h"
 #include "navigation2d/exploration/region_scheduler.h"
 #include "navigation2d/geometry/robot_geometry.h"
 
@@ -93,6 +94,9 @@ struct FrontierExplorerConfig {
   // on repeated representative observations; online maps may move them every
   // update. Association and cooldown still prevent duplicate exploration.
   int required_frontier_observations = 1;
+  // Sweep coverage visits non-blacklisted residuals after exploring work is
+  // gone. Mapping tasks leave this false.
+  bool cover_residuals = true;
   int minimum_completed_goals = 3;
   std::size_t minimum_known_cell_growth = 500;
   double minimum_known_growth_ratio = .25;
@@ -133,6 +137,13 @@ class FrontierExplorer {
   void CommitRegion(const ExplorationGoal& goal);
   void CommitRegion(double x, double y);
   bool GoalInActiveRegion(const ExplorationGoal& goal) const;
+  // True when the active room or one of its children still has a passable door.
+  bool ActiveHoldsPassage() const;
+  // Admitted goals or a passable door. Raw residual cells are not exploring work.
+  bool HasExploringWork() const;
+  // Coverage finish: exploring work is gone, residuals remain, and this task
+  // asked to sweep them.
+  bool ShouldCoverResiduals() const;
   RegionId ActiveRegion() const { return regions_.ActiveRegion(); }
   bool RegionsComplete() const { return regions_.Complete(); }
   std::string RegionAudit() const { return regions_.Audit(); }
@@ -222,6 +233,7 @@ class FrontierExplorer {
   std::size_t CountRawFrontierCells() const;
   bool Blacklisted(double x, double y, bool boundary = false) const;
   bool PersistentlyBlacklisted(double x, double y) const;
+  void RefreshPassages();
   std::vector<ExplorationGoal> StableGoals(std::vector<ExplorationGoal> goals);
   // Collapse micro-cluster viewpoints into one task per doorway/alcove mouth.
   // Prefers SelectEntryProbe (room side) over hallway standoffs.
@@ -265,6 +277,7 @@ class FrontierExplorer {
   std::size_t candidate_frontier_goals_ = 0;
   FrontierDebugSnapshot debug_snapshot_;
   RegionScheduler regions_;
+  TipLedger tips_;
 };
 
 }  // namespace navigation2d

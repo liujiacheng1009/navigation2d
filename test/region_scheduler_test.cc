@@ -36,27 +36,22 @@ int main() {
   near.x = .8; near.y = 1.2; near.frontier_x = 1.8; near.frontier_y = 1.2;
   near.score = 1.;
   const auto ordered = scheduler.Order({far, near}, .8, 1.2);
-  assert(ordered.size() == 2);
+  assert(ordered.size() == 1);
   assert(ordered.front().region_id == left);
-  assert(ordered.back().region_id == right);
 
-  // Reordering after a map update keeps both regions eligible. The scheduler
-  // never drops a neighbouring candidate merely because the active region was
-  // selected first.
+  // Once the start room has an admitted goal, the sibling waits.
   scheduler.Enter(ordered.front());
   scheduler.Update(grid, .20);
   const auto again = scheduler.Order({far, near}, .8, 1.2);
-  assert(again.size() == 2);
+  assert(again.size() == 1);
   assert(again.front().region_id == left);
-  // Merely inspecting another region's candidates must not steal the DFS
-  // context. Only successful dispatch is allowed to commit that transition.
-  // BLOCKED preferred (raw frontiers, 0 candidates) soft-unlocks a nearby
-  // sibling but keeps the active region on the stack.
+  // Raw frontiers with no admitted goal and no passage do not hold the room.
+  // The sibling becomes eligible and the idle room leaves the stack.
   scheduler.Enter(again.front());
   const auto offered = scheduler.Order({far}, .8, 1.2);
   assert(!offered.empty());
   assert(offered.front().region_id == right);
-  assert(scheduler.ActiveRegion() == left);
+  assert(scheduler.ActiveRegion() != left);
   assert(scheduler.RegionAt(.8, 1.2) != 0);
   scheduler.Enter(again.front());
   assert(scheduler.Order({far, near}, .8, 1.2).front().region_id == left);
@@ -133,19 +128,15 @@ int main() {
   assert(finish_first.InActiveContext(left));
   assert(!finish_first.InActiveContext(right));
   const auto locked = finish_first.Order({right_high, left_low}, .8, 1.2);
+  assert(locked.size() == 1);
   assert(locked.front().region_id == left);
-  assert(locked.back().region_id == right);
-  // BLOCKED tip (raw frontiers, zero in-room candidates): soft-unlock siblings
-  // so large PENDING rooms are not discarded, but keep the preferred region
-  // on the DFS stack for later resume.
-  const auto soft = finish_first.Order({right_high}, .8, 1.2);
-  assert(!soft.empty());
-  assert(soft.front().region_id == right);
-  assert(finish_first.ActiveRegion() == left);
+  // No admitted goal and no passage: the idle room pops and the sibling remains.
+  const auto released = finish_first.Order({right_high}, .8, 1.2);
+  assert(!released.empty());
+  assert(released.front().region_id == right);
+  assert(finish_first.ActiveRegion() != left);
   assert(finish_first.regions().at(left).frontier_cells > 0);
 
-  // Far unfinished room beyond the old 4 m soft-unlock erase must still be
-  // admitted — returning {} here caused PARTIAL while visible alcoves remained.
   navigation2d::ExplorationGoal farther = right_high;
   farther.x = 5.5;
   farther.y = 1.2;
@@ -154,16 +145,21 @@ int main() {
   const auto far_only = finish_first.Order({farther}, .8, 1.2);
   assert(!far_only.empty());
   assert(far_only.front().region_id == right);
-  assert(finish_first.ActiveRegion() == left);
 
-  // BLOCKED tip with a local mouth must not starve a large unfinished sibling:
-  // tip thrash ranks after coverage work elsewhere.
+  // An admitted goal in the active room hides the sibling until the room ends.
+  finish_first.Enter(left_low);
   navigation2d::ExplorationGoal tip_mouth = left_low;
   tip_mouth.score = 50.;
   tip_mouth.information_gain = 50.;
-  const auto leave_tip = finish_first.Order({tip_mouth, farther}, .8, 1.2);
-  assert(!leave_tip.empty());
-  assert(leave_tip.front().region_id == right);
+  const auto stay = finish_first.Order({tip_mouth, farther}, .8, 1.2);
+  assert(stay.size() == 1);
+  assert(stay.front().region_id == left);
+  assert(finish_first.ActiveRegion() == left);
+
+  // A passable door with no posed goal keeps the room and drops the sibling.
+  finish_first.MarkPassage(left);
+  const auto held = finish_first.Order({farther}, .8, 1.2);
+  assert(held.empty());
   assert(finish_first.ActiveRegion() == left);
   return 0;
 }

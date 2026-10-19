@@ -65,6 +65,7 @@ navigation2d::FrontierExplorerConfig ExplorerConfig() {
   config.minimum_standoff = .45;
   config.maximum_standoff = 1.20;
   config.blacklist_radius = 1.20;
+  config.cover_residuals = true;
   return config;
 }
 
@@ -1642,7 +1643,8 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   bool ShouldKeepWaitingForFrontiers() const {
-    if (explorer_.raw_frontier_cells() == 0) return false;
+    if (!explorer_.ActiveHoldsPassage() && !explorer_.HasExploringWork())
+      return false;
     // Cap empty SELECTING loops. The old 36-cycle budget left the chassis
     // wedged in a tip for tens of seconds before PARTIAL (UI: 下方卡住).
     if (completing_probe_rounds_ < 3) return true;
@@ -1667,7 +1669,8 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (tip_rescue_attempted_ || returning_ ||
         phase_ == MissionPhase::kReturning || !pose_)
       return false;
-    if (explorer_.raw_frontier_cells() == 0) return false;
+    if (explorer_.ActiveHoldsPassage() || !explorer_.HasExploringWork())
+      return false;
     tip_rescue_attempted_ = true;
     RCLCPP_WARN(get_logger(),
                 "Tip/tour rescue (%s): peel + retry distant mouths; raw=%zu",
@@ -2010,19 +2013,7 @@ class AutonomousExplorer final : public rclcpp::Node {
            !explorer_.GoalRegionStillFrontier(committed_tour_.front())) {
       committed_tour_.pop_front();
     }
-    if (committed_tour_.empty()) {
-      BuildTour();
-      // BuildTour can be empty while mouths still exist (pinched kitchen graph).
-      // Take only the nearest forward mouth — never a reverse U-turn crumb.
-      if (committed_tour_.empty() && explorer_.candidate_frontier_goals() > 0) {
-        auto mouths = explorer_.SelectGoals(
-            pose_->pose.position.x, pose_->pose.position.y);
-        mouths = explorer_.OrderByRegion(
-            std::move(mouths), pose_->pose.position.x, pose_->pose.position.y,
-            Yaw(pose_->pose.orientation));
-        if (!mouths.empty()) committed_tour_.push_back(mouths.front());
-      }
-    }
+    if (committed_tour_.empty()) BuildTour();
     // A frontier extractor can emit many viewpoints around one wall.  Do not
     // synchronously exhaust that list when the local controller rejects a
     // viewpoint: that turns one transient costmap disagreement into hundreds
@@ -2045,21 +2036,9 @@ class AutonomousExplorer final : public rclcpp::Node {
                     "Skipping recently demoted viewpoint (%.2f, %.2f)", goal.x,
                     goal.y);
         committed_tour_.pop_front();
-        // Order keeps the nearby demoted mouth and drops unfinished rooms
-        // farther than its prefer radius. Pull those mouths in directly so
-        // one failed doorway does not send the robot home.
-        if (committed_tour_.empty() && pose_) {
-          const auto mouths = explorer_.SelectGoals(pose_->pose.position.x,
-                                                    pose_->pose.position.y);
-          for (const auto& candidate : mouths) {
-            if (RecentlyDemoted(candidate)) continue;
-            if (!explorer_.GoalRegionStillFrontier(candidate) &&
-                !explorer_.UnenteredRoomBeyond(candidate))
-              continue;
-            committed_tour_.push_back(candidate);
-            if (committed_tour_.size() >= 3) break;
-          }
-        }
+        // Rebuild inside the open room. Do not pull a global goal while a
+        // door in this room is still holding the tour.
+        if (committed_tour_.empty() && pose_) BuildTour();
         continue;
       }
       // Defer reverse goals only when they are far. A tip inside the local
@@ -2214,7 +2193,14 @@ class AutonomousExplorer final : public rclcpp::Node {
       const bool no_executable_mouths =
           explorer_.candidate_frontier_goals() == 0 || tour_unplannable ||
           tour_empty_with_candidates;
-      if (explorer_.raw_frontier_cells() > 0 && no_executable_mouths) {
+      if (no_executable_mouths && explorer_.ActiveHoldsPassage()) {
+        QueueActiveRegionFinish();
+        next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+        PublishStatus("SELECTING",
+                      "door still open; staying in the active room");
+        return;
+      }
+      if (no_executable_mouths && explorer_.ShouldCoverResiduals()) {
         if (completing_probe_rounds_ < 3) {
           StartCompletingProbe();
           return;
@@ -2252,7 +2238,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         if (TipPinchedNow() &&
             TryRescueDistantMouths("wait-budget tip; rescue distant"))
           return;
-        if (completing_probe_rounds_ < 3 && explorer_.raw_frontier_cells() > 0) {
+        if (completing_probe_rounds_ < 3 && explorer_.ShouldCoverResiduals()) {
           StartCompletingProbe();
           return;
         }

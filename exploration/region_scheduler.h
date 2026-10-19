@@ -16,6 +16,9 @@ struct RegionRecord {
   RegionId id = 0, parent = 0;
   RegionState state = RegionState::kPending;
   bool visible = false;
+  // Set by the explorer when this region still has a passable door.
+  // Raw frontier_cells do not keep the room open.
+  bool passage = false;
   std::size_t free_cells = 0, frontier_cells = 0, candidates = 0;
   unsigned stable_empty_updates = 0;
   std::uint64_t evidence = 0;
@@ -29,12 +32,10 @@ class RegionScheduler {
  public:
   void Update(const ExplorationGrid& observed, double footprint_clearance);
   RegionId RegionAt(double x, double y) const;
-  // Keeps a DFS context until its raw frontiers are gone (not merely until
-  // SelectGoals returns candidates). When truly empty/completed, pop and use
-  // graph BFS to prefer adjacent regions. Hard-locks PENDING/ACTIVE rooms
-  // while they still have in-context mouths. A BLOCKED tip soft-unlocks so
-  // unfinished sibling rooms are not discarded (and tip mouths rank after
-  // those rooms). Preferred stays on the stack to resume later.
+  // While the active room has an admitted goal or a passable door, keep only
+  // that room and its children. Raw frontier cells do not hold the room and
+  // do not pull in a sibling. A passage with no posed goal returns empty and
+  // stays on the stack. `robot_yaw` ranks a far reverse after a forward goal.
   // `robot_yaw` (rad) ranks reverse U-turn goals after forward ones inside the
   // same DFS region. Pass NaN when heading is unknown.
   std::vector<ExplorationGoal> Order(std::vector<ExplorationGoal> goals,
@@ -46,6 +47,9 @@ class RegionScheduler {
   // True when `id` is the active DFS region or a child of it. Empty stack
   // means no commitment yet (any region is eligible).
   bool InActiveContext(RegionId id) const;
+  void ClearPassages();
+  void MarkPassage(RegionId id);
+  bool HasPassage(RegionId id) const;
   bool Complete() const;
   const std::map<RegionId, RegionRecord>& regions() const { return regions_; }
   const std::vector<RegionId>& stack() const { return stack_; }
