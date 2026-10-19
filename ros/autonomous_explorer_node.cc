@@ -3665,6 +3665,15 @@ class AutonomousExplorer final : public rclcpp::Node {
         navigation_.reset();
         cooled_signatures_.clear();
         clear_start_pinch_ = true;
+        // The rejected chord crossed something the latest map now shows.
+        // Plan to the start again on that map before giving up on it: the
+        // new obstacle is off the painted trail, so the route changes.
+        // Two failures means the home plan itself cannot be executed.
+        paint_driven_corridor_ = true;
+        paint_trail_budget_m_ = 80.0;
+        if (ReplanActiveGoalOnLatestMap(
+                "return path cut a mapped obstacle"))
+          return;
         if (StartBreadcrumbTowardHome()) return;
         if (return_escape_attempts_ < 5 && TryStartEscape()) {
           ++return_escape_attempts_;
