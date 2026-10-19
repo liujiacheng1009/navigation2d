@@ -330,8 +330,19 @@ class AutonomousExplorer final : public rclcpp::Node {
     navigation_->UpdateCollisionMonitorLaserScan(sensor, ConvertScan());
   }
 
-  bool StartNavigation(const Goal& goal, bool returning, bool latest_map_retry = false) {
+  bool StartNavigation(const Goal& requested_goal, bool returning,
+                       bool latest_map_retry = false) {
     if (!latest_map_retry) latest_map_replans_ = 0;
+    Goal goal = requested_goal;
+    if (!returning) {
+      if (const auto settled = explorer_.SettleGoal(goal)) {
+        if (std::hypot(settled->x - goal.x, settled->y - goal.y) > 1e-6)
+          RCLCPP_INFO(get_logger(),
+                      "Goal (%.2f, %.2f) too close to a mapped wall; moved to (%.2f, %.2f)",
+                      goal.x, goal.y, settled->x, settled->y);
+        goal = *settled;
+      }
+    }
     navigation_origin_x_ = map_->info.origin.position.x;
     navigation_origin_y_ = map_->info.origin.position.y;
     map_snapshot_path_ = "/tmp/sweepnav-navigation-map-" + std::to_string(map_revision_) + ".json";

@@ -210,6 +210,12 @@ class FrontierExplorer {
   // `visit_radius_m` with at least `minimum_area_m2` of free cells yields one
   // goal at its deepest cell that clears the planning circle. A room seen
   // through its doorway has no frontier left but still appears here.
+  // Moves a goal pose to the nearest observed-free cell within
+  // kSwingClearance that clears the planning circle by one more map cell.
+  // A viewpoint picked at exactly kPlanningRadius beside a jamb turns
+  // "goal occupied" as soon as the next scan adds the jamb's end cell.
+  // The frontier target is kept. Returns nullopt when no such cell exists.
+  std::optional<ExplorationGoal> SettleGoal(const ExplorationGoal& goal) const;
   std::vector<ExplorationGoal> UnvisitedSpaceGoals(
       const std::vector<std::pair<double, double>>& trail,
       double visit_radius_m, double minimum_area_m2) const;

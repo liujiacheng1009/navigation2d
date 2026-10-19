@@ -8,6 +8,7 @@
 #include <limits>
 #include <optional>
 #include <queue>
+#include <tuple>
 #include <utility>
 
 namespace {
@@ -1921,6 +1922,36 @@ std::size_t FrontierExplorer::ReachableUnknownCells(double robot_x, double robot
     }
   }
   return reachable_unknown;
+}
+
+std::optional<ExplorationGoal> FrontierExplorer::SettleGoal(
+    const ExplorationGoal& goal) const {
+  if (map_.width <= 0 || map_.height <= 0 || map_.resolution <= 0. ||
+      !std::isfinite(goal.x) || !std::isfinite(goal.y))
+    return std::nullopt;
+  const double clearance = kPlanningRadius + map_.resolution;
+  const int col0 = static_cast<int>(std::floor((goal.x - map_.origin_x) / map_.resolution));
+  const int row0 = static_cast<int>(std::floor((goal.y - map_.origin_y) / map_.resolution));
+  auto settled = [&](int col, int row) {
+    return Free(col, row) && RawFree(col, row) && ClearAt(col, row, clearance);
+  };
+  if (settled(col0, row0)) return goal;
+  const int reach = static_cast<int>(std::ceil(kSwingClearance / map_.resolution));
+  double best = std::numeric_limits<double>::infinity();
+  int best_col = -1, best_row = -1;
+  for (int row = row0 - reach; row <= row0 + reach; ++row) {
+    for (int col = col0 - reach; col <= col0 + reach; ++col) {
+      const double d = std::hypot(col - col0, row - row0);
+      if (d > reach || d >= best || !settled(col, row)) continue;
+      best = d;
+      best_col = col;
+      best_row = row;
+    }
+  }
+  if (best_col < 0) return std::nullopt;
+  ExplorationGoal moved = goal;
+  std::tie(moved.x, moved.y) = CellCenter(best_col, best_row);
+  return moved;
 }
 
 std::vector<ExplorationGoal> FrontierExplorer::UnvisitedSpaceGoals(
