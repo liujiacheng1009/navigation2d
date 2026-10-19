@@ -334,7 +334,10 @@ class AutonomousExplorer final : public rclcpp::Node {
 
   bool StartNavigation(const Goal& requested_goal, bool returning,
                        bool latest_map_retry = false) {
-    if (!latest_map_retry) latest_map_replans_ = 0;
+    if (!latest_map_retry) {
+      latest_map_replans_ = 0;
+      cut_replans_ = 0;
+    }
     Goal goal = requested_goal;
     if (!returning) {
       if (const auto settled = explorer_.SettleGoal(goal)) {
@@ -2633,6 +2636,29 @@ class AutonomousExplorer final : public rclcpp::Node {
     return StartNavigation(active_goal_, returning_, true);
   }
 
+  // A route cut while driving means the map changed, not that the goal is
+  // bad: plan the same goal again on the newest map, painted the way the cut
+  // route was, before any failure bookkeeping (reject counts, signature
+  // cooling, breadcrumbs). The new snapshot contains the new obstacle, so the
+  // planner routes around it or reports no route.
+  bool ReplanAfterRouteCut() {
+    constexpr int kMaxCutReplans = 3;
+    if (cut_replans_ >= kMaxCutReplans) return false;
+    ++cut_replans_;
+    navigation_.reset();
+    if (plan_trail_budget_m_ > 0.) {
+      paint_driven_corridor_ = true;
+      paint_trail_budget_m_ = plan_trail_budget_m_;
+    }
+    RCLCPP_WARN(get_logger(),
+                "Route cut by newly mapped obstacle; replanning same %s goal on latest map (%d/%d)",
+                returning_ ? "return" : "frontier", cut_replans_, kMaxCutReplans);
+    const int cut_replans = cut_replans_;
+    const bool accepted = StartNavigation(active_goal_, returning_, true);
+    cut_replans_ = cut_replans;
+    return accepted;
+  }
+
   void ClearDisplayedGoal() {
     active_goal_ = Goal{};
     active_goal_.x = std::numeric_limits<double>::quiet_NaN();
@@ -2737,7 +2763,8 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (locked_entry_mouth_ || pending_entry_goal_) {
       if (!pending_entry_goal_) pending_entry_goal_ = locked_entry_mouth_;
       latest_map_replans_ = 0;
-      if (ReplanActiveGoalOnLatestMap("path cut at locked mouth; replan entry")) {
+      if (cut_replans_ == 0 &&
+          ReplanActiveGoalOnLatestMap("path cut at locked mouth; replan entry")) {
         PublishStatus("COMPLETING",
                       "path cut; replanning locked mouth on latest map");
         return true;
@@ -2772,7 +2799,8 @@ class AutonomousExplorer final : public rclcpp::Node {
       return AbandonWallTipAfterPathCut(
           "path cut at low-clearance wall tip; leaving tip pocket");
     }
-    if (ReplanActiveGoalOnLatestMap("path cut mapped obstacle; replan once"))
+    if (cut_replans_ == 0 &&
+        ReplanActiveGoalOnLatestMap("path cut mapped obstacle; replan once"))
       return true;
     DemoteActiveGoal("path intersected mapped obstacles");
     if (BreakMappedObstacleThrash()) return true;
@@ -3688,19 +3716,11 @@ class AutonomousExplorer final : public rclcpp::Node {
       geometry_msgs::msg::Twist stop;
       command_publisher_->publish(stop);
       ClearPublishedNavPaths();
+      if (ReplanAfterRouteCut()) return;
       if (phase_ == MissionPhase::kReturning || returning_) {
         navigation_.reset();
         cooled_signatures_.clear();
         clear_start_pinch_ = true;
-        // The rejected chord crossed something the latest map now shows.
-        // Plan to the start again on that map before giving up on it: the
-        // new obstacle is off the painted trail, so the route changes.
-        // Two failures means the home plan itself cannot be executed.
-        paint_driven_corridor_ = true;
-        paint_trail_budget_m_ = 80.0;
-        if (ReplanActiveGoalOnLatestMap(
-                "return path cut a mapped obstacle"))
-          return;
         if (StartBreadcrumbTowardHome()) return;
         if (return_escape_attempts_ < 5 && TryStartEscape()) {
           ++return_escape_attempts_;
@@ -4328,6 +4348,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   std::size_t last_no_executable_known_cells_ = 0;
   bool partial_return_ = false;
   int latest_map_replans_ = 0;
+  int cut_replans_ = 0;
   int entry_open_loop_ticks_ = 0;
   bool locked_entry_easy_ = false;
   bool pending_region_finish_ = false;
