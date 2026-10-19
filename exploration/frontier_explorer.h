@@ -216,9 +216,15 @@ class FrontierExplorer {
   // "goal occupied" as soon as the next scan adds the jamb's end cell.
   // The frontier target is kept. Returns nullopt when no such cell exists.
   std::optional<ExplorationGoal> SettleGoal(const ExplorationGoal& goal) const;
+  // Free-space components farther than `visit_radius_m` from the trail that
+  // a room seed reaches within `seed_radius_m` through free cells while
+  // never stepping closer to the trail. Seeds are doorway probe targets of
+  // rooms never entered.
   std::vector<ExplorationGoal> UnvisitedSpaceGoals(
       const std::vector<std::pair<double, double>>& trail,
-      double visit_radius_m, double minimum_area_m2) const;
+      double visit_radius_m, double minimum_area_m2,
+      const std::vector<std::pair<double, double>>& room_seeds,
+      double seed_radius_m) const;
   std::size_t RegionFrontierCells(double anchor_x, double anchor_y,
                                   double radius_m) const;
   std::size_t KnownCells() const;

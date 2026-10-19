@@ -1413,18 +1413,22 @@ int main() {
     for (int row = 39; row < 126; ++row)
       for (int col = 60; col < 84; ++col) flat.cells[row * flat.width + col] = 0;
     visits.UpdateMap(flat);
+    const double pocket = navigation2d::kRoomPocketDepthM * navigation2d::kRoomPocketDepthM;
+    const std::vector<std::pair<double, double>> kitchen_door{{2.16, 1.35}};
     std::vector<std::pair<double, double>> trail;
-    for (double x = .3; x < 3.9; x += .05) trail.emplace_back(x, .66);
+    // Hallway driven only up to the kitchen door: its far end is mapped and
+    // far from the trail, but no doorway was tried there, so it is no goal.
+    for (double x = .3; x < 2.2; x += .05) trail.emplace_back(x, .66);
+    assert(visits.UnvisitedSpaceGoals(trail, navigation2d::kOpenRetreat, pocket, {},
+                                      navigation2d::kOpenRetreat).empty());
     const auto unvisited = visits.UnvisitedSpaceGoals(
-        trail, navigation2d::kOpenRetreat,
-        navigation2d::kRoomPocketDepthM * navigation2d::kRoomPocketDepthM);
+        trail, navigation2d::kOpenRetreat, pocket, kitchen_door, navigation2d::kOpenRetreat);
     assert(unvisited.size() == 1);
     assert(unvisited.front().y > 1.2);
     assert(unvisited.front().x > 1.8 && unvisited.front().x < 2.52);
     for (double y = .66; y < 3.6; y += .05) trail.emplace_back(2.16, y);
-    assert(visits.UnvisitedSpaceGoals(
-        trail, navigation2d::kOpenRetreat,
-        navigation2d::kRoomPocketDepthM * navigation2d::kRoomPocketDepthM).empty());
+    assert(visits.UnvisitedSpaceGoals(trail, navigation2d::kOpenRetreat, pocket, kitchen_door,
+                                      navigation2d::kOpenRetreat).empty());
   }
 
   {

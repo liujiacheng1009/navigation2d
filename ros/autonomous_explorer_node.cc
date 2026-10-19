@@ -1231,6 +1231,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       const bool already_in = EntryProbeSatisfied();
       if (already_in) {
         explorer_.RecordAttempt(*pending_entry_goal_, true, false);
+        ForgetEntryRoom(*pending_entry_goal_);
         recently_demoted_ = *pending_entry_goal_;
         recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(14.0);
         // Do not CoolRegion the mouth — that hid kitchen leftovers and made
@@ -1259,6 +1260,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     // Entry plans must not inherit cooled hallway chords — those forced
     // first-segment replay failures with progress=0 at the wrong pose.
     cooled_signatures_.clear();
+    RememberEntryRoom(*pending_entry_goal_, *probe);
     if (!StartNavigation(*probe, false)) {
       RCLCPP_WARN(get_logger(),
                   "Entry probe rejected: target=(%.2f,%.2f) depth=%.2f attempt=%d "
@@ -1982,6 +1984,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (pending_entry_goal_) {
       if (EntryProbeSatisfied()) {
         explorer_.RecordAttempt(*pending_entry_goal_, true, false);
+        ForgetEntryRoom(*pending_entry_goal_);
         ClearEntryMouthLock();
         QueueActiveRegionFinish();
         next_selection_ = now();
@@ -2463,18 +2466,44 @@ class AutonomousExplorer final : public rclcpp::Node {
     return true;
   }
 
-  // Frontiers only prove a room was seen. A room observed through its door
-  // has none left, so before going home drive into known space that is far
-  // from the trail (measured through free cells). Each spot gets two tries;
-  // a reached spot drops out because the trail now passes it.
+  void RememberEntryRoom(const Goal& frontier, const Goal& probe) {
+    for (const auto& room : unentered_rooms_) {
+      if (std::hypot(room.frontier_x - frontier.frontier_x,
+                     room.frontier_y - frontier.frontier_y) < navigation2d::kSwingClearance)
+        return;
+    }
+    unentered_rooms_.push_back({frontier.frontier_x, frontier.frontier_y, probe.x, probe.y});
+  }
+
+  void ForgetEntryRoom(const Goal& frontier) {
+    unentered_rooms_.erase(
+        std::remove_if(unentered_rooms_.begin(), unentered_rooms_.end(),
+                       [&](const UnenteredRoom& room) {
+                         return std::hypot(room.frontier_x - frontier.frontier_x,
+                                           room.frontier_y - frontier.frontier_y) <
+                                navigation2d::kSwingClearance;
+                       }),
+        unentered_rooms_.end());
+  }
+
+  // Frontiers only prove a room was seen. A door the explorer tried to cross
+  // but never did leaves a room with no frontier, so before going home drive
+  // into the known space behind that door. Only doors with an entry attempt
+  // count: far-but-mapped pockets of rooms already entered are not revisited.
+  // Each spot gets two tries; a reached spot drops out because the trail now
+  // passes it.
   bool TryVisitUnenteredSpace() {
     if (!pose_ || returning_ || phase_ == MissionPhase::kReturning) return false;
+    if (unentered_rooms_.empty()) return false;
     constexpr int kVisitAttempts = 2;
     const double rx = pose_->pose.position.x;
     const double ry = pose_->pose.position.y;
+    std::vector<std::pair<double, double>> room_seeds;
+    for (const auto& room : unentered_rooms_) room_seeds.emplace_back(room.probe_x, room.probe_y);
     auto goals = explorer_.UnvisitedSpaceGoals(
         trajectory_, navigation2d::kOpenRetreat,
-        navigation2d::kRoomPocketDepthM * navigation2d::kRoomPocketDepthM);
+        navigation2d::kRoomPocketDepthM * navigation2d::kRoomPocketDepthM,
+        room_seeds, navigation2d::kOpenRetreat);
     std::sort(goals.begin(), goals.end(), [&](const Goal& a, const Goal& b) {
       return std::hypot(a.x - rx, a.y - ry) < std::hypot(b.x - rx, b.y - ry);
     });
@@ -3453,6 +3482,7 @@ class AutonomousExplorer final : public rclcpp::Node {
           recently_demoted_ = *pending_entry_goal_;
           recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(12.0);
           explorer_.RecordAttempt(*pending_entry_goal_, true, false);
+          ForgetEntryRoom(*pending_entry_goal_);
           ClearEntryMouthLock();
           QueueActiveRegionFinish();
           next_selection_ = now();
@@ -3526,6 +3556,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       recently_demoted_ = *pending_entry_goal_;
       recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(12.0);
       explorer_.RecordAttempt(*pending_entry_goal_, true, false);
+      ForgetEntryRoom(*pending_entry_goal_);
       ClearEntryMouthLock();
       // Queue in-room leftovers now (while still driving the probe) so a later
       // stall/abandon cannot soft-unlock out of the kitchen with white left.
@@ -3563,6 +3594,7 @@ class AutonomousExplorer final : public rclcpp::Node {
           }
           if (EntryProbeSatisfied()) {
             explorer_.RecordAttempt(*pending_entry_goal_, true, false);
+            ForgetEntryRoom(*pending_entry_goal_);
             ClearEntryMouthLock();
             QueueActiveRegionFinish();
             next_selection_ = now();
@@ -3851,6 +3883,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       } else if (pending_entry_goal_) {
         if (EntryProbeSatisfied()) {
           explorer_.RecordAttempt(*pending_entry_goal_, true, false);
+          ForgetEntryRoom(*pending_entry_goal_);
           ClearEntryMouthLock();
           QueueActiveRegionFinish();
           next_selection_ = now();
@@ -4285,6 +4318,8 @@ class AutonomousExplorer final : public rclcpp::Node {
   bool tip_rescue_attempted_ = false;
   struct RoomVisitAttempt { double x, y; int count; };
   std::vector<RoomVisitAttempt> room_visit_attempts_;
+  struct UnenteredRoom { double frontier_x, frontier_y, probe_x, probe_y; };
+  std::vector<UnenteredRoom> unentered_rooms_;
   geometry_msgs::msg::Twist escape_command_;
   rclcpp::Time escape_until_{0, 0, RCL_ROS_TIME};
   int reported_recoveries_ = 0;
