@@ -1399,4 +1399,32 @@ int main() {
     assert(!rooms.UnenteredRoomBeyond(mouth));
   }
 
+  {
+    // A 0.72 m kitchen fully seen through its door from the hallway has no
+    // frontier, yet the robot never drove in. It must still be a visit goal.
+    navigation2d::FrontierExplorer visits(config);
+    navigation2d::ExplorationGrid flat;
+    flat.width = 140;
+    flat.height = 130;
+    flat.resolution = .03;
+    flat.cells.assign(static_cast<std::size_t>(flat.width) * flat.height, 100);
+    for (int row = 5; row < 39; ++row)
+      for (int col = 5; col < 135; ++col) flat.cells[row * flat.width + col] = 0;
+    for (int row = 39; row < 126; ++row)
+      for (int col = 60; col < 84; ++col) flat.cells[row * flat.width + col] = 0;
+    visits.UpdateMap(flat);
+    std::vector<std::pair<double, double>> trail;
+    for (double x = .3; x < 3.9; x += .05) trail.emplace_back(x, .66);
+    const auto unvisited = visits.UnvisitedSpaceGoals(
+        trail, navigation2d::kOpenRetreat,
+        navigation2d::kRoomPocketDepthM * navigation2d::kRoomPocketDepthM);
+    assert(unvisited.size() == 1);
+    assert(unvisited.front().y > 1.2);
+    assert(unvisited.front().x > 1.8 && unvisited.front().x < 2.52);
+    for (double y = .66; y < 3.6; y += .05) trail.emplace_back(2.16, y);
+    assert(visits.UnvisitedSpaceGoals(
+        trail, navigation2d::kOpenRetreat,
+        navigation2d::kRoomPocketDepthM * navigation2d::kRoomPocketDepthM).empty());
+  }
+
 }

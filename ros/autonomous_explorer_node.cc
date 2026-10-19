@@ -2452,9 +2452,53 @@ class AutonomousExplorer final : public rclcpp::Node {
     return true;
   }
 
+  // Frontiers only prove a room was seen. A room observed through its door
+  // has none left, so before going home drive into known space that is far
+  // from the trail (measured through free cells). Each spot gets two tries;
+  // a reached spot drops out because the trail now passes it.
+  bool TryVisitUnenteredSpace() {
+    if (!pose_ || returning_ || phase_ == MissionPhase::kReturning) return false;
+    constexpr int kVisitAttempts = 2;
+    const double rx = pose_->pose.position.x;
+    const double ry = pose_->pose.position.y;
+    auto goals = explorer_.UnvisitedSpaceGoals(
+        trajectory_, navigation2d::kOpenRetreat,
+        navigation2d::kRoomPocketDepthM * navigation2d::kRoomPocketDepthM);
+    std::sort(goals.begin(), goals.end(), [&](const Goal& a, const Goal& b) {
+      return std::hypot(a.x - rx, a.y - ry) < std::hypot(b.x - rx, b.y - ry);
+    });
+    for (auto& goal : goals) {
+      auto attempt = std::find_if(
+          room_visit_attempts_.begin(), room_visit_attempts_.end(),
+          [&](const RoomVisitAttempt& a) {
+            return std::hypot(a.x - goal.x, a.y - goal.y) < navigation2d::kSwingClearance;
+          });
+      if (attempt == room_visit_attempts_.end()) {
+        room_visit_attempts_.push_back({goal.x, goal.y, 0});
+        attempt = std::prev(room_visit_attempts_.end());
+      }
+      if (attempt->count >= kVisitAttempts) continue;
+      ++attempt->count;
+      goal.yaw = std::atan2(goal.y - ry, goal.x - rx);
+      phase_ = MissionPhase::kExploring;
+      committed_tour_.clear();
+      if (StartNavigation(goal, false)) {
+        RCLCPP_INFO(get_logger(),
+                    "Visiting unentered space before return: goal=(%.2f, %.2f) area=%.2f m2 try=%d/%d",
+                    goal.x, goal.y, goal.information_gain, attempt->count, kVisitAttempts);
+        PublishStatus("NAVIGATING", "visiting a room not yet entered");
+        return true;
+      }
+      RCLCPP_WARN(get_logger(), "Unentered space goal unplannable at (%.2f, %.2f)",
+                  goal.x, goal.y);
+    }
+    return false;
+  }
+
   void BeginReturn(bool force_return = false) {
     if (!start_pose_) return;
     if (phase_ == MissionPhase::kReturning && navigation_) return;
+    if (TryVisitUnenteredSpace()) return;
     phase_ = MissionPhase::kReturning;
     returning_ = true;
     committed_tour_.clear();
@@ -4228,6 +4272,8 @@ class AutonomousExplorer final : public rclcpp::Node {
   std::optional<Goal> scrape_reject_goal_;
   int scrape_reject_count_ = 0;
   bool tip_rescue_attempted_ = false;
+  struct RoomVisitAttempt { double x, y; int count; };
+  std::vector<RoomVisitAttempt> room_visit_attempts_;
   geometry_msgs::msg::Twist escape_command_;
   rclcpp::Time escape_until_{0, 0, RCL_ROS_TIME};
   int reported_recoveries_ = 0;

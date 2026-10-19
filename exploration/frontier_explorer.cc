@@ -4,8 +4,10 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <optional>
+#include <queue>
 #include <utility>
 
 namespace {
@@ -1919,6 +1921,82 @@ std::size_t FrontierExplorer::ReachableUnknownCells(double robot_x, double robot
     }
   }
   return reachable_unknown;
+}
+
+std::vector<ExplorationGoal> FrontierExplorer::UnvisitedSpaceGoals(
+    const std::vector<std::pair<double, double>>& trail, double visit_radius_m,
+    double minimum_area_m2) const {
+  std::vector<ExplorationGoal> goals;
+  if (map_.width <= 2 || map_.height <= 2 || map_.resolution <= 0. ||
+      map_.cells.size() != static_cast<std::size_t>(map_.width * map_.height) ||
+      trail.empty())
+    return goals;
+  const int n = map_.width * map_.height;
+  const double inf = std::numeric_limits<double>::infinity();
+  std::vector<double> distance(n, inf);
+  using Item = std::pair<double, int>;
+  std::priority_queue<Item, std::vector<Item>, std::greater<Item>> open;
+  for (const auto& [x, y] : trail) {
+    const int col = static_cast<int>(std::floor((x - map_.origin_x) / map_.resolution));
+    const int row = static_cast<int>(std::floor((y - map_.origin_y) / map_.resolution));
+    if (!Free(col, row)) continue;
+    const int i = row * map_.width + col;
+    if (distance[i] > 0.) { distance[i] = 0.; open.emplace(0., i); }
+  }
+  constexpr int dx[] = {-1, 1, 0, 0, -1, -1, 1, 1};
+  constexpr int dy[] = {0, 0, -1, 1, -1, 1, -1, 1};
+  const double step[] = {1., 1., 1., 1., std::sqrt(2.), std::sqrt(2.),
+                         std::sqrt(2.), std::sqrt(2.)};
+  while (!open.empty()) {
+    const auto [d, i] = open.top();
+    open.pop();
+    if (d > distance[i]) continue;
+    const int col = i % map_.width, row = i / map_.width;
+    for (int k = 0; k < 8; ++k) {
+      const int c = col + dx[k], r = row + dy[k];
+      if (!Free(c, r)) continue;
+      const int j = r * map_.width + c;
+      const double next = d + step[k] * map_.resolution;
+      if (next < distance[j]) { distance[j] = next; open.emplace(next, j); }
+    }
+  }
+  // Unreachable free cells (inf) are not candidates: no free path from the
+  // trail reaches them, so a visit goal there would never plan.
+  auto far = [&](int i) {
+    return std::isfinite(distance[i]) && distance[i] > visit_radius_m;
+  };
+  std::vector<unsigned char> seen(n, 0);
+  const double cell_area = map_.resolution * map_.resolution;
+  for (int seed = 0; seed < n; ++seed) {
+    if (seen[seed] || !far(seed)) continue;
+    std::vector<int> component{seed};
+    seen[seed] = 1;
+    for (std::size_t head = 0; head < component.size(); ++head) {
+      const int i = component[head];
+      const int col = i % map_.width, row = i / map_.width;
+      for (int k = 0; k < 8; ++k) {
+        const int c = col + dx[k], r = row + dy[k];
+        if (c < 0 || r < 0 || c >= map_.width || r >= map_.height) continue;
+        const int j = r * map_.width + c;
+        if (!seen[j] && far(j)) { seen[j] = 1; component.push_back(j); }
+      }
+    }
+    if (component.size() * cell_area < minimum_area_m2) continue;
+    std::sort(component.begin(), component.end(),
+              [&](int a, int b) { return distance[a] > distance[b]; });
+    for (const int i : component) {
+      const int col = i % map_.width, row = i / map_.width;
+      if (!ClearAt(col, row, kPlanningRadius)) continue;
+      const auto [wx, wy] = CellCenter(col, row);
+      ExplorationGoal goal;
+      goal.x = goal.frontier_x = wx;
+      goal.y = goal.frontier_y = wy;
+      goal.information_gain = component.size() * cell_area;
+      goals.push_back(goal);
+      break;
+    }
+  }
+  return goals;
 }
 
 std::size_t FrontierExplorer::RegionFrontierCells(double anchor_x, double anchor_y,

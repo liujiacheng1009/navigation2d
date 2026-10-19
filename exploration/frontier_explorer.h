@@ -204,6 +204,15 @@ class FrontierExplorer {
   // observed occupancy map (no door-seal carving). Distinguishes an unvisited
   // room entrance from unknown space behind a wall or outside the map.
   std::size_t ReachableUnknownCells(double robot_x, double robot_y) const;
+  // Known free space the robot has not driven into. Distance to the driven
+  // trail is measured through free cells, so a room behind a wall is far even
+  // when the hallway runs beside it. Each component farther than
+  // `visit_radius_m` with at least `minimum_area_m2` of free cells yields one
+  // goal at its deepest cell that clears the planning circle. A room seen
+  // through its doorway has no frontier left but still appears here.
+  std::vector<ExplorationGoal> UnvisitedSpaceGoals(
+      const std::vector<std::pair<double, double>>& trail,
+      double visit_radius_m, double minimum_area_m2) const;
   std::size_t RegionFrontierCells(double anchor_x, double anchor_y,
                                   double radius_m) const;
   std::size_t KnownCells() const;
