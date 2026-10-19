@@ -3126,6 +3126,61 @@ class AutonomousExplorer final : public rclcpp::Node {
     }
     const double robot_x = pose_ ? pose_->pose.position.x : path_xy.front().first;
     const double robot_y = pose_ ? pose_->pose.position.y : path_xy.front().second;
+    // The planner already treats the body disk, lidar interiors, and (on the
+    // way home) the driven trail as free. Checking the raw grid afterwards
+    // rejected that same path: a thickened kitchen jamb sat inside the
+    // planning circle while the lidar still saw the throat open, so every
+    // return chord was "path intersects mapped obstacle".
+    const auto force_free = [&](int col, int row) {
+      if (col < 0 || row < 0 || col >= live.width || row >= live.height) return;
+      auto& cell = live.cells[static_cast<std::size_t>(row) * live.width + col];
+      if (cell > 0) cell = 0;
+    };
+    const auto free_disk = [&](double x, double y, double radius_m) {
+      const int reach = static_cast<int>(std::ceil(radius_m / live.resolution));
+      const int col = static_cast<int>(std::floor((x - live.origin_x) / live.resolution));
+      const int row = static_cast<int>(std::floor((y - live.origin_y) / live.resolution));
+      for (int dy = -reach; dy <= reach; ++dy) {
+        for (int dx = -reach; dx <= reach; ++dx) {
+          if (dx * dx + dy * dy > reach * reach) continue;
+          force_free(col + dx, row + dy);
+        }
+      }
+    };
+    free_disk(robot_x, robot_y, navigation2d::kPlanningRadius);
+    if (scan_ && pose_) {
+      const double yaw = Yaw(pose_->pose.orientation);
+      const double sensor_x = robot_x + .18 * std::cos(yaw);
+      const double sensor_y = robot_y + .18 * std::sin(yaw);
+      const double evidence_range = std::min(3.0, static_cast<double>(scan_->range_max));
+      const double step = std::max(.5 * live.resolution, .02);
+      for (std::size_t beam = 0; beam < scan_->ranges.size(); ++beam) {
+        const double range = scan_->ranges[beam];
+        if (!std::isfinite(range) || range < scan_->range_min || range > evidence_range)
+          continue;
+        const double angle = yaw + scan_->angle_min +
+                             static_cast<double>(beam) * scan_->angle_increment;
+        const double usable = std::max(0., range - std::max(.06, .5 * live.resolution));
+        for (double distance = 0.; distance < usable; distance += step) {
+          const double x = sensor_x + distance * std::cos(angle);
+          const double y = sensor_y + distance * std::sin(angle);
+          const int col = static_cast<int>(std::floor((x - live.origin_x) / live.resolution));
+          const int row = static_cast<int>(std::floor((y - live.origin_y) / live.resolution));
+          force_free(col, row);
+        }
+      }
+    }
+    if (returning_ && trajectory_.size() >= 2) {
+      double walked = 0.;
+      for (std::size_t i = trajectory_.size(); i-- > 0;) {
+        if (i + 1 < trajectory_.size())
+          walked += std::hypot(trajectory_[i].first - trajectory_[i + 1].first,
+                                trajectory_[i].second - trajectory_[i + 1].second);
+        if (walked > navigation2d::kPocketRetreat) break;
+        free_disk(trajectory_[i].first, trajectory_[i].second,
+                  navigation2d::kPlanningRadius);
+      }
+    }
     // Same body as the planner radius — entry no longer uses a 0.14 m
     // exemption that let GLOBAL squeeze tip gaps PathCuts would otherwise cut.
     return navigation2d::PathCutsLiveOccupied(
