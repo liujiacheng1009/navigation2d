@@ -2395,10 +2395,9 @@ class AutonomousExplorer final : public rclcpp::Node {
       clear_start_pinch_ = true;
       return StartNavigation(home, true);
     }
-    // Nearest driven sample, then pick a trail cell that is Euclidean-closer
-    // to home. Arc length through wall-tip thrash samples looked like a 2.8 m
-    // hop while the chassis only moved 0.3 m (log: step (-0.34,-4.06) from
-    // (-0.47,-4.32) with home_dist still 4.3).
+    // Nearest driven sample, then one short step back along that trail.
+    // A long chord from a doorway aims through the jambs: the controller spins
+    // and the same hop is replanned every second.
     std::size_t nearest = trajectory_.size() - 1;
     double nearest_d = std::numeric_limits<double>::infinity();
     for (std::size_t i = 0; i < trajectory_.size(); ++i) {
@@ -2409,28 +2408,30 @@ class AutonomousExplorer final : public rclcpp::Node {
         nearest = i;
       }
     }
-    constexpr double kMinHopM = 0.90;
-    constexpr double kMinHomeProgressM = 0.60;
-    constexpr double kPreferHopM = 2.8;
+    const double min_hop = navigation2d::kSwingClearance;
+    const double max_hop = navigation2d::kOpenRetreat;
     Goal step = home;
     bool found = false;
-    double best_progress = 0.;
+    double best_robot = std::numeric_limits<double>::infinity();
     for (std::size_t i = nearest; i > 0; --i) {
       const auto& sample = trajectory_[i - 1];
       const double d_robot = std::hypot(sample.first - rx, sample.second - ry);
+      if (d_robot < min_hop || d_robot > max_hop) continue;
       const double d_home = std::hypot(sample.first - home.x, sample.second - home.y);
-      const double progress = home_dist - d_home;
-      if (d_robot < kMinHopM || progress < kMinHomeProgressM) continue;
-      if (!found || progress > best_progress ||
-          (std::abs(progress - best_progress) < .15 && d_robot <= kPreferHopM)) {
+      if (d_home >= home_dist) continue;
+      if (d_robot < best_robot) {
         found = true;
-        best_progress = progress;
+        best_robot = d_robot;
         step.x = sample.first;
         step.y = sample.second;
         step.yaw = std::atan2(step.y - ry, step.x - rx);
-        if (d_robot >= kPreferHopM && progress >= 1.2) break;
       }
     }
+    // The previous hop did not move the chassis. Repeating it is the spin loop.
+    if (found && breadcrumb_returning_ && std::isfinite(active_goal_.x) &&
+        std::hypot(step.x - active_goal_.x, step.y - active_goal_.y) <
+            navigation2d::kPlanningRadius)
+      return false;
     if (!found) {
       // No useful trail hop — paint the corridor and drive home directly.
       breadcrumb_returning_ = false;
