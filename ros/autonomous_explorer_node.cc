@@ -1440,6 +1440,11 @@ class AutonomousExplorer final : public rclcpp::Node {
     BodyRanges ranges;
     ranges.front = SectorMinRange(0., cone);
     ranges.back = SectorMinRange(pi, cone);
+    // See kLidarForwardOffset: the back ray starts ahead of the chassis
+    // centre. Keep a positive value so a wall between the lidar and the tail
+    // still counts as inside the body rather than "no return".
+    if (ranges.back > 0.)
+      ranges.back = std::max(1e-3, ranges.back - navigation2d::kLidarForwardOffset);
     ranges.left = SectorMinRange(pi / 2., cone);
     ranges.right = SectorMinRange(-pi / 2., cone);
     ranges.side = std::min(ranges.left > 0. ? ranges.left : 10.,

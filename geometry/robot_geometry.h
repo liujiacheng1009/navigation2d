@@ -9,6 +9,14 @@ namespace navigation2d {
 // configs share this value — do not scatter bare 0.22 literals.
 inline constexpr double kPlanningRadius = .22;
 
+// The lidar is mounted this far forward of the chassis centre, so a backward
+// ray overstates the tail clearance by exactly this much. Escape compares
+// body-frame ranges with the planning circle as if they were centred on the
+// chassis; without the shift it reversed until the lidar read 0.22 m and the
+// tail, 0.40 m behind the lidar, was already in the wall (live: back=0.39,
+// centre clearance fell from 0.35 to 0.15 at the corridor end).
+inline constexpr double kLidarForwardOffset = .18;
+
 // One planning-circle diameter. Retreat lengths and near-goal windows use
 // this as a travel distance. It is not a lidar stuck threshold: a return
 // inside the diameter can still be outside the chassis.
