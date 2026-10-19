@@ -29,6 +29,8 @@
 
 namespace {
 
+constexpr double kExploreGoalTolerance = .18;
+
 double Yaw(const geometry_msgs::msg::Quaternion& q) {
   return std::atan2(2. * (q.w * q.z + q.x * q.y),
                     1. - 2. * (q.y * q.y + q.z * q.z));
@@ -626,7 +628,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     // Keep their completion contracts separate: return must converge to the
     // recorded ground-truth start instead of stopping at the edge of the
     // ordinary navigation tolerance disk.
-    config.goal_xy_tolerance = returning ? .04 : .18;
+    config.goal_xy_tolerance = returning ? .04 : kExploreGoalTolerance;
     // LD14 observes 360 degrees, so frontier visits need no stop-and-turn
     // terminal orientation. Preserve precise heading only when docking home.
     // Backtrack edges are positional checkpoints; requiring a docking yaw at
@@ -1261,6 +1263,16 @@ class AutonomousExplorer final : public rclcpp::Node {
     // first-segment replay failures with progress=0 at the wrong pose.
     cooled_signatures_.clear();
     RememberEntryRoom(*pending_entry_goal_, *probe);
+    // A target inside goal tolerance "arrives" on the first tick without
+    // moving, and the retry picks the same spot again.
+    if (std::hypot(probe->x - pose_->pose.position.x,
+                   probe->y - pose_->pose.position.y) <= kExploreGoalTolerance) {
+      RCLCPP_WARN(get_logger(),
+                  "Entry probe rejected: target=(%.2f,%.2f) depth=%.2f attempt=%d "
+                  "gap=%.2f reason=target within goal tolerance of robot",
+                  probe->x, probe->y, used_min_depth, entry_probe_attempts_, gap);
+      return false;
+    }
     if (!StartNavigation(*probe, false)) {
       RCLCPP_WARN(get_logger(),
                   "Entry probe rejected: target=(%.2f,%.2f) depth=%.2f attempt=%d "
@@ -3896,10 +3908,7 @@ class AutonomousExplorer final : public rclcpp::Node {
                       "depth=%.2f; keeping unresolved",
                       pending_entry_goal_->frontier_x, pending_entry_goal_->frontier_y,
                       entry_probe_attempts_, EntryProbeDepth());
-          explorer_.RecordAttempt(*pending_entry_goal_, false);
-          ClearEntryMouthLock();
-          next_selection_ = now();
-          PublishStatus("SELECTING", "frontier entry blocked; unresolved boundary retained");
+          AbandonLockedEntryMouth("frontier entry blocked; unresolved boundary retained");
         }
       } else if (explorer_.UnenteredRoomBeyond(active_goal_) ||
                  (explorer_.GoalRegionStillFrontier(active_goal_) &&
