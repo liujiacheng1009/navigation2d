@@ -3644,10 +3644,19 @@ class AutonomousExplorer final : public rclcpp::Node {
       }
     }
     // Last hard gate: never publish a forward shove into a near lidar wall,
-    // even if a crawl/escape path above set linear > 0.
+    // even if a crawl/escape path above set linear > 0. A side already inside
+    // the planning circle is the door jamb: turning toward it swings the
+    // chassis corner into the frame and the wheels stop, while the body
+    // itself is only 0.29 m wide and still has room to go straight.
+    const BodyRanges gate_body = ReadBodyRanges();
+    if (command.angular.z > 0. && gate_body.left > 0. &&
+        gate_body.left < navigation2d::kPlanningRadius)
+      command.angular.z = 0.;
+    if (command.angular.z < 0. && gate_body.right > 0. &&
+        gate_body.right < navigation2d::kPlanningRadius)
+      command.angular.z = 0.;
     if (command.linear.x > 0.) {
-      const double front = ReadBodyRanges().front;
-      if (navigation2d::HitInsideBody(front)) {
+      if (navigation2d::HitInsideBody(gate_body.front)) {
         command.linear.x = 0.;
         if (std::abs(command.angular.z) < .15)
           command.angular.z = 0.;
@@ -4128,10 +4137,25 @@ class AutonomousExplorer final : public rclcpp::Node {
           return;
         }
       }
-      if (!mid_path_pinch && ReplanActiveGoalOnLatestMap(
+      if (!mid_path_pinch &&
+          state.planning_failure_reason.find("no measured motion") == std::string::npos &&
+          ReplanActiveGoalOnLatestMap(
               state.status == navigation2d::NavigationStatus::kBlocked ?
                   "controller could not execute validated route" : "goal execution timed out"))
         return;
+      if (state.planning_failure_reason.find("no measured motion") != std::string::npos &&
+          phase_ != MissionPhase::kReturning && !returning_) {
+        // Replanning the same goal drives the chassis back into the jamb.
+        navigation_.reset();
+        explorer_.RecordAttempt(active_goal_, false);
+        recently_demoted_ = active_goal_;
+        recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(25.0);
+        if (!committed_tour_.empty()) committed_tour_.pop_front();
+        if (TryStartEscape()) return;
+        next_selection_ = now();
+        PublishStatus("SELECTING", "no motion against the jamb; leaving this route");
+        return;
+      }
       navigation_.reset();
       recovery_.Clear();
       if (phase_ == MissionPhase::kReturning || returning_) {
