@@ -3644,19 +3644,10 @@ class AutonomousExplorer final : public rclcpp::Node {
       }
     }
     // Last hard gate: never publish a forward shove into a near lidar wall,
-    // even if a crawl/escape path above set linear > 0. A side already inside
-    // the planning circle is the door jamb: turning toward it swings the
-    // chassis corner into the frame and the wheels stop, while the body
-    // itself is only 0.29 m wide and still has room to go straight.
-    const BodyRanges gate_body = ReadBodyRanges();
-    if (command.angular.z > 0. && gate_body.left > 0. &&
-        gate_body.left < navigation2d::kPlanningRadius)
-      command.angular.z = 0.;
-    if (command.angular.z < 0. && gate_body.right > 0. &&
-        gate_body.right < navigation2d::kPlanningRadius)
-      command.angular.z = 0.;
+    // even if a crawl/escape path above set linear > 0.
     if (command.linear.x > 0.) {
-      if (navigation2d::HitInsideBody(gate_body.front)) {
+      const double front = ReadBodyRanges().front;
+      if (navigation2d::HitInsideBody(front)) {
         command.linear.x = 0.;
         if (std::abs(command.angular.z) < .15)
           command.angular.z = 0.;
