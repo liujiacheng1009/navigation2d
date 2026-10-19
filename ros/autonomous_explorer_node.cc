@@ -531,14 +531,11 @@ class AutonomousExplorer final : public rclcpp::Node {
     // path-intersects → abandon → tour loop → failed_goals thrash).
     config.planner = entry_drive ? "astar" : "theta_star";
     config.robot_radius = navigation2d::kPlanningRadius;
-    if (entry_drive) {
-      // Circular inscribed footprint for mouth crawl (monitor / RPP), same
-      // lethal radius as open explore.
-      config.footprint.clear();
-    } else {
-      config.footprint = {{-.145, -.147}, {.115, -.147}, {.145, -.132},
-                          {.145, .132}, {.115, .147}, {-.145, .147}};
-    }
+    // Keep the chassis rectangle on a door crawl. Clearing it made the
+    // collision monitor take the planning circle as the body width, so a
+    // 0.29 m robot was stopped as though it were 0.44 m wide.
+    config.footprint = {{-.145, -.147}, {.115, -.147}, {.145, -.132},
+                        {.145, .132}, {.115, .147}, {-.145, .147}};
     // Clearance tiers (strategy, not scene knobs):
     //   entry  — locked mouth crawl (softer inflation only)
     //   pinch  — automatic retry when open-tier finds no route through a
