@@ -1295,8 +1295,7 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
     for (auto& goal : remaining) {
       if (GoalInActiveRegion(goal)) local.push_back(std::move(goal));
     }
-    if (ActiveHoldsPassage() || !local.empty()) {
-      if (local.empty()) return {};
+    if (!local.empty()) {
       return regions_.Order(std::move(local), robot_x, robot_y, robot_yaw);
     }
   }

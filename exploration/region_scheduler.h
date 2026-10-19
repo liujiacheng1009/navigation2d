@@ -32,10 +32,10 @@ class RegionScheduler {
  public:
   void Update(const ExplorationGrid& observed, double footprint_clearance);
   RegionId RegionAt(double x, double y) const;
-  // While the active room has an admitted goal or a passable door, keep only
-  // that room and its children. Raw frontier cells do not hold the room and
-  // do not pull in a sibling. A passage with no posed goal returns empty and
-  // stays on the stack. `robot_yaw` ranks a far reverse after a forward goal.
+  // While the active room has an admitted goal, keep only that room and its
+  // children. A mouth with no viewpoint does not hold the room: the stack
+  // pops and other rooms' goals become the tour. `robot_yaw` ranks a far
+  // reverse after a forward goal.
   // `robot_yaw` (rad) ranks reverse U-turn goals after forward ones inside the
   // same DFS region. Pass NaN when heading is unknown.
   std::vector<ExplorationGoal> Order(std::vector<ExplorationGoal> goals,

@@ -156,10 +156,12 @@ int main() {
   assert(stay.front().region_id == left);
   assert(finish_first.ActiveRegion() == left);
 
-  // A passable door with no posed goal keeps the room and drops the sibling.
+  // A mouth mark with no admitted goal does not keep the room. The sibling
+  // goal becomes the tour.
   finish_first.MarkPassage(left);
-  const auto held = finish_first.Order({farther}, .8, 1.2);
-  assert(held.empty());
-  assert(finish_first.ActiveRegion() == left);
+  const auto released_mouth = finish_first.Order({farther}, .8, 1.2);
+  assert(!released_mouth.empty());
+  assert(released_mouth.front().region_id == right);
+  assert(finish_first.ActiveRegion() != left);
   return 0;
 }

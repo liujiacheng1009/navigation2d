@@ -2195,10 +2195,12 @@ class AutonomousExplorer final : public rclcpp::Node {
           tour_empty_with_candidates;
       if (no_executable_mouths && explorer_.ActiveHoldsPassage()) {
         QueueActiveRegionFinish();
-        next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
-        PublishStatus("SELECTING",
-                      "door still open; staying in the active room");
-        return;
+        if (!committed_tour_.empty()) {
+          next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+          PublishStatus("SELECTING",
+                        "door still open; staying in the active room");
+          return;
+        }
       }
       if (no_executable_mouths && explorer_.ShouldCoverResiduals()) {
         if (completing_probe_rounds_ < 3) {

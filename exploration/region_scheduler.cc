@@ -379,8 +379,8 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
     const bool child_work = std::any_of(goals.begin(), goals.end(), [&](const auto& g) {
       return descendant(g.region_id, r.id);
     });
-    // A passable door holds the room. Raw frontier cells do not.
-    if (r.candidates || child_work || r.passage) break;
+    // Only an admitted goal holds the room. A mouth with no viewpoint does not.
+    if (r.candidates || child_work) break;
     if (r.state == RegionState::kWaiting && goals.empty()) break;
     last_region_ = stack_.back(); stack_.pop_back();
   }
@@ -393,11 +393,11 @@ std::vector<ExplorationGoal> RegionScheduler::Order(
   // may wait here. The navigation planner remains authoritative for safety.
   if (preferred && regions_.at(preferred).state == RegionState::kWaiting &&
       goals.empty()) return {};
-  // Admitted goals or a passable door keep the tour inside this room.
-  // Residuals do not soft-unlock into a sibling.
+  // Admitted goals keep the tour inside this room. When the room has none,
+  // other rooms' goals stay in the list and become the tour.
   const bool room_open =
       preferred &&
-      (regions_.at(preferred).candidates > 0 || regions_.at(preferred).passage ||
+      (regions_.at(preferred).candidates > 0 ||
        std::any_of(goals.begin(), goals.end(), [&](const ExplorationGoal& g) {
          return descendant(g.region_id, preferred);
        }));
