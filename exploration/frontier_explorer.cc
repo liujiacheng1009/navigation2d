@@ -1299,7 +1299,9 @@ std::vector<ExplorationGoal> FrontierExplorer::BuildTour(
       return regions_.Order(std::move(local), robot_x, robot_y, robot_yaw);
     }
   }
-  if (remaining.empty()) return {};
+  // An empty candidate list still has to settle the stack. Returning here
+  // left the active room and its passage mark in place, so coverage never
+  // started and the robot waited on a map update.
   return regions_.Order(std::move(remaining), robot_x, robot_y, robot_yaw);
 }
 
@@ -1336,7 +1338,10 @@ bool FrontierExplorer::ActiveHoldsPassage() const {
 }
 
 bool FrontierExplorer::HasExploringWork() const {
-  return candidate_frontier_goals_ > 0 || ActiveHoldsPassage();
+  // A mouth flag without an admitted goal is not a task. Treating it as work
+  // blocked the coverage pass while the only approachable frontier had
+  // already been rejected.
+  return candidate_frontier_goals_ > 0;
 }
 
 bool FrontierExplorer::ShouldCoverResiduals() const {

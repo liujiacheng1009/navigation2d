@@ -1643,8 +1643,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   bool ShouldKeepWaitingForFrontiers() const {
-    if (!explorer_.ActiveHoldsPassage() && !explorer_.HasExploringWork())
-      return false;
+    if (!explorer_.HasExploringWork()) return false;
     // Cap empty SELECTING loops. The old 36-cycle budget left the chassis
     // wedged in a tip for tens of seconds before PARTIAL (UI: 下方卡住).
     if (completing_probe_rounds_ < 3) return true;
@@ -1669,8 +1668,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     if (tip_rescue_attempted_ || returning_ ||
         phase_ == MissionPhase::kReturning || !pose_)
       return false;
-    if (explorer_.ActiveHoldsPassage() || !explorer_.HasExploringWork())
-      return false;
+    if (!explorer_.HasExploringWork()) return false;
     tip_rescue_attempted_ = true;
     RCLCPP_WARN(get_logger(),
                 "Tip/tour rescue (%s): peel + retry distant mouths; raw=%zu",
@@ -2193,7 +2191,11 @@ class AutonomousExplorer final : public rclcpp::Node {
       const bool no_executable_mouths =
           explorer_.candidate_frontier_goals() == 0 || tour_unplannable ||
           tour_empty_with_candidates;
-      if (no_executable_mouths && explorer_.ActiveHoldsPassage()) {
+      // Stay for a door only when this room still has a goal to run.
+      // Zero candidates means the room is finished; re-entering it here
+      // put the stack back and skipped coverage.
+      if (explorer_.candidate_frontier_goals() > 0 &&
+          explorer_.ActiveHoldsPassage()) {
         QueueActiveRegionFinish();
         if (!committed_tour_.empty()) {
           next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);

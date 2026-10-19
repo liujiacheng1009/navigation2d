@@ -163,5 +163,13 @@ int main() {
   assert(!released_mouth.empty());
   assert(released_mouth.front().region_id == right);
   assert(finish_first.ActiveRegion() != left);
+
+  // An empty candidate list still settles the stack. The active room must
+  // not stay up just because it still has raw frontier cells.
+  finish_first.Enter(left_low);
+  assert(finish_first.ActiveRegion() == left);
+  const auto settled = finish_first.Order({}, .8, 1.2);
+  assert(settled.empty());
+  assert(finish_first.ActiveRegion() != left);
   return 0;
 }
