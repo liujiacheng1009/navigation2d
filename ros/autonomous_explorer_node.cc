@@ -3270,14 +3270,18 @@ class AutonomousExplorer final : public rclcpp::Node {
       }
     }
     if (returning_ && trajectory_.size() >= 2) {
+      // Same corridor StartNavigation paints for the home plan (80 m at
+      // 0.28 m). Exempting only the last kPocketRetreat (1.76 m) dropped the
+      // direct home path at the first doorway the planner had already
+      // reopened, and the return then retraced the outbound trail in
+      // 0.44 m hops (live: accepted, dropped 11 s later, goal=(0.01,0.01)).
       double walked = 0.;
       for (std::size_t i = trajectory_.size(); i-- > 0;) {
         if (i + 1 < trajectory_.size())
           walked += std::hypot(trajectory_[i].first - trajectory_[i + 1].first,
                                 trajectory_[i].second - trajectory_[i + 1].second);
-        if (walked > navigation2d::kPocketRetreat) break;
-        free_disk(trajectory_[i].first, trajectory_[i].second,
-                  navigation2d::kPlanningRadius);
+        if (walked > 80.) break;
+        free_disk(trajectory_[i].first, trajectory_[i].second, .28);
       }
     }
     // Same body as the planner radius — entry no longer uses a 0.14 m
