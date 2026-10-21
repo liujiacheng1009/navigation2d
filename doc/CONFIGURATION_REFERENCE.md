@@ -3,7 +3,8 @@
 ## Schema 策略
 
 默认配置为 `config/navigation2d.yaml`。所有 mapping 和字段必须完整出现；未知字段、缺失字段、
-错误类型和不支持的算法名称均立即失败。配置不支持 include、环境变量或隐藏覆盖。
+错误类型和不支持的算法名称均立即失败。配置不支持 include、环境变量或隐藏覆盖。机型尺寸和探索距离也在这份文件里，
+见文末 `robot` 与 `exploration`。
 
 ## `selection`
 
@@ -80,6 +81,12 @@ TUD Guidance 输出。
 - `progress_radius`、`progress_timeout`：卡住检测。
 - `duration`、倒车/旋转速度：恢复行为参数。
 - `dynamic_obstacle_radius`：benchmark 动态障碍模型半径，不应解释为真实感知参数。
+
+## `robot` 与 `exploration`
+
+机型尺寸和探索距离，与上面的规划器参数在同一份 `config/navigation2d.yaml`。
+`robot.planning_radius_m` 是探索使用的车体规划圆，`costmap.robot_radius` 是规划器代价地图的圆。
+摆动余量、撤退距离由 `planning_radius_m` 推导，没有单独字段。放弃次数、打分权重、冷却时间留在代码里。
 
 ## 调参顺序
 

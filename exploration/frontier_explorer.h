@@ -27,8 +27,8 @@ struct ExplorationGrid {
 bool PathCutsLiveOccupied(const ExplorationGrid& live,
                           const std::vector<std::pair<double, double>>& path_xy,
                           double robot_x, double robot_y,
-                          double body_radius = kPlanningRadius,
-                          double under_robot_m = kPlanningRadius);
+                          double body_radius = kPlanningRadius(),
+                          double under_robot_m = kPlanningRadius());
 
 // After repeated live-map path cuts (>=2), leave the tip pocket instead of
 // replan thrash. A single low-clearance graze near a passable door must not
@@ -211,8 +211,8 @@ class FrontierExplorer {
   // goal at its deepest cell that clears the planning circle. A room seen
   // through its doorway has no frontier left but still appears here.
   // Moves a goal pose to the nearest observed-free cell within
-  // kSwingClearance that clears the planning circle by one more map cell.
-  // A viewpoint picked at exactly kPlanningRadius beside a jamb turns
+  // kSwingClearance() that clears the planning circle by one more map cell.
+  // A viewpoint picked at exactly kPlanningRadius() beside a jamb turns
   // "goal occupied" as soon as the next scan adds the jamb's end cell.
   // The frontier target is kept. Returns nullopt when no such cell exists.
   std::optional<ExplorationGoal> SettleGoal(const ExplorationGoal& goal) const;

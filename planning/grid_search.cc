@@ -112,7 +112,7 @@ Path GridSearch(const LayeredCostmap& costmap, const Pose2d& start,
   };
   reject_occupied(start, "start", clearance);
   // Same body circle as the path. Doorway goals are placed with
-  // ClearAt(kPlanningRadius); a tighter goal check rejects a mouth the
+  // ClearAt(kPlanningRadius()); a tighter goal check rejects a mouth the
   // chassis can stand in, a looser one accepts a pose inside the body.
   reject_occupied(goal, "goal", clearance);
   if (gx >= 0 && gy >= 0 && gx < grid.width() && gy < grid.height() &&

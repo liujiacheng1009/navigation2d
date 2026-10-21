@@ -63,7 +63,7 @@ int main() {
   // far high-gain wall, even though NBV would prefer the distant blob.
   navigation2d::FrontierExplorerConfig tour_config;
   tour_config.minimum_frontier_cells = 6;
-  tour_config.footprint_clearance = navigation2d::kPlanningRadius;
+  tour_config.footprint_clearance = navigation2d::kPlanningRadius();
   tour_config.minimum_standoff = .10;
   tour_config.maximum_standoff = 1.10;
   tour_config.required_frontier_observations = 1;
@@ -222,7 +222,7 @@ int main() {
   // again.
   navigation2d::FrontierExplorerConfig pinch_config;
   pinch_config.minimum_frontier_cells = 6;
-  pinch_config.footprint_clearance = navigation2d::kPlanningRadius;
+  pinch_config.footprint_clearance = navigation2d::kPlanningRadius();
   pinch_config.minimum_standoff = .10;
   pinch_config.maximum_standoff = 1.10;
   pinch_config.blacklist_radius = 1.20;
@@ -268,7 +268,7 @@ int main() {
   // past the doorway, stay unknown.
   navigation2d::FrontierExplorerConfig door_config;
   door_config.minimum_frontier_cells = 6;
-  door_config.footprint_clearance = navigation2d::kPlanningRadius;
+  door_config.footprint_clearance = navigation2d::kPlanningRadius();
   door_config.minimum_standoff = .10;
   door_config.maximum_standoff = 1.10;
   door_config.required_frontier_observations = 1;
@@ -313,7 +313,7 @@ int main() {
         nearest_occupied = std::min(nearest_occupied, std::hypot(goal.x - x, goal.y - y));
       }
     }
-    assert(nearest_occupied >= navigation2d::kPlanningRadius);
+    assert(nearest_occupied >= navigation2d::kPlanningRadius());
   }
   assert(on_centerline);
 
@@ -401,7 +401,7 @@ int main() {
   // Observing one cools that mouth only.
   navigation2d::FrontierExplorerConfig pair_config;
   pair_config.minimum_frontier_cells = 6;
-  pair_config.footprint_clearance = navigation2d::kPlanningRadius;
+  pair_config.footprint_clearance = navigation2d::kPlanningRadius();
   pair_config.minimum_standoff = .10;
   pair_config.maximum_standoff = 1.10;
   pair_config.blacklist_radius = 1.20;
@@ -467,7 +467,7 @@ int main() {
   // mouth; a far active goal must be preemptable until local mouths are gone.
   navigation2d::FrontierExplorerConfig junction_config;
   junction_config.minimum_frontier_cells = 6;
-  junction_config.footprint_clearance = navigation2d::kPlanningRadius;
+  junction_config.footprint_clearance = navigation2d::kPlanningRadius();
   junction_config.minimum_standoff = .10;
   junction_config.maximum_standoff = 1.10;
   junction_config.required_frontier_observations = 1;
@@ -965,9 +965,9 @@ int main() {
     // be an acceptable production default.
     assert(navigation2d::PathCutsLiveOccupied(
         doorway, through_wall, robot_x, robot_y,
-        navigation2d::kPlanningRadius, navigation2d::kPlanningRadius));
+        navigation2d::kPlanningRadius(), navigation2d::kPlanningRadius()));
     assert(!navigation2d::PathCutsLiveOccupied(
-        doorway, through_wall, robot_x, robot_y, navigation2d::kPlanningRadius,
+        doorway, through_wall, robot_x, robot_y, navigation2d::kPlanningRadius(),
         .40));
 
     // Path that goes around the wall stays legal.
@@ -1214,7 +1214,7 @@ int main() {
     const double y1 = (20 + .5) * island.resolution;
     const std::vector<std::pair<double, double>> through = {{x0, y0}, {x1, y1}};
     assert(navigation2d::PathCutsLiveOccupied(
-        island, through, x0, y0, navigation2d::kPlanningRadius));
+        island, through, x0, y0, navigation2d::kPlanningRadius()));
     assert(island.cells[20 * island.width + 30] == 100);
   }
 
@@ -1235,7 +1235,7 @@ int main() {
     for (int col = 4; col < 56; ++col)
       open_wall.cells[static_cast<std::size_t>(35 * open_wall.width + col)] = -1;
     navigation2d::FrontierExplorerConfig ocfg;
-    ocfg.footprint_clearance = navigation2d::kPlanningRadius;
+    ocfg.footprint_clearance = navigation2d::kPlanningRadius();
     ocfg.minimum_frontier_cells = 4;
     ocfg.minimum_standoff = .10;
     ocfg.maximum_standoff = 1.10;
@@ -1268,7 +1268,7 @@ int main() {
         wide_room.cells[static_cast<std::size_t>(row * wide_room.width + col)] =
             -1;
     navigation2d::FrontierExplorerConfig wcfg;
-    wcfg.footprint_clearance = navigation2d::kPlanningRadius;
+    wcfg.footprint_clearance = navigation2d::kPlanningRadius();
     wcfg.minimum_frontier_cells = 4;
     wcfg.required_frontier_observations = 1;
     navigation2d::FrontierExplorer wex(wcfg);
@@ -1301,7 +1301,7 @@ int main() {
     sp(18, 32, 22, 30, 0);      // 0.70 m × 0.40 m shallow room (free)
     sp(18, 32, 30, 36, -1);     // unknown past the pocket
     navigation2d::FrontierExplorerConfig scfg;
-    scfg.footprint_clearance = navigation2d::kPlanningRadius;
+    scfg.footprint_clearance = navigation2d::kPlanningRadius();
     scfg.minimum_frontier_cells = 4;
     scfg.minimum_standoff = .10;
     scfg.maximum_standoff = 1.10;
@@ -1358,7 +1358,7 @@ int main() {
     const std::vector<std::pair<double, double>> through_fin = {{x0, y0},
                                                                 {x1, y1}};
     assert(navigation2d::PathCutsLiveOccupied(
-        finger, through_fin, x0, y0, navigation2d::kPlanningRadius));
+        finger, through_fin, x0, y0, navigation2d::kPlanningRadius()));
     assert(finger.cells[28 * finger.width + 29] == 100);
     assert(finger.cells[21 * finger.width + 29] == 100);
   }
@@ -1369,7 +1369,7 @@ int main() {
   {
     navigation2d::FrontierExplorerConfig room_config;
     room_config.minimum_frontier_cells = 4;
-    room_config.footprint_clearance = navigation2d::kPlanningRadius;
+    room_config.footprint_clearance = navigation2d::kPlanningRadius();
     room_config.required_frontier_observations = 1;
     navigation2d::ExplorationGrid room;
     room.width = 80;
@@ -1413,22 +1413,22 @@ int main() {
     for (int row = 39; row < 126; ++row)
       for (int col = 60; col < 84; ++col) flat.cells[row * flat.width + col] = 0;
     visits.UpdateMap(flat);
-    const double pocket = navigation2d::kRoomPocketDepthM * navigation2d::kRoomPocketDepthM;
+    const double pocket = navigation2d::kRoomPocketDepthM() * navigation2d::kRoomPocketDepthM();
     const std::vector<std::pair<double, double>> kitchen_door{{2.16, 1.35}};
     std::vector<std::pair<double, double>> trail;
     // Hallway driven only up to the kitchen door: its far end is mapped and
     // far from the trail, but no doorway was tried there, so it is no goal.
     for (double x = .3; x < 2.2; x += .05) trail.emplace_back(x, .66);
-    assert(visits.UnvisitedSpaceGoals(trail, navigation2d::kOpenRetreat, pocket, {},
-                                      navigation2d::kOpenRetreat).empty());
+    assert(visits.UnvisitedSpaceGoals(trail, navigation2d::kOpenRetreat(), pocket, {},
+                                      navigation2d::kOpenRetreat()).empty());
     const auto unvisited = visits.UnvisitedSpaceGoals(
-        trail, navigation2d::kOpenRetreat, pocket, kitchen_door, navigation2d::kOpenRetreat);
+        trail, navigation2d::kOpenRetreat(), pocket, kitchen_door, navigation2d::kOpenRetreat());
     assert(unvisited.size() == 1);
     assert(unvisited.front().y > 1.2);
     assert(unvisited.front().x > 1.8 && unvisited.front().x < 2.52);
     for (double y = .66; y < 3.6; y += .05) trail.emplace_back(2.16, y);
-    assert(visits.UnvisitedSpaceGoals(trail, navigation2d::kOpenRetreat, pocket, kitchen_door,
-                                      navigation2d::kOpenRetreat).empty());
+    assert(visits.UnvisitedSpaceGoals(trail, navigation2d::kOpenRetreat(), pocket, kitchen_door,
+                                      navigation2d::kOpenRetreat()).empty());
   }
 
   {
@@ -1454,7 +1454,7 @@ int main() {
     const auto moved = settle.SettleGoal(tight);
     assert(moved);
     assert(moved->y > tight.y);
-    assert(std::hypot(moved->x - tight.x, moved->y - tight.y) <= navigation2d::kSwingClearance);
+    assert(std::hypot(moved->x - tight.x, moved->y - tight.y) <= navigation2d::kSwingClearance());
     assert(moved->frontier_x == tight.frontier_x && moved->frontier_y == tight.frontier_y);
     navigation2d::ExplorationGoal roomy = tight;
     roomy.y = 2.40;

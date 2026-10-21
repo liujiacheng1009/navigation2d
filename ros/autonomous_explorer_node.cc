@@ -23,6 +23,7 @@
 #include "navigation2d/application/navigation_system.h"
 #include "navigation2d/exploration/frontier_explorer.h"
 #include "navigation2d/geometry/robot_geometry.h"
+#include "navigation2d/geometry/vehicle_config.h"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_msgs/msg/string.hpp"
@@ -51,22 +52,16 @@ double RequiredPositiveEnvironment(const char* name, double fallback) {
 
 using Goal = navigation2d::ExplorationGoal;
 
-navigation2d::FrontierExplorerConfig ExplorerConfig() {
+navigation2d::FrontierExplorerConfig ExplorerConfig(rclcpp::Node& node) {
   navigation2d::FrontierExplorerConfig config;
   // Maze doorways often produce short but useful frontier components.  A
   // larger threshold silently drops those branches before they reach the
   // planner; noise is handled by the stability observer below.
   config.minimum_frontier_cells = 6;
-  // Keep frontier generation consistent with the navigation costmap: a goal
-  // must leave room for the physical footprint and its obstacle buffer, not
-  // merely be free in the raw occupancy image. CAD max footprint radius is
-  // ~0.207 m; planning uses kPlanningRadius + soft inflation (same as production).
-  // Open-space standoff stays well off walls — lidar covers the rim without
-  // driving there. Narrow doorways still use kCloseStandoff via SafeViewpoint.
-  config.footprint_clearance = .38;
-  config.minimum_standoff = .45;
-  config.maximum_standoff = 1.20;
-  config.blacklist_radius = 1.20;
+  // Metre distances and the chassis outline come from config/navigation2d.yaml.
+  const std::string vehicle_config = node.declare_parameter<std::string>(
+      "vehicle_config", "/opt/sweepnav/navigation2d/config/navigation2d.yaml");
+  navigation2d::ApplyVehicleConfig(vehicle_config, config);
   config.cover_residuals = true;
   return config;
 }
@@ -169,7 +164,7 @@ struct GoalRecoverySession {
 
 class AutonomousExplorer final : public rclcpp::Node {
  public:
-  AutonomousExplorer() : Node("sweepnav_autonomous_explorer"), explorer_(ExplorerConfig()) {
+  AutonomousExplorer() : Node("sweepnav_autonomous_explorer"), explorer_(ExplorerConfig(*this)) {
     pose_source_ = declare_parameter<std::string>("pose_source", "localization2d");
     if (pose_source_ != "ground_truth" && pose_source_ != "localization2d") {
       throw std::runtime_error(
@@ -374,7 +369,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     const int robot_clearance = static_cast<int>(
         std::ceil(snapshot_clearance / map_->info.resolution));
     const int body_cells = static_cast<int>(
-        std::ceil(navigation2d::kPlanningRadius / map_->info.resolution));
+        std::ceil(navigation2d::kPlanningRadius() / map_->info.resolution));
     // Near-field lidar is fresher than the online occupancy grid. Preserve
     // only ray interiors (never the hit endpoint) as temporary free evidence
     // for this plan, allowing a certified narrow passage to be entered before
@@ -549,25 +544,26 @@ class AutonomousExplorer final : public rclcpp::Node {
     config.max_reverse_velocity = .10;
     // CAD: chassis 290×230 mm, wheel envelope half-width 0.147 m, max
     // footprint radius ~0.207 m. Match production navigation2d_node (+margin).
-    // Always plan at kPlanningRadius. The old entry 0.14 m / pinch acceptance
+    // Always plan at kPlanningRadius(). The old entry 0.14 m / pinch acceptance
     // <0.15 m let GLOBAL thread furniture V-gaps the body cannot fit.
     const bool entry_drive = pending_entry_goal_ || locked_entry_mouth_;
     // Entry: A* only. Theta* long chords cut nearby wall tips even when the
     // locked mouth is metres wide (live: gap=2.15 Entry probe rejected
     // path-intersects → abandon → tour loop → failed_goals thrash).
     config.planner = entry_drive ? "astar" : "theta_star";
-    config.robot_radius = navigation2d::kPlanningRadius;
+    config.robot_radius = navigation2d::kPlanningRadius();
     // Keep the chassis rectangle on a door crawl. Clearing it made the
     // collision monitor take the planning circle as the body width, so a
     // 0.29 m robot was stopped as though it were 0.44 m wide.
-    config.footprint = {{-.145, -.147}, {.115, -.147}, {.145, -.132},
-                        {.145, .132}, {.115, .147}, {-.145, .147}};
+    config.footprint.clear();
+    for (const auto& point : navigation2d::ActiveRobotProfile().footprint)
+      config.footprint.emplace_back(point.first, point.second);
     // Clearance tiers (strategy, not scene knobs):
     //   entry  — locked mouth crawl (softer inflation only)
     //   pinch  — automatic retry when open-tier finds no route through a
     //            door-width throat (any map, not kitchen-specific)
     //   open   — default explore: prefer mid-aisle over wall feet
-    // Lethal radius stays kPlanningRadius in all tiers; tiers only change
+    // Lethal radius stays kPlanningRadius() in all tiers; tiers only change
     // soft inflation.
     const bool pinch_plan = narrow_passage_retry_ && !entry_drive && !returning;
     // Soft inflation must stay below half a typical doorway (~0.35 m for a
@@ -874,8 +870,8 @@ class AutonomousExplorer final : public rclcpp::Node {
     planning_input_publisher_->publish(input);
 
     nav_msgs::msg::OccupancyGrid inflated = input;
-    constexpr double kRobotRadius = navigation2d::kPlanningRadius;
-    constexpr double kInflationRadius = .30;
+    const double kRobotRadius = navigation2d::kPlanningRadius();
+    const double kInflationRadius = navigation2d::kDebugInflationRadius();
     constexpr double kInflationCostScaling = 8.;
     const int inflation_cells =
         static_cast<int>(std::ceil(kInflationRadius / map_->info.resolution));
@@ -1172,7 +1168,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       const double mouth_range = std::hypot(rx - fx, ry - fy);
       constexpr double kPokeRange = 1.55;
       const double travel = mouth_range - kPokeRange;
-      if (travel > navigation2d::kSwingClearance) {
+      if (travel > navigation2d::kSwingClearance()) {
         Goal approach = *pending_entry_goal_;
         approach.x = rx + travel * (fx - rx) / mouth_range;
         approach.y = ry + travel * (fy - ry) / mouth_range;
@@ -1447,7 +1443,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     return any ? minimum : 0.;
   }
 
-  // One aperture for every stall/escape sample (kBodyConeHalfAngle).
+  // One aperture for every stall/escape sample (kBodyConeHalfAngle()).
   struct BodyRanges {
     double front = 0.;
     double back = 0.;
@@ -1457,16 +1453,16 @@ class AutonomousExplorer final : public rclcpp::Node {
   };
 
   BodyRanges ReadBodyRanges() const {
-    const double cone = navigation2d::kBodyConeHalfAngle;
+    const double cone = navigation2d::kBodyConeHalfAngle();
     const double pi = std::acos(-1.);
     BodyRanges ranges;
     ranges.front = SectorMinRange(0., cone);
     ranges.back = SectorMinRange(pi, cone);
-    // See kLidarForwardOffset: the back ray starts ahead of the chassis
+    // See kLidarForwardOffset(): the back ray starts ahead of the chassis
     // centre. Keep a positive value so a wall between the lidar and the tail
     // still counts as inside the body rather than "no return".
     if (ranges.back > 0.)
-      ranges.back = std::max(1e-3, ranges.back - navigation2d::kLidarForwardOffset);
+      ranges.back = std::max(1e-3, ranges.back - navigation2d::kLidarForwardOffset());
     ranges.left = SectorMinRange(pi / 2., cone);
     ranges.right = SectorMinRange(-pi / 2., cone);
     ranges.side = std::min(ranges.left > 0. ? ranges.left : 10.,
@@ -1511,7 +1507,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         (left > 0. && right > 0. && std::abs(left - right) > .12)
             ? ((left > right) ? .30 : -.30)
             : 0.;
-    if (back >= navigation2d::kPlanningRadius) {
+    if (back >= navigation2d::kPlanningRadius()) {
       // Priority 1: back straight out of the tip. Odom coasts fine; map yaw
       // does not matter. Tail must clear the planning circle.
       command.linear.x = -.20;
@@ -1560,10 +1556,10 @@ class AutonomousExplorer final : public rclcpp::Node {
           command.angular.z = .5 * command.angular.z + .5 * bias;
       }
       if (command.linear.x > 0. && front > 0. &&
-          front < navigation2d::kPlanningRadius) {
+          front < navigation2d::kPlanningRadius()) {
         command.linear.x = 0.;
         // Prefer reverse over spin when the nose closes mid-escape.
-        if (back >= navigation2d::kPlanningRadius) {
+        if (back >= navigation2d::kPlanningRadius()) {
           command.linear.x = -.16;
           command.angular.z = 0.;
         } else if (std::abs(command.angular.z) < .20) {
@@ -1981,9 +1977,9 @@ class AutonomousExplorer final : public rclcpp::Node {
     const bool entry = pending_entry_goal_ || locked_entry_mouth_;
     const bool pinched = navigation2d::HitBlocksSwing(body.front) &&
                          navigation2d::HitBlocksSwing(body.side);
-    const double want_euclid = entry ? navigation2d::kEntryRetreat
-                                     : (pinched ? navigation2d::kPocketRetreat
-                                                : navigation2d::kOpenRetreat);
+    const double want_euclid = entry ? navigation2d::kEntryRetreat()
+                                     : (pinched ? navigation2d::kPocketRetreat()
+                                                : navigation2d::kOpenRetreat());
     const double min_euclid = 0.5 * want_euclid;
     const double rx = pose_->pose.position.x;
     const double ry = pose_->pose.position.y;
@@ -2469,8 +2465,8 @@ class AutonomousExplorer final : public rclcpp::Node {
         nearest = i;
       }
     }
-    const double min_hop = navigation2d::kSwingClearance;
-    const double max_hop = navigation2d::kOpenRetreat;
+    const double min_hop = navigation2d::kSwingClearance();
+    const double max_hop = navigation2d::kOpenRetreat();
     Goal step = home;
     bool found = false;
     double best_robot = std::numeric_limits<double>::infinity();
@@ -2491,7 +2487,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     // The previous hop did not move the chassis. Repeating it is the spin loop.
     if (found && breadcrumb_returning_ && std::isfinite(active_goal_.x) &&
         std::hypot(step.x - active_goal_.x, step.y - active_goal_.y) <
-            navigation2d::kPlanningRadius)
+            navigation2d::kPlanningRadius())
       return false;
     if (!found) {
       // No useful trail hop — paint the corridor and drive home directly.
@@ -2519,7 +2515,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   void RememberEntryRoom(const Goal& frontier, const Goal& probe) {
     for (const auto& room : unentered_rooms_) {
       if (std::hypot(room.frontier_x - frontier.frontier_x,
-                     room.frontier_y - frontier.frontier_y) < navigation2d::kSwingClearance)
+                     room.frontier_y - frontier.frontier_y) < navigation2d::kSwingClearance())
         return;
     }
     unentered_rooms_.push_back({frontier.frontier_x, frontier.frontier_y, probe.x, probe.y});
@@ -2531,7 +2527,7 @@ class AutonomousExplorer final : public rclcpp::Node {
                        [&](const UnenteredRoom& room) {
                          return std::hypot(room.frontier_x - frontier.frontier_x,
                                            room.frontier_y - frontier.frontier_y) <
-                                navigation2d::kSwingClearance;
+                                navigation2d::kSwingClearance();
                        }),
         unentered_rooms_.end());
   }
@@ -2551,9 +2547,9 @@ class AutonomousExplorer final : public rclcpp::Node {
     std::vector<std::pair<double, double>> room_seeds;
     for (const auto& room : unentered_rooms_) room_seeds.emplace_back(room.probe_x, room.probe_y);
     auto goals = explorer_.UnvisitedSpaceGoals(
-        trajectory_, navigation2d::kOpenRetreat,
-        navigation2d::kRoomPocketDepthM * navigation2d::kRoomPocketDepthM,
-        room_seeds, navigation2d::kOpenRetreat);
+        trajectory_, navigation2d::kOpenRetreat(),
+        navigation2d::kRoomPocketDepthM() * navigation2d::kRoomPocketDepthM(),
+        room_seeds, navigation2d::kOpenRetreat());
     std::sort(goals.begin(), goals.end(), [&](const Goal& a, const Goal& b) {
       return std::hypot(a.x - rx, a.y - ry) < std::hypot(b.x - rx, b.y - ry);
     });
@@ -2561,7 +2557,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       auto attempt = std::find_if(
           room_visit_attempts_.begin(), room_visit_attempts_.end(),
           [&](const RoomVisitAttempt& a) {
-            return std::hypot(a.x - goal.x, a.y - goal.y) < navigation2d::kSwingClearance;
+            return std::hypot(a.x - goal.x, a.y - goal.y) < navigation2d::kSwingClearance();
           });
       if (attempt == room_visit_attempts_.end()) {
         room_visit_attempts_.push_back({goal.x, goal.y, 0});
@@ -3140,7 +3136,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         ",\"minimum_ttc_s\":" + std::to_string(last_minimum_ttc_s_) +
         ",\"planner_expansions\":" + std::to_string(last_planner_expansions_) +
         ",\"planner_elapsed_s\":" + std::to_string(last_planner_elapsed_s_) +
-        ",\"robot_radius_m\":" + std::to_string(navigation2d::kPlanningRadius) +
+        ",\"robot_radius_m\":" + std::to_string(navigation2d::kPlanningRadius()) +
         ",\"cmd_vel\":{\"linear\":" + std::to_string(last_cmd_linear_) +
         ",\"angular\":" + std::to_string(last_cmd_angular_) +
         "},\"requested_cmd\":{\"linear\":" + std::to_string(last_requested_linear_) +
@@ -3334,13 +3330,13 @@ class AutonomousExplorer final : public rclcpp::Node {
         }
       }
     };
-    free_disk(robot_x, robot_y, navigation2d::kPlanningRadius);
+    free_disk(robot_x, robot_y, navigation2d::kPlanningRadius());
     // A cell the current scan passes through is free now; a new occupied
     // mark there is mapper noise, not a wall on the route.
     if (execution_tick && scan_ && pose_) {
       const double yaw = Yaw(pose_->pose.orientation);
-      const double sensor_x = robot_x + navigation2d::kLidarForwardOffset * std::cos(yaw);
-      const double sensor_y = robot_y + navigation2d::kLidarForwardOffset * std::sin(yaw);
+      const double sensor_x = robot_x + navigation2d::kLidarForwardOffset() * std::cos(yaw);
+      const double sensor_y = robot_y + navigation2d::kLidarForwardOffset() * std::sin(yaw);
       const double evidence_range = std::min(3.0, static_cast<double>(scan_->range_max));
       const double step = std::max(.5 * live.resolution, .02);
       for (std::size_t beam = 0; beam < scan_->ranges.size(); ++beam) {
@@ -3363,7 +3359,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     // grazes a corner is still caught. Driving uses the chassis.
     return navigation2d::PathCutsLiveOccupied(
         live, path_xy, robot_x, robot_y,
-        execution_tick ? navigation2d::kChassisRadius : navigation2d::kPlanningRadius);
+        execution_tick ? navigation2d::kChassisRadius() : navigation2d::kPlanningRadius());
   }
 
   bool TourSegmentCutsWall(double x0, double y0, double x1, double y1) const {
@@ -3600,7 +3596,7 @@ class AutonomousExplorer final : public rclcpp::Node {
           // planning circle, so the crawl walked into the wall.
           const double tx = active_goal_.x;
           const double ty = active_goal_.y;
-          if (std::hypot(tx - rx, ty - ry) <= navigation2d::kPlanningRadius ||
+          if (std::hypot(tx - rx, ty - ry) <= navigation2d::kPlanningRadius() ||
               TourSegmentCutsWall(rx, ry, tx, ty)) {
             entry_open_loop_ticks_ = 0;
             AbandonLockedEntryMouth(
@@ -3773,8 +3769,8 @@ class AutonomousExplorer final : public rclcpp::Node {
       const double goal_dist = std::hypot(active_goal_.x - pose_->pose.position.x,
                                           active_goal_.y - pose_->pose.position.y);
       const BodyRanges body = ReadBodyRanges();
-      if (goal_dist < 4. * navigation2d::kSwingClearance &&
-          state.path_progress_m >= navigation2d::kPlanningRadius &&
+      if (goal_dist < 4. * navigation2d::kSwingClearance() &&
+          state.path_progress_m >= navigation2d::kPlanningRadius() &&
           IsCornerTipStall(path_clear, body.front, body.side)) {
         geometry_msgs::msg::Twist stop;
         command_publisher_->publish(stop);
@@ -3818,10 +3814,10 @@ class AutonomousExplorer final : public rclcpp::Node {
           std::hypot(rx - active_goal_.x, ry - active_goal_.y);
       const double front_clear = ReadBodyRanges().front;
       if (mouth_range < 1.20 &&
-          goal_dist > navigation2d::kPlanningRadius &&
+          goal_dist > navigation2d::kPlanningRadius() &&
           std::abs(command.linear.x) < .12 &&
           (front_clear <= 0. ||
-           front_clear >= navigation2d::kPlanningRadius) &&
+           front_clear >= navigation2d::kPlanningRadius()) &&
           !TourSegmentCutsWall(rx, ry, active_goal_.x, active_goal_.y)) {
         const double bearing =
             std::atan2(active_goal_.y - ry, active_goal_.x - rx);
@@ -3893,7 +3889,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     // that were exempt from this abort, so the robot spun forever in the U.
     const bool near_goal_alcove_crawl =
         phase_ == MissionPhase::kExploring && !returning_ &&
-        (goal_distance_now < navigation2d::kSwingClearance ||
+        (goal_distance_now < navigation2d::kSwingClearance() ||
          (state.global_path_length_m > .20 &&
           state.path_progress_m >= .80 * state.global_path_length_m)) &&
         last_goal_path_progress_time_.nanoseconds() > 0 &&

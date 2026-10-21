@@ -10,7 +10,7 @@ bool AdmitExploringGoal(const ExploringGoalFacts& facts, int minimum_cells) {
   if (minimum_cells > 0 && facts.frontier_cells < minimum_cells) return false;
   if (!(facts.cell_area > 0.) || facts.information_gain <= facts.cell_area)
     return false;
-  const double pocket = kRoomPocketDepthM * kRoomPocketDepthM;
+  const double pocket = kRoomPocketDepthM() * kRoomPocketDepthM();
   return facts.information_gain >= pocket;
 }
 
@@ -25,14 +25,14 @@ bool ShouldCoverResiduals(bool exploring_work_remains, bool coverage_enabled,
 
 TipLedger::Tip* TipLedger::Find(double x, double y) {
   for (auto& tip : tips_) {
-    if (std::hypot(tip.x - x, tip.y - y) <= kSameTipM) return &tip;
+    if (std::hypot(tip.x - x, tip.y - y) <= kSameTipM()) return &tip;
   }
   return nullptr;
 }
 
 const TipLedger::Tip* TipLedger::Find(double x, double y) const {
   for (const auto& tip : tips_) {
-    if (std::hypot(tip.x - x, tip.y - y) <= kSameTipM) return &tip;
+    if (std::hypot(tip.x - x, tip.y - y) <= kSameTipM()) return &tip;
   }
   return nullptr;
 }

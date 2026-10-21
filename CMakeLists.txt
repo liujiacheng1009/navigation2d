@@ -33,6 +33,7 @@ add_library(navigation2d_core STATIC
   control/regulated_pure_pursuit.cc control/dwa_controller.cc control/nav2_mppi_core.cc
   control/mppi_controller.cc control/dynamic_safety.cc
   control/safe_corridor.cc control/collision_monitor.cc control/mpc_controller.cc
+  geometry/vehicle_config.cc
   exploration/exploration_policy.cc
   exploration/frontier_explorer.cc exploration/region_scheduler.cc
   application/navigation_system.cc)

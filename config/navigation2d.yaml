@@ -114,3 +114,33 @@ recovery:
   linear_velocity: -0.08
   angular_velocity: 0.4
   dynamic_obstacle_radius: 0.20
+
+# Chassis measurements and the metre distances tuned for this robot.
+# Derived distances (swing, retreat) stay formulas of planning_radius_m.
+# Give-up counts, scoring weights, and cooldown seconds stay in code.
+robot:
+  planning_radius_m: 0.22
+  chassis_radius_m: 0.207
+  lidar_forward_offset_m: 0.18
+  debug_inflation_radius_m: 0.30
+  footprint_m:
+    - [-0.145, -0.147]
+    - [0.115, -0.147]
+    - [0.145, -0.132]
+    - [0.145, 0.132]
+    - [0.115, 0.147]
+    - [-0.145, 0.147]
+exploration:
+  footprint_clearance_m: 0.38
+  minimum_standoff_m: 0.45
+  maximum_standoff_m: 1.20
+  blacklist_radius_m: 1.20
+  frontier_stability_radius_m: 0.35
+  close_standoff_m: 0.18
+  preferred_standoff_m: 0.55
+  narrow_min_width_m: 0.32
+  narrow_max_width_m: 1.40
+  visited_viewpoint_radius_m: 0.45
+  visited_frontier_radius_m: 0.60
+  room_pocket_depth_m: 0.55
+  same_tip_m: 0.80

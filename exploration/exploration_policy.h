@@ -1,14 +1,11 @@
 #pragma once
 
+#include "navigation2d/geometry/robot_geometry.h"
+
 #include <vector>
 
 namespace navigation2d {
 
-// Depth of unknown that already counts as a room pocket in CorridorMouthAt.
-// A fringe thinner than this square is not exploring work.
-constexpr double kRoomPocketDepthM = 0.55;
-// Viewpoints this close are the same tip. Same distance used to merge one mouth.
-constexpr double kSameTipM = 0.80;
 // Open residuals are blocked after this many unreachable attempts.
 constexpr int kOpenTipGiveUpAttempts = 3;
 // A passable door is real work, so it survives more failures than an open tip

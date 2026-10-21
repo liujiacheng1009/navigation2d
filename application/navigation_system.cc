@@ -110,7 +110,7 @@ bool PathFootprintValid(const Path& path, const LayeredCostmap& costmap, double 
 // Planning clearance is the body circle. `LayeredCostmap::lethal` already
 // measures distance to the occupied cell box, so adding another half-cell
 // diagonal seals a passage the chassis fits (a door whose free half-width
-// sits between kPlanningRadius and kPlanningRadius + half-diagonal).
+// sits between kPlanningRadius() and kPlanningRadius() + half-diagonal).
 double EffectivePlanningRadius(const NavigationConfig& config,
                                const LayeredCostmap&) {
   return config.robot_radius;

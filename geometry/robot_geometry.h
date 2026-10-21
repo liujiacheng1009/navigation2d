@@ -1,77 +1,92 @@
 #pragma once
 
 #include <cmath>
+#include <utility>
+#include <vector>
 
 namespace navigation2d {
 
-// Inscribed planning radius for the chassis (CAD max footprint ~0.207 m +
-// margin). Explorer nomination, PathCuts, and autonomous explore Navigation
-// configs share this value — do not scatter bare 0.22 literals.
-inline constexpr double kPlanningRadius = .22;
+// Measured chassis and the metre distances tuned for it. Defaults match the
+// values previously written inline. config/navigation2d.yaml replaces them at
+// process start; formulas below follow planning_radius and do not have their
+// own keys.
+struct RobotProfile {
+  double planning_radius = 0.22;
+  double chassis_radius = 0.207;
+  double lidar_forward_offset = 0.18;
+  // Radius used only when publishing the inflated costmap debug topic.
+  // Planner tiers keep their own inflation in the explorer node.
+  double debug_inflation_radius = 0.30;
+  double room_pocket_depth = 0.55;
+  double same_tip = 0.80;
+  double close_standoff = 0.18;
+  double preferred_standoff = 0.55;
+  double narrow_min_width = 0.32;
+  double narrow_max_width = 1.40;
+  double visited_viewpoint_radius = 0.45;
+  double visited_frontier_radius = 0.60;
+  std::vector<std::pair<double, double>> footprint = {
+      {-.145, -.147}, {.115, -.147}, {.145, -.132},
+      {.145, .132}, {.115, .147}, {-.145, .147}};
+};
 
-// Radius the 290×230 mm chassis sweeps when it turns in place (CAD max
-// footprint). An executing route is dropped only when a newly mapped cell
-// would touch this body; planning keeps the larger kPlanningRadius, so a
-// wall that grows by part of a cell beside an accepted route does not
-// invalidate it.
-inline constexpr double kChassisRadius = .207;
-static_assert(kChassisRadius < kPlanningRadius);
+const RobotProfile& ActiveRobotProfile();
+void InstallRobotProfile(RobotProfile profile);
 
-// The lidar is mounted this far forward of the chassis centre, so a backward
-// ray overstates the tail clearance by exactly this much. Escape compares
-// body-frame ranges with the planning circle as if they were centred on the
-// chassis; without the shift it reversed until the lidar read 0.22 m and the
-// tail, 0.40 m behind the lidar, was already in the wall (live: back=0.39,
-// centre clearance fell from 0.35 to 0.15 at the corridor end).
-inline constexpr double kLidarForwardOffset = .18;
+inline double kPlanningRadius() { return ActiveRobotProfile().planning_radius; }
+inline double kChassisRadius() { return ActiveRobotProfile().chassis_radius; }
+inline double kLidarForwardOffset() {
+  return ActiveRobotProfile().lidar_forward_offset;
+}
+inline double kDebugInflationRadius() {
+  return ActiveRobotProfile().debug_inflation_radius;
+}
+inline double kRoomPocketDepthM() {
+  return ActiveRobotProfile().room_pocket_depth;
+}
+inline double kSameTipM() { return ActiveRobotProfile().same_tip; }
+inline double kCloseStandoff() { return ActiveRobotProfile().close_standoff; }
+inline double kPreferredStandoff() {
+  return ActiveRobotProfile().preferred_standoff;
+}
+inline double kNarrowMinWidth() { return ActiveRobotProfile().narrow_min_width; }
+inline double kNarrowMaxWidth() { return ActiveRobotProfile().narrow_max_width; }
+inline double kVisitedViewpointRadius() {
+  return ActiveRobotProfile().visited_viewpoint_radius;
+}
+inline double kVisitedFrontierRadius() {
+  return ActiveRobotProfile().visited_frontier_radius;
+}
 
-// One planning-circle diameter. Retreat lengths and near-goal windows use
-// this as a travel distance. It is not a lidar stuck threshold: a return
-// inside the diameter can still be outside the chassis.
-inline constexpr double kSwingClearance = 2. * kPlanningRadius;
+// One planning-circle diameter. Retreat lengths use this as a travel distance.
+inline double kSwingClearance() { return 2. * kPlanningRadius(); }
 
-// Cone half-angle whose lateral span at kSwingClearance equals one body
-// radius: atan(kPlanningRadius / kSwingClearance) = atan(1/2).
-// Every forward/side stall sample uses this aperture.
-inline const double kBodyConeHalfAngle =
-    std::atan(kPlanningRadius / kSwingClearance);
+// Cone half-angle whose lateral span at kSwingClearance() equals one body
+// radius. With swing = 2 * radius this is atan(1/2), independent of the
+// particular chassis.
+inline double kBodyConeHalfAngle() {
+  return std::atan(kPlanningRadius() / kSwingClearance());
+}
 
-// NavigationSystem::AddPathMetrics reports
-//   path_min_clearance_m = dist_to_occupied - robot_radius
-// i.e. EXTRA free margin beyond the planning circle. Unknown cells are not
-// obstacles in that number: a frontier sits on unknown, and counting it
-// floored every approach to margin 0.
-//
-// Both tiers accept any strictly positive extra margin. One extra planning
-// radius used to be required before a path was kept; a 0.70 m door only has
-// about 0.13 m beyond the circle, so every doorway was rejected and the tour
-// hopped. Staying off walls is inflation cost, not a second lethal radius.
-// margin == 0 is the circle itself (distance field floors everything inside).
+inline double kNarrowClearance() { return kPlanningRadius(); }
+
+// Trail-reverse distances, in planning-circle diameters.
+inline double kEntryRetreat() { return 2. * kSwingClearance(); }
+inline double kOpenRetreat() { return 3. * kSwingClearance(); }
+inline double kPocketRetreat() { return 4. * kSwingClearance(); }
+
 inline constexpr double kOpenPreferPathMargin = 0.;
 inline constexpr double kPinchMinPathMargin = 0.;
 static_assert(kOpenPreferPathMargin == kPinchMinPathMargin);
 
-// Trail-reverse distances, in planning-circle diameters. Entry/open leave
-// the cell; a pocket retreat is longer because both axes are inside the
-// planning circle.
-inline constexpr double kEntryRetreat = 2. * kSwingClearance;
-inline constexpr double kOpenRetreat = 3. * kSwingClearance;
-inline constexpr double kPocketRetreat = 4. * kSwingClearance;
-
-// Lidar range is distance to the hit. 0 means that sector returned nothing.
-// Yaw sweeps the planning circle. A return inside that circle is the body
-// on that axis; the diameter (0.44 m) is not required. A centered 0.70 m
-// door leaves about 0.35 m to each jamb, which is outside this circle.
 inline bool HitInsideBody(double range) {
-  return range > 0. && range < kPlanningRadius;
+  return range > 0. && range < kPlanningRadius();
 }
 inline bool HitBlocksSwing(double range) { return HitInsideBody(range); }
 inline bool AxisSwingClear(double range) {
-  return range >= kPlanningRadius;
+  return range >= kPlanningRadius();
 }
 
-// Extra path margin. A path the planner already cleared is executable when
-// it sits strictly outside the planning circle. margin == 0 is contact.
 inline bool PathClearsPinch(double margin) {
   return std::isfinite(margin) && margin > kPinchMinPathMargin;
 }
