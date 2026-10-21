@@ -69,8 +69,8 @@ navigation2d::FrontierExplorerConfig ExplorerConfig(rclcpp::Node& node) {
 const char* BackendName(navigation2d::ControllerBackend backend) {
   switch (backend) {
     case navigation2d::ControllerBackend::kAcados: return "acados";
-    case navigation2d::ControllerBackend::kMppi: return "mppi-fallback";
-    case navigation2d::ControllerBackend::kRpp: return "rpp-fallback";
+    case navigation2d::ControllerBackend::kMppi: return "mppi";
+    case navigation2d::ControllerBackend::kRpp: return "rpp";
     case navigation2d::ControllerBackend::kDwa: return "dwa";
     case navigation2d::ControllerBackend::kNone: return "none";
   }
