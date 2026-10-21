@@ -318,9 +318,10 @@ class AutonomousExplorer final : public rclcpp::Node {
   void FeedScan() {
     auto robot = LocalPose(pose_->pose);
     const double yaw = navigation2d::Yaw(robot);
+    const double lidar_forward = navigation2d::kLidarForwardOffset();
     const auto sensor = navigation2d::MakePose2d(
-        navigation2d::X(robot) + .18 * std::cos(yaw),
-        navigation2d::Y(robot) + .18 * std::sin(yaw), yaw);
+        navigation2d::X(robot) + lidar_forward * std::cos(yaw),
+        navigation2d::Y(robot) + lidar_forward * std::sin(yaw), yaw);
     // The online mapper has already fused this scan into the static map.
     // Do not let instantaneous endpoint noise disconnect its global route;
     // retain the scan for near-field collision monitoring during execution.
@@ -378,8 +379,9 @@ class AutonomousExplorer final : public rclcpp::Node {
     std::unordered_set<std::size_t> near_field_free;
     if (scan_ && pose_) {
       const double yaw = Yaw(pose_->pose.orientation);
-      const double sensor_x = pose_->pose.position.x + .18 * std::cos(yaw);
-      const double sensor_y = pose_->pose.position.y + .18 * std::sin(yaw);
+      const double lidar_forward = navigation2d::kLidarForwardOffset();
+      const double sensor_x = pose_->pose.position.x + lidar_forward * std::cos(yaw);
+      const double sensor_y = pose_->pose.position.y + lidar_forward * std::sin(yaw);
       const double evidence_range = std::min(3.0, static_cast<double>(scan_->range_max));
       const double step = std::max(.5 * map_->info.resolution, .02);
       for (std::size_t beam = 0; beam < scan_->ranges.size(); ++beam) {
