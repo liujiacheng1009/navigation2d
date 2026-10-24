@@ -471,8 +471,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   bool EasyLockedMouth() const {
     if (!entry_.pending() && !entry_.locked()) return false;
     if (entry_.locked() && entry_.easy()) return true;
-    const Goal& mouth =
-        entry_.pending().value_or(*entry_.locked());
+    const Goal& mouth = *entry_.ActiveMouth();
     if (!explorer_.IsCorridorMouth(mouth.frontier_x, mouth.frontier_y))
       return false;
     const double gap =
@@ -2208,7 +2207,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     if (!safety_held && (entry_.pending() || entry_.locked()) && Pose() &&
         !retreat_goal_ &&
         state.status != navigation2d::NavigationStatus::kSucceeded) {
-      const Goal& mouth = entry_.pending().value_or(*entry_.locked());
+      const Goal& mouth = *entry_.ActiveMouth();
       const double rx = Pose()->pose.position.x;
       const double ry = Pose()->pose.position.y;
       const double mouth_range =

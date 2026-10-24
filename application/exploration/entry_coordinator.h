@@ -39,6 +39,15 @@ class EntryCoordinator {
   void StopCrawl() { crawl_ticks_ = 0; }
   const std::optional<ExplorationGoal>& pending() const { return pending_; }
   const std::optional<ExplorationGoal>& locked() const { return locked_; }
+  // Synchronous read-only borrow; pending takes precedence over the lock.
+  // Any entry-state update may invalidate the returned pointer.
+  [[nodiscard]] const ExplorationGoal* ActiveMouth() const& noexcept {
+    if (pending_) {
+      return &*pending_;
+    }
+    return locked_ ? &*locked_ : nullptr;
+  }
+  const ExplorationGoal* ActiveMouth() const&& = delete;
   int attempts() const { return attempts_; }
   int crawl_ticks() const { return crawl_ticks_; }
   bool easy() const { return easy_; }

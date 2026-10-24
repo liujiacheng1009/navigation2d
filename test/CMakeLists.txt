@@ -68,3 +68,6 @@ add_executable(navigation2d_frontier_replay frontier_replay/contract_replay.cc)
 target_link_libraries(navigation2d_frontier_replay PRIVATE navigation2d_core)
 
 navigation2d_assert_test(completion_execution_test navigation2d_exploration_application)
+
+navigation2d_assert_test(entry_mouth_view_test navigation2d_exploration_application)
+target_compile_definitions(entry_mouth_view_test PRIVATE _GLIBCXX_ASSERTIONS=1)
