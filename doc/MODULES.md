@@ -309,3 +309,10 @@ node still owns substantial selection, navigation outcome and recovery flow.
 near/succeeded exploration arrival flows. It rechecks attempt budget after a
 probe callback, retains unresolved mouths and consumes the coverage obligation
 once. Return/completion/retreat navigation success remains outside this flow.
+
+`RetreatExecution` owns retreat purpose and the attempted-cell latch. Allowing
+another attempt and finishing an active retreat are separate operations. The
+executor checks the latch before reading lidar, requires Euclidean movement
+through `SelectTrailRetreat`, marks purpose before dispatch, and cancels trail
+evidence on rejected navigation. `GoalBehindDrivenTrail` retains the bounded
+reverse trail walk independently of ROS pose/trail storage.

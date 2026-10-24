@@ -38,6 +38,7 @@
 #include "navigation2d/application/exploration/entry_crawl_executor.h"
 #include "navigation2d/application/exploration/execution_command.h"
 #include "navigation2d/application/exploration/viewpoint_arrival.h"
+#include "navigation2d/application/exploration/retreat_execution.h"
 #include "navigation2d/application/exploration/selection_exhaustion.h"
 #include "navigation2d/application/exploration/viewpoint_rejection_executor.h"
 #include "navigation2d/application/exploration/viewpoint_rejections.h"
@@ -83,6 +84,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::EntryCrawlActions,
                                  private navigation2d::exploration::ExecutionCommandEvidence,
                                  private navigation2d::exploration::ViewpointArrivalActions,
+                                 private navigation2d::exploration::RetreatActions,
                                  private navigation2d::exploration::SelectionExhaustionActions,
                                  private navigation2d::exploration::ViewpointRejectionActions,
                                  private navigation2d::exploration::TourConstraints,
@@ -330,7 +332,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       const auto verdict = dispatch_.Evaluate(
           goal, {.entry = entry_drive,
                  .returning = returning,
-                 .retreat = retreat_goal_,
+                 .retreat = retreat_.active(),
                  .pinch = pinch_plan},
           latest_map_retry, probe, *this);
       using navigation2d::exploration::DispatchVerdict;
@@ -362,13 +364,13 @@ class AutonomousExplorer final : public rclcpp::Node,
       PublishStatus(returning ? "RETURNING" :
                         (goal.leftover_approach ? "COMPLETING" : "NAVIGATING"),
                     returning ? "returning to exploration start" :
-                        (retreat_goal_ ? "leaving a pinched corridor along the driven trail" :
+                        (retreat_.active() ? "leaving a pinched corridor along the driven trail" :
                         (goal.leftover_approach
                              ? "one leftover approach after exploring tour emptied"
                              : "navigating to frontier")));
       // Accepted dispatch commits the DFS room context. Inspecting candidates
       // must not Enter — only a path that will actually be tracked.
-      if (!returning && !retreat_goal_) explorer_.CommitRegion(goal);
+      if (!returning && !retreat_.active()) explorer_.CommitRegion(goal);
       RCLCPP_INFO(get_logger(),
                   "Navigation2D goal: pose=(%.2f, %.2f) goal=(%.2f, %.2f) "
                   "frontier_cells=%d region=%llu path_signature=%llu %s",
@@ -490,7 +492,7 @@ class AutonomousExplorer final : public rclcpp::Node,
 
   // Promote only true corridor mouths into locked entry.
   bool PromotePassableMouthEntry(const char* reason) {
-    if (returning_ || retreat_goal_ || mission_.phase() == MissionPhase::kReturning)
+    if (returning_ || retreat_.active() || mission_.phase() == MissionPhase::kReturning)
       return false;
     if (!std::isfinite(active_goal_.x) || !PassableMouthGoal(active_goal_))
       return false;
@@ -813,7 +815,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   // open nose is ordinary driving.
   bool IsPinchGeometryStall(double path_clearance_m, double front_range,
                             double side_range) const {
-    if (entry_.pending() || entry_.locked() || returning_ || retreat_goal_)
+    if (entry_.pending() || entry_.locked() || returning_ || retreat_.active())
       return false;
     if (!navigation_.has_session() || navigation2d::PathClearsOpen(path_clearance_m))
       return false;
@@ -863,7 +865,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     ClearDisplayedGoal();
     if (!tour_.goals().empty()) tour_.Advance();
     recovery_.Clear();
-    retreat_attempted_ = false;
+    retreat_.AllowRetry();
     if (EscapeOrShortRetreat("pinch unstick; peel into free",
                              "pinch unstick; short trail retreat")) {
       PublishStatus("RECOVERING", reason);
@@ -921,84 +923,24 @@ class AutonomousExplorer final : public rclcpp::Node,
   // Goal lies on the outbound trail behind the robot — picking it after a
   // failed mouth is the post-脱困 折返.
   bool GoalIsBehindTrail(const Goal& goal) const override {
-    if (!Pose() || pose_feedback_.trail().size() < 8) return false;
-    const double rx = Pose()->pose.position.x;
-    const double ry = Pose()->pose.position.y;
-    const double to_goal = std::hypot(goal.x - rx, goal.y - ry);
-    if (to_goal < .35) return false;
-    // Sample older trail points (≥1.2 m back). If the goal is much closer to
-    // those than to the robot, driving there is a U-turn reverse.
-    double best_behind = 1e9;
-    const double rx0 = pose_feedback_.trail().back().first;
-    const double ry0 = pose_feedback_.trail().back().second;
-    double walked = 0.;
-    for (std::size_t i = pose_feedback_.trail().size(); i-- > 0;) {
-      if (i + 1 < pose_feedback_.trail().size())
-        walked += std::hypot(pose_feedback_.trail()[i].first - pose_feedback_.trail()[i + 1].first,
-                             pose_feedback_.trail()[i].second - pose_feedback_.trail()[i + 1].second);
-      if (walked < 1.20) continue;
-      if (walked > 8.0) break;
-      const double d = std::hypot(goal.x - pose_feedback_.trail()[i].first,
-                                  goal.y - pose_feedback_.trail()[i].second);
-      best_behind = std::min(best_behind, d);
-    }
-    (void)rx0;
-    (void)ry0;
-    return best_behind + .60 < to_goal;
+    return Pose() && navigation2d::exploration::GoalBehindDrivenTrail(
+        pose_feedback_.trail(), *TourRobot(), goal);
   }
-
-  bool StartRetreat() {
-    if (pose_feedback_.trail().size() < 4 || !Pose()) return false;
-    const auto cell = PoseCell();
-    if (retreat_attempted_ && retreat_cell_x_ == cell.first && retreat_cell_y_ == cell.second)
-      return false;
-    // Wall-tip thrash: trail arc through dense stuck samples can be metres
-    // while Euclidean progress is centimetres — require real displacement.
-    // Entry / open-room: keep reverse short — long trail retreat is the
-    // inefficient 往回跑 the UI shows.
-    const BodyRanges body = ReadBodyRanges();
-    const bool entry = entry_.pending() || entry_.locked();
-    const bool pinched = navigation2d::HitBlocksSwing(body.front) &&
-                         navigation2d::HitBlocksSwing(body.side);
-    const double want_euclid = entry ? navigation2d::kEntryRetreat()
-                                     : (pinched ? navigation2d::kPocketRetreat()
-                                                : navigation2d::kOpenRetreat());
-    const double min_euclid = 0.5 * want_euclid;
-    const double rx = Pose()->pose.position.x;
-    const double ry = Pose()->pose.position.y;
-    std::size_t index = pose_feedback_.trail().size() - 1;
-    double best_d = 0.;
-    std::size_t best = index;
-    while (index > 0) {
-      --index;
-      const double d = std::hypot(pose_feedback_.trail()[index].first - rx,
-                                  pose_feedback_.trail()[index].second - ry);
-      if (d > best_d) {
-        best_d = d;
-        best = index;
-      }
-      if (d >= want_euclid) break;
-    }
-    if (best_d < min_euclid) return false;
-    const double goal_x = pose_feedback_.trail()[best].first;
-    const double goal_y = pose_feedback_.trail()[best].second;
-    Goal retreat;
-    retreat.x = goal_x;
-    retreat.y = goal_y;
-    retreat.yaw = std::atan2(goal_y - ry, goal_x - rx);
-    // Exit path out of a pinch may already be cooled from first-segment
-    // stalls; clear so the driven trail can be planned again.
-    cooled_signatures_.clear();
-    retreat_attempted_ = true;
-    retreat_cell_x_ = cell.first;
-    retreat_cell_y_ = cell.second;
+  bool RetreatPinched() const override {
+    const auto body = ReadBodyRanges();
+    return navigation2d::HitBlocksSwing(body.front) && navigation2d::HitBlocksSwing(body.side);
+  }
+  void ClearRetreatCooling() override { cooled_signatures_.clear(); }
+  void PrepareRetreatEvidence(bool pinched) override {
     evidence_budget_.RequestTrailReplay(pinched ? 12.0 : 4.0);
     evidence_budget_.RequestStartReplay();
-    retreat_goal_ = true;
-    if (StartNavigation(retreat, false)) return true;
-    retreat_goal_ = false;
-    evidence_budget_.CancelTrailReplay();
-    return false;
+  }
+  bool NavigateRetreat(const Goal& goal) override { return StartNavigation(goal, false); }
+  void CancelRetreatEvidence() override { evidence_budget_.CancelTrailReplay(); }
+  bool StartRetreat() {
+    if (pose_feedback_.trail().size() < 4 || !Pose()) return false;
+    return retreat_.Start(pose_feedback_.trail(), *TourRobot(), PoseCell(),
+                          entry_.pending() || entry_.locked(), *this);
   }
 
   void SelectNextGoal() override {
@@ -1401,7 +1343,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     cooled_signatures_.clear();
     latest_map_replans_ = 0;
     mapped_obstacle_rejects_ = 0;
-    retreat_attempted_ = false;
+    retreat_.AllowRetry();
     next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
     PublishStatus("SELECTING", reason);
     if (EscapeOrShortRetreat("leaving wall tip after path-cut thrash; peel",
@@ -1514,7 +1456,7 @@ class AutonomousExplorer final : public rclcpp::Node,
           Pose()->pose.position.y - entry_.pending()->frontier_y);
       if (state.path_progress_m < .08 && mouth_range > 1.5) {
         evidence_budget_.RequestStartReplay();
-        retreat_attempted_ = false;
+        retreat_.AllowRetry();
         if (EscapeOrShortRetreat(
                 "immobility far from locked mouth; peel then retry",
                 "unused"))
@@ -1524,7 +1466,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         next_selection_ = now();
         return true;
       }
-      retreat_attempted_ = false;
+      retreat_.AllowRetry();
       if (EscapeOrShortRetreat("immobility at locked mouth; peel then retry",
                                "unused"))
         return true;
@@ -1558,7 +1500,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 0.80,
                          1800u);
     ClearEntryMouthLock();
-    retreat_attempted_ = false;
+    retreat_.AllowRetry();
     evidence_budget_.RequestStartReplay();
     next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
     if (EscapeOrShortRetreat(
@@ -1733,7 +1675,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       explorer_.RecordAttempt(active_goal_, false);
       ClearEntryMouthLock();
       if (!tour_.goals().empty()) tour_.Advance();
-      retreat_attempted_ = false;
+      retreat_.AllowRetry();
       if (EscapeOrShortRetreat(
               "mapped-obstacle thrash; peel then retry local pocket",
               "mapped-obstacle thrash; short retreat then retry local pocket"))
@@ -1752,7 +1694,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       explorer_.CoolRegion(Pose()->pose.position.x, Pose()->pose.position.y, 1.80,
                            3000u);
     }
-    retreat_attempted_ = false;
+    retreat_.AllowRetry();
     tour_.Suspend();
     PublishStatus("SELECTING", "leaving pinch after mapped-obstacle rejects");
     if (EscapeOrShortRetreat(
@@ -1935,7 +1877,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     if (PoseImmobilityWatchdog(state)) return;
     // Mouth crossing is geometric — acknowledge once past the jambs, but keep
     // tracking the room-side probe so the chassis finishes into the pocket.
-    if (entry_.pending() && !returning_ && !retreat_goal_ && Pose() &&
+    if (entry_.pending() && !returning_ && !retreat_.active() && Pose() &&
         EntryProbeSatisfied()) {
       AcknowledgeEntry(navigation2d::exploration::EntryArrival::kDriving);
       return;
@@ -1943,7 +1885,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     // Goal already in the observation disk — finish it instead of sitting on
     // CARROT/GOAL with zero command (junction hesitation).
     if (mission_.phase() == MissionPhase::kExploring && !returning_ && Pose() &&
-        !retreat_goal_) {
+        !retreat_.active()) {
       const double goal_dist = std::hypot(active_goal_.x - Pose()->pose.position.x,
                                           active_goal_.y - Pose()->pose.position.y);
       if (goal_dist < .28 && state.path_progress_m >= .05) {
@@ -1980,7 +1922,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     // Driving a scrape chord into a wall pocket: do not wait for monitor STOP
     // after the nose is already in the corner (live: clear=0.13, cmd still
     // 0.27 m/s into south tip).
-    if (mission_.phase() == MissionPhase::kExploring && !returning_ && !retreat_goal_ &&
+    if (mission_.phase() == MissionPhase::kExploring && !returning_ && !retreat_.active() &&
         !entry_.pending() && !entry_.locked() && Pose()) {
       const double path_clear =
           ActivePathMargin(state.global_planning.path_min_clearance_m);
@@ -2013,7 +1955,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         state.collision_monitor_action == navigation2d::CollisionMonitorAction::kBlindZoneStop;
     std::optional<navigation2d::exploration::EntryApproach> approach;
     if (!safety_held && (entry_.pending() || entry_.locked()) && Pose() &&
-        !retreat_goal_ && state.status != navigation2d::NavigationStatus::kSucceeded) {
+        !retreat_.active() && state.status != navigation2d::NavigationStatus::kSucceeded) {
       approach = navigation2d::exploration::EntryApproach{
           *entry_.ActiveMouth(), active_goal_, *TourRobot()};
     }
@@ -2065,7 +2007,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     const bool forward_clearly_open = navigation2d::AxisSwingClear(front_range);
     const bool corridor_pinch = navigation2d::HitBlocksSwing(front_range) &&
                                  navigation2d::HitBlocksSwing(side_range);
-    // Include retreat_goal_: tip thrash used frontier_cells=0 retreat poses
+    // Include retreat_.active(): tip thrash used frontier_cells=0 retreat poses
     // that were exempt from this abort, so the robot spun forever in the U.
     const bool near_goal_alcove_crawl =
         mission_.phase() == MissionPhase::kExploring && !returning_ &&
@@ -2082,7 +2024,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       // leftovers vanish (raw_cells>>0, completing found none) while the robot
       // fled down the hall.
       const bool local_frontier_open =
-          !retreat_goal_ && explorer_.GoalRegionStillFrontier(active_goal_);
+          !retreat_.active() && explorer_.GoalRegionStillFrontier(active_goal_);
       const std::size_t local_unknown = explorer_.ReachableUnknownCells(
           Pose()->pose.position.x, Pose()->pose.position.y);
       if (local_frontier_open || local_unknown > 80) {
@@ -2098,9 +2040,9 @@ class AutonomousExplorer final : public rclcpp::Node,
           if (StartEntryProbe()) return;
         }
         // Drop only this viewpoint; keep the pocket nominatable.
-        if (!retreat_goal_) explorer_.RecordAttempt(active_goal_, false);
+        if (!retreat_.active()) explorer_.RecordAttempt(active_goal_, false);
         if (!tour_.goals().empty()) tour_.Advance();
-        retreat_goal_ = false;
+        retreat_.Finish();
         next_selection_ = now();
         PublishStatus("SELECTING",
                       "local pocket unfinished; retrying without pocket cool");
@@ -2112,16 +2054,16 @@ class AutonomousExplorer final : public rclcpp::Node,
                   goal_distance_now, front_range, side_range,
                   state.path_progress_m, state.global_path_length_m,
                   (now() - goal_started_).seconds(),
-                  retreat_goal_ ? "yes" : "no");
+                  retreat_.active() ? "yes" : "no");
       navigation_.Cancel();
-      if (!retreat_goal_) explorer_.RecordAttempt(active_goal_, true);
+      if (!retreat_.active()) explorer_.RecordAttempt(active_goal_, true);
       // Cool only when the tip is truly done (no local unknown left).
       explorer_.CoolRegion(active_goal_.x, active_goal_.y, 1.80, 3000u);
       explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 1.80, 3000u);
       explorer_.CoolRegion(Pose()->pose.position.x, Pose()->pose.position.y, 1.80, 3000u);
       ClearEntryMouthLock();
-      retreat_goal_ = false;
-      retreat_attempted_ = false;  // allow a short trail exit from this cell
+      retreat_.Finish();
+      retreat_.AllowRetry();  // allow a short trail exit from this cell
       tour_.Suspend();
       cooled_signatures_.clear();
       if (EscapeOrShortRetreat("leaving alcove tip; peel",
@@ -2156,8 +2098,8 @@ class AutonomousExplorer final : public rclcpp::Node,
       } else if (mission_.phase() == MissionPhase::kCompleting) {
         explorer_.RecordAttempt(active_goal_, true);
         FinishCompleting();
-      } else if (retreat_goal_) {
-        retreat_goal_ = false;
+      } else if (retreat_.active()) {
+        retreat_.Finish();
         reject_streak_ = 0;
         // After a trail retreat while a mouth is locked, resume that mouth.
         if (entry_.locked() && entry_.attempts() < EntryAttemptBudget()) {
@@ -2299,7 +2241,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         // Locked mouth: one peel, else leave and continue tour from here.
         if (entry_.locked() || entry_.pending()) {
           if (!entry_.pending()) entry_.SetPending(entry_.locked());
-          retreat_attempted_ = false;
+          retreat_.AllowRetry();
           navigation_.Cancel();
           if (EscapeOrShortRetreat("forward blocked at locked mouth; peel",
                                    "unused"))
@@ -2376,7 +2318,7 @@ class AutonomousExplorer final : public rclcpp::Node,
           // the tour cannot shuttle hall→threshold again.
           if (entry_.locked() || entry_.pending()) {
             if (!entry_.pending()) entry_.SetPending(entry_.locked());
-            retreat_attempted_ = false;
+            retreat_.AllowRetry();
             navigation_.Cancel();
             // Accel-limited 0.05 m/s from rest never moves the base; replan
             // storms (live: 190× no-motion at one pose) made it worse. Open-
@@ -2489,10 +2431,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   bool reject_pose_valid_ = false;
   int reject_cell_x_ = 0;
   int reject_cell_y_ = 0;
-  bool retreat_goal_ = false;
-  bool retreat_attempted_ = false;
-  int retreat_cell_x_ = 0;
-  int retreat_cell_y_ = 0;
+  navigation2d::exploration::RetreatExecution retreat_;
   navigation2d::exploration::PlanningEvidenceBudget evidence_budget_;
   // Trail budget the active plan was painted with (0 = not painted).
   // Per cell of the active plan's snapshot: 1 where the planner was told free.
