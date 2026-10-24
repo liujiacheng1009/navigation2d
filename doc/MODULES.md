@@ -21,6 +21,8 @@ navigation2d_geometry 边界，尚未把所有概念层拆成独立 target。
 - `route_preparation.*`：规划回退、角点验收、签名冷却和平滑流水线，不拥有执行状态。
 - `docking_servo.*`：精停进度/姿态迟滞与速度生成，按新目标重置；安全过滤和失败提交仍由导航编排执行。
 - `command_safety_pipeline.*`：独立拥有传感器监测和动态预测；借用 Impl 内稳定寿命的配置，先动态否决后消费原始传感器观测，保留 TTC 的原调用位置。
+- `execution_watchdog.*`：路线/对齐进度、旋转、安全停止计时、零命令和每目标恢复预算；组合原 CommandStallWatch，三类重置范围保持不同。
+- `navigation_failure.*`：失败效果契约；显式保留进度预算耗尽不清路线、精停超时不增加恢复次数等既有语义，状态和路线仍由导航编排单独提交。
 - `command_stall_watch.*`：累计位姿/路线/测量速度证据、时间窗与周期预算的唯一写入者。
 - `benchmark_runner.cc`：命令行适配器，仅链接 simulation，不进入产品库。
 
