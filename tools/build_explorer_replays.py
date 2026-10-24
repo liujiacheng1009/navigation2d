@@ -75,6 +75,8 @@ int main(int argc, char** argv) {
 
 
 def main():
+    from replay_object_cache import compile_cached
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build', type=Path, required=True, help='parent online_mapping build')
     parser.add_argument('--baseline-core', type=Path, required=True,
@@ -83,6 +85,7 @@ def main():
                         help='frozen node source when baseline Git metadata is unavailable')
     parser.add_argument('--baseline-ref', default='a947deba48765ee4dc57168ebcf1be5e2c49e205')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--no-object-cache', action='store_true')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     build = args.build.resolve()
@@ -109,6 +112,7 @@ def main():
             parser.error('baseline Git source unavailable; provide --baseline-source from its frozen tree')
     fixtures = {str(p.relative_to(root)): digest(p) for p in (root / 'test/replay').glob('*.h')}
     manifest = {'fixture_sha256': fixtures, 'builder_sha256': digest(Path(__file__)),
+                'cache_helper_sha256': digest(Path(__file__).with_name('replay_object_cache.py')),
                 'baseline_ref': args.baseline_ref, 'baseline_core': digest(baseline_core),
                 'candidate_core': digest(current_core),
                 'baseline_source': hashlib.sha256(baseline.encode()).hexdigest(), 'artifacts': {}}
@@ -116,7 +120,7 @@ def main():
                           ('candidate', (root / 'ros/autonomous_explorer_node.cc').read_text())]:
         cpp, obj, executable = [output / f'{label}{suffix}' for suffix in ['.cc', '.o', '']]
         cpp.write_text(adapt(source, label))
-        subprocess.run([link_template[0], *flags, '-c', str(cpp), '-o', str(obj)], check=True)
+        compilation = compile_cached(link_template[0], flags, cpp, obj, args.no_object_cache)
         link = link_template.copy()
         link[link.index('-o') + 1] = str(executable)
         objects = [i for i, value in enumerate(link) if value.endswith('autonomous_explorer_node.cc.o')]
@@ -128,7 +132,8 @@ def main():
                 if value.endswith('libnavigation2d_core.a'):
                     link[i] = str(baseline_core)
         subprocess.run(link, cwd=build, check=True)
-        manifest['artifacts'][label] = {'source': digest(cpp), 'binary': digest(executable)}
+        manifest['artifacts'][label] = {'source': digest(cpp), 'binary': digest(executable),
+                                        'compilation': compilation}
     if fixtures != {str(p.relative_to(root)): digest(p) for p in (root / 'test/replay').glob('*.h')}:
         raise RuntimeError('fixture changed while compiling; discard and rebuild both replays')
     (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')

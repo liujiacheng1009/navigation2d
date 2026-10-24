@@ -106,3 +106,13 @@ The frozen node uses the equivalent historical accumulation in a generated test
 hook. The fixture cannot mutate the candidate's private pose/trail storage. The
 parent target `exploration_pose_feedback_test` separately covers the rotated
 truth frame, header preservation, strict 5 cm sampling and accumulated distance.
+
+## Compile cache
+
+The builder preprocesses each generated translation unit and checks its complete
+input digest, codegen flags, compiler/frontend/assembler identities and object
+integrity before reusing compilation. New include shadows invalidate the cache.
+Linking always runs with the current libraries. The original source path and
+compiler flags are retained; the frozen baseline binary digest stayed identical
+when enabling the cache. `--no-object-cache` forces a fresh object build. Cache
+inputs and hit/miss information are recorded alongside the replay manifest.

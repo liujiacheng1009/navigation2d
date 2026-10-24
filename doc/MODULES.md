@@ -19,6 +19,8 @@ navigation2d_geometry 边界，尚未把所有概念层拆成独立 target。
 - `application/navigation_config.h`：旧 include 兼容入口；值定义在 `configuration/navigation_config.h`。
 - `navigation_config.cc`：现有 YAML schema、类型转换和校验，分组解析仍待后续迁移。
 - `route_preparation.*`：规划回退、角点验收、签名冷却和平滑流水线，不拥有执行状态。
+- `docking_servo.*`：精停进度/姿态迟滞与速度生成，按新目标重置；安全过滤和失败提交仍由导航编排执行。
+- `command_safety_pipeline.*`：独立拥有传感器监测和动态预测；借用 Impl 内稳定寿命的配置，先动态否决后消费原始传感器观测，保留 TTC 的原调用位置。
 - `command_stall_watch.*`：累计位姿/路线/测量速度证据、时间窗与周期预算的唯一写入者。
 - `benchmark_runner.cc`：命令行适配器，仅链接 simulation，不进入产品库。
 
