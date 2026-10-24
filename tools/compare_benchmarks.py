@@ -20,12 +20,19 @@ METRICS = ('wall_seconds', 'control_cycle_p50_us', 'control_cycle_p95_us',
            'control_cycle_p99_us', 'controller_solve_p99_us', 'peak_rss_kb')
 
 
+# Explicit measured fields only: a future timeout_seconds or budget_us is
+# behavior until the output schema deliberately declares it a measurement.
+TIMING_FIELDS = {'wall_seconds', 'peak_rss_kb', 'global_plan_seconds',
+                 'global_plan_first_solution_seconds', 'tick_us'} | {
+    f'{family}_p{percentile}_us'
+    for family in ('control_cycle', 'controller_solve', 'pure_solver', 'global_plan',
+                   'global_plan_first_solution', 'tick')
+    for percentile in (50, 95, 99)}
+
+
 def behavior(result):
-    """Keep every output except measured timings and process RSS."""
-    return {key: value for key, value in result.items()
-            if key != 'peak_rss_kb' and key != 'wall_seconds'
-            and not key.endswith(('_us', '_seconds'))
-            and not key.startswith('global_plan_first_solution_seconds')}
+    """Keep every output except explicitly declared measured timing/RSS fields."""
+    return {key: value for key, value in result.items() if key not in TIMING_FIELDS}
 
 
 def digest(path):
@@ -48,6 +55,9 @@ def interval(values):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--input-files', nargs='*', type=Path, default=[])
+    parser.add_argument('--metrics', nargs='+', default=list(METRICS))
+    parser.add_argument('--scope', default='NavigationSystem simulation only; excludes ROS exploration Tick and board validation.')
     parser.add_argument('--baseline', required=True)
     parser.add_argument('--candidate')
     parser.add_argument('--cases', type=Path, required=True,
@@ -57,6 +67,8 @@ def main():
     parser.add_argument('--calibration', type=Path)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
+    if not set(args.metrics) <= TIMING_FIELDS - {'tick_us'}:
+        parser.error('unknown measured metric; extend the explicit output schema first')
     if args.pairs < 30:
         parser.error('at least 30 independent pairs required')
     if not args.calibrate and (not args.candidate or not args.calibration):
@@ -66,15 +78,20 @@ def main():
         parser.error('cases must be a nonempty list of string argument lists')
     input_hashes = {str(Path(value).resolve()): digest(value) for case in cases for value in case
                     if Path(value).is_file()}
+    input_hashes.update({str(p.resolve()): digest(p) for p in args.input_files})
     calibration = None if args.calibrate else json.loads(args.calibration.read_text())
     if calibration and (calibration['cases'] != cases or
                         calibration['baseline_sha256'] != digest(args.baseline) or
                         calibration.get('input_sha256') != input_hashes):
         parser.error('baseline or cases differ from calibration')
+    if calibration and (calibration.get('metric_names', list(METRICS)) != args.metrics or
+                        calibration.get('scope') != args.scope):
+        parser.error('metric names or measurement scope differ from calibration')
     candidate = args.baseline if args.calibrate else args.candidate
     report = {'baseline_sha256': digest(args.baseline),
               'candidate_sha256': digest(candidate), 'cases': cases,
               'pairs': args.pairs, 'calibration': args.calibrate, 'results': [],
+              'metric_names': args.metrics,
               'input_sha256': input_hashes, 'platform': platform.platform(),
               'cpu_affinity': sorted(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else None}
     failed = False
@@ -98,7 +115,7 @@ def main():
             pairs.append({'baseline': a, 'candidate': b})
         entry = {'behavior_equal': deterministic, 'samples': pairs, 'metrics': {}}
         failed |= not deterministic
-        for metric in METRICS:
+        for metric in args.metrics:
             differences = [p['candidate'][metric] - p['baseline'][metric] for p in pairs]
             bounds = interval(differences)
             # Freeze empirical A/A difference distribution before candidate
@@ -126,7 +143,7 @@ def main():
         inconclusive = True
     report['status'] = ('FAILED' if failed else 'INCONCLUSIVE' if inconclusive
                         else 'CALIBRATED' if args.calibrate else 'WITHIN_MEASURED_NOISE')
-    report['scope'] = 'NavigationSystem simulation only; excludes ROS exploration Tick and board validation.'
+    report['scope'] = args.scope
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + '\n')
     print(report['status'])

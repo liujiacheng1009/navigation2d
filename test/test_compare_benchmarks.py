@@ -19,6 +19,13 @@ class ComparisonContract(unittest.TestCase):
                           dict(baseline, trace=[{"x": 1.1}])):
             self.assertNotEqual(module.behavior(baseline), module.behavior(candidate))
 
+    def test_unknown_units_are_not_silently_treated_as_measurements(self):
+        baseline = {'status': 'RUNNING', 'timeout_seconds': 5, 'budget_us': 100}
+        self.assertNotEqual(module.behavior(baseline),
+                            module.behavior(dict(baseline, timeout_seconds=6)))
+        self.assertNotEqual(module.behavior(baseline),
+                            module.behavior(dict(baseline, budget_us=200)))
+
     def test_pair_interval_identifies_constant_slowdown(self):
         lower, upper = module.interval([5.] * 30)
         self.assertEqual((lower, upper), (5., 5.))
