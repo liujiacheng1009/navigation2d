@@ -1,7 +1,7 @@
 #pragma once
 #include <string>
 
-#include "navigation2d/application/exploration/entry_probe_executor.h"
+#include "navigation2d/application/exploration/entry_actions.h"
 #include "rclcpp/logger.hpp"
 namespace navigation2d::exploration_ros {
 // Status remains a node output so the same publisher/capture boundary is used.

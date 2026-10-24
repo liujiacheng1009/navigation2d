@@ -94,6 +94,10 @@ add_library(navigation2d_exploration_application STATIC
   application/exploration/mission_lifecycle.cc
   application/exploration/dispatch_policy.cc
   application/exploration/pose_motion_watch.cc
+  application/exploration/entry_completion.cc
+  application/exploration/tour_execution.cc
+  application/exploration/mouth_tour_order.cc
+  application/exploration/wall_tip_tour_order.cc
   application/exploration/entry_probe_executor.cc
   application/exploration/entry_target.cc
   application/exploration/entry_coordinator.cc

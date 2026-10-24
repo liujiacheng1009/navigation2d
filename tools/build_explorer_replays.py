@@ -87,11 +87,14 @@ int main(int argc, char** argv) {
 
 def main():
     from replay_object_cache import compile_cached
+    from replay_baseline_bundle import reuse_baseline
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build', type=Path, required=True, help='parent online_mapping build')
     parser.add_argument('--baseline-core', type=Path, required=True,
                         help='frozen libnavigation2d_core.a, not the candidate library')
+    parser.add_argument('--baseline-bundle', type=Path,
+                        help='verified frozen baseline/manifest/source bundle; do not relink it')
     parser.add_argument('--baseline-source', type=Path,
                         help='frozen node source when baseline Git metadata is unavailable')
     parser.add_argument('--baseline-ref', default='a947deba48765ee4dc57168ebcf1be5e2c49e205')
@@ -124,11 +127,17 @@ def main():
     fixtures = {str(p.relative_to(root)): digest(p) for p in (root / 'test/replay').glob('*.h')}
     manifest = {'fixture_sha256': fixtures, 'builder_sha256': digest(Path(__file__)),
                 'cache_helper_sha256': digest(Path(__file__).with_name('replay_object_cache.py')),
+                'bundle_helper_sha256': digest(Path(__file__).with_name('replay_baseline_bundle.py')),
                 'baseline_ref': args.baseline_ref, 'baseline_core': digest(baseline_core),
                 'candidate_core': digest(current_core),
                 'baseline_source': hashlib.sha256(baseline.encode()).hexdigest(), 'artifacts': {}}
     for label, source in [('baseline', baseline),
                           ('candidate', (root / 'ros/autonomous_explorer_node.cc').read_text())]:
+        if label == 'baseline' and args.baseline_bundle:
+            artifact, provenance = reuse_baseline(args.baseline_bundle, output, manifest)
+            manifest['artifacts'][label] = artifact
+            manifest['baseline_bundle'] = provenance
+            continue
         cpp, obj, executable = [output / f'{label}{suffix}' for suffix in ['.cc', '.o', '']]
         cpp.write_text(adapt(source, label))
         compilation = compile_cached(link_template[0], flags, cpp, obj, args.no_object_cache)

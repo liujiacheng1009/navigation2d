@@ -130,3 +130,7 @@ ROS_DOMAIN_ID=211 python3 tools/check_entry_replay.py \
 ```
 
 `entry-benchmark` 执行同样五种分支，分别输出 `approach_us`、`unavailable_us`、`probe_us`、`inside_us`、`cooling_us`，并保留完整行为 trace、进程 wall time 和峰值 RSS。计时包围实际入口调用，未将构造节点算进各分支耗时；进程指标仍包含构造。使用 compare_benchmarks 的显式指标/范围、冻结 A/A 后交替 A/B，不将此场景视为穿门运动闭环。
+
+### 复用冻结基线包
+
+将已生成并表征过的 `baseline`、`baseline.cc`、`manifest.json` 保存在独立目录；后续构建可传 `--baseline-bundle <目录>`。工具逐项核对原始源码、独立核心库、场景、生成源码和二进制摘要，复用该基线，只重建候选。基线包与输出目录必须互不包含，原文件不被覆盖。这样候选新增的 ROS 适配器或后续私有布局变化不会被重新链接/编译进基线；基线包仍需来自真实的独立冻结构建，不能用候选程序冒充。

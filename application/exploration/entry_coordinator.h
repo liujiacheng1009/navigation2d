@@ -21,8 +21,8 @@ struct EntryCrawlStep {
   State state;
   Twist2d command;
 };
-// Entry state has one owner. Callers provide map-derived facts; this class
-// neither queries ROS nor publishes commands or commits navigation goals.
+// Entry state has one owner. Geometry may query the read-only exploration
+// map; this class has no ROS, publication or navigation-commit responsibility.
 class EntryCoordinator {
  public:
   static bool SameMouth(const ExplorationGoal& a, const ExplorationGoal& b);
@@ -48,6 +48,8 @@ class EntryCoordinator {
                                       const ExplorationGoal& active_goal) const;
   static bool EnoughDepth(double depth, double gap) { return depth > (gap >= .50 ? .30 : .48); }
   bool Satisfied(double rx, double ry, const ExplorationGoal& active_goal, double gap) const;
+  bool Satisfied(double rx, double ry, const ExplorationGoal& active_goal,
+                 const FrontierExplorer& explorer) const;
 
  private:
   std::optional<ExplorationGoal> pending_, locked_;

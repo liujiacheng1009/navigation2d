@@ -14,7 +14,7 @@ void Require(bool value) {
     throw std::runtime_error("entry execution contract failed");
   }
 }
-struct Actions final : EntryProbeActions {
+struct Actions final : EntryActions {
   bool cooling = false, accept = true;
   std::vector<std::string> trace;
   std::vector<EntryNotice> notices;
@@ -36,6 +36,9 @@ struct Actions final : EntryProbeActions {
   void QueueActiveRegionFinish() override {
     Require(!state->pending() && !state->locked());
     trace.push_back("queue");
+  }
+  void MarkRegionFinishPending() override {
+    throw std::runtime_error("unexpected driving completion");
   }
   void SelectAfterEntry() override { trace.push_back("select"); }
   void ReportEntry(const EntryNotice& notice) override {

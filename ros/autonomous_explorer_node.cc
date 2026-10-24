@@ -3,7 +3,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
-#include <deque>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -35,6 +34,8 @@
 #include "navigation2d/application/exploration/recovery_session.h"
 #include "navigation2d/application/exploration/entry_coordinator.h"
 #include "navigation2d/application/exploration/entry_probe_executor.h"
+#include "navigation2d/application/exploration/entry_completion.h"
+#include "navigation2d/application/exploration/tour_execution.h"
 #include "navigation2d/ros/exploration/entry_reporter.h"
 #include "navigation2d/application/exploration/status_serializer.h"
 #include "navigation2d/application/exploration/room_visit_ledger.h"
@@ -90,7 +91,8 @@ navigation2d::FrontierExplorerConfig ExplorerConfig(rclcpp::Node& node) {
 
 class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::ReturnActions,
-                                 private navigation2d::exploration::EntryProbeActions,
+                                 private navigation2d::exploration::EntryActions,
+                                 private navigation2d::exploration::TourConstraints,
                                  private navigation2d::exploration_ros::EntryStatusSink {
  public:
   AutonomousExplorer() : Node("sweepnav_autonomous_explorer"), explorer_(ExplorerConfig(*this)) {
@@ -494,21 +496,20 @@ class AutonomousExplorer final : public rclcpp::Node,
     inflated_costmap_publisher_->publish(inflated);
   }
 
+  std::optional<navigation2d::exploration::TourPose> TourRobot() const {
+    if (!Pose()) { return std::nullopt; }
+    return navigation2d::exploration::TourPose{
+        Pose()->pose.position.x, Pose()->pose.position.y, Yaw(Pose()->pose.orientation)};
+  }
   void BuildTour() {
-    committed_tour_.clear();
-    const double yaw = Pose() ? Yaw(Pose()->pose.orientation)
-                             : std::numeric_limits<double>::quiet_NaN();
-    const auto goals = explorer_.BuildTour(Pose()->pose.position.x,
-                                           Pose()->pose.position.y, yaw);
-    for (const auto& goal : goals) committed_tour_.push_back(goal);
-    ++tour_revision_;
+    tour_.Build(explorer_, *TourRobot());
     PublishFrontierDebug();
     RCLCPP_INFO(get_logger(),
                 "Frontier graph tour %zu: raw_cells=%zu raw_clusters=%zu candidates=%zu "
                 "stable=%zu %s",
-                tour_revision_, explorer_.raw_frontier_cells(),
+                tour_.revision(), explorer_.raw_frontier_cells(),
                 explorer_.raw_frontier_clusters(), explorer_.candidate_frontier_goals(),
-                committed_tour_.size(), explorer_.RegionAudit().c_str());
+                tour_.goals().size(), explorer_.RegionAudit().c_str());
   }
 
   void PublishFrontierDebug() {
@@ -549,67 +550,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     recently_demoted_ = mouth;
     recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(8.0);
     ClearEntryMouthLock();
-    constexpr double kLocalHopM = 4.0;
-    const double rx = Pose() ? Pose()->pose.position.x : mouth.x;
-    const double ry = Pose() ? Pose()->pose.position.y : mouth.y;
-    const auto is_local = [&](const Goal& goal) {
-      return std::hypot(goal.x - rx, goal.y - ry) <= kLocalHopM ||
-             std::hypot(goal.frontier_x - mouth.frontier_x,
-                        goal.frontier_y - mouth.frontier_y) <= kLocalHopM ||
-             explorer_.GoalInActiveRegion(goal);
-    };
-    std::deque<Goal> ahead_local;
-    std::deque<Goal> behind_local;
-    std::deque<Goal> far;
-    const auto place = [&](Goal goal) {
-      if (SameEntryMouth(goal, mouth) || RecentlyDemoted(goal)) return;
-      if (!is_local(goal)) {
-        far.push_back(std::move(goal));
-        return;
-      }
-      if (GoalIsBehindTrail(goal))
-        behind_local.push_back(std::move(goal));
-      else
-        ahead_local.push_back(std::move(goal));
-    };
-    for (const auto& goal : committed_tour_) place(goal);
-    // Pull in other executable mouths near the abandoned doorway.
-    if (Pose()) {
-      auto mouths = explorer_.SelectGoals(rx, ry);
-      mouths = explorer_.OrderByRegion(std::move(mouths), rx, ry,
-                                       Yaw(Pose()->pose.orientation));
-      for (const auto& candidate : mouths) {
-        if (SameEntryMouth(candidate, mouth) || RecentlyDemoted(candidate))
-          continue;
-        const bool duplicate =
-            std::any_of(ahead_local.begin(), ahead_local.end(),
-                        [&](const Goal& prior) {
-                          return SameEntryMouth(prior, candidate);
-                        }) ||
-            std::any_of(behind_local.begin(), behind_local.end(),
-                        [&](const Goal& prior) {
-                          return SameEntryMouth(prior, candidate);
-                        }) ||
-            std::any_of(far.begin(), far.end(), [&](const Goal& prior) {
-              return SameEntryMouth(prior, candidate);
-            });
-        if (duplicate) continue;
-        place(candidate);
-      }
-      if (ahead_local.empty() && behind_local.empty() && far.empty()) {
-        for (const auto& candidate : mouths) {
-          if (SameEntryMouth(candidate, mouth) || RecentlyDemoted(candidate))
-            continue;
-          far.push_back(candidate);
-          break;
-        }
-      }
-    }
-    committed_tour_.clear();
-    // Prefer goals ahead of the outbound trail so we do not U-turn home.
-    for (auto& goal : ahead_local) committed_tour_.push_back(std::move(goal));
-    for (auto& goal : far) committed_tour_.push_back(std::move(goal));
-    for (auto& goal : behind_local) committed_tour_.push_back(std::move(goal));
+    tour_.AfterMouthFailure(explorer_, mouth, TourRobot(), *this);
     next_selection_ = now();
     PublishStatus("SELECTING", reason);
   }
@@ -688,6 +629,11 @@ class AutonomousExplorer final : public rclcpp::Node,
     recently_demoted_ = mouth;
     recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(seconds);
   }
+  void MarkRegionFinishPending() override { pending_region_finish_ = true; }
+  void AcknowledgeEntry(navigation2d::exploration::EntryArrival arrival) {
+    navigation2d::exploration::CompleteEntryArrival(entry_, explorer_, room_visits_, *this,
+        arrival, Pose()->pose.position.x, Pose()->pose.position.y);
+  }
   void SelectAfterEntry() override { next_selection_ = now(); }
   void EntryStatus(const char* phase, const char* reason) override { PublishStatus(phase, reason); }
   void ReportEntry(const navigation2d::exploration::EntryNotice& notice) override {
@@ -707,13 +653,8 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   bool EntryProbeSatisfied() const {
-    if (!Pose() || !entry_.pending() || entry_.attempts() < 1) { return false; }
-    const auto depth = entry_.InteriorDepth(Pose()->pose.position.x, Pose()->pose.position.y,
-                                             active_goal_);
-    if (!depth) { return false; }
-    const auto& mouth = entry_.locked().value_or(*entry_.pending());
-    return navigation2d::exploration::EntryCoordinator::EnoughDepth(
-        *depth, explorer_.MouthGapWidth(mouth.frontier_x, mouth.frontier_y));
+    if (!Pose()) { return false; }
+    return entry_.Satisfied(Pose()->pose.position.x, Pose()->pose.position.y, active_goal_, explorer_);
   }
 
   // After crossing a mouth: queue in-room leftovers before any hallway tour so
@@ -722,29 +663,10 @@ class AutonomousExplorer final : public rclcpp::Node,
     if (!Pose()) return;
     const double rx = Pose()->pose.position.x;
     const double ry = Pose()->pose.position.y;
-    explorer_.CommitRegion(rx, ry);
-    committed_tour_.clear();
-    auto leftovers = explorer_.SelectLeftoverApproaches(rx, ry, 6);
-    leftovers = explorer_.OrderByRegion(std::move(leftovers), rx, ry,
-                                        Yaw(Pose()->pose.orientation));
-    for (auto& goal : leftovers) {
-      if (!explorer_.GoalInActiveRegion(goal)) continue;
-      if (RecentlyDemoted(goal)) continue;
-      committed_tour_.push_back(std::move(goal));
-    }
-    if (committed_tour_.empty()) {
-      auto mouths = explorer_.SelectGoals(rx, ry);
-      mouths = explorer_.OrderByRegion(std::move(mouths), rx, ry,
-                                       Yaw(Pose()->pose.orientation));
-      for (auto& goal : mouths) {
-        if (!explorer_.GoalInActiveRegion(goal)) continue;
-        if (RecentlyDemoted(goal)) continue;
-        committed_tour_.push_back(std::move(goal));
-      }
-    }
+    tour_.QueueActiveRoom(explorer_, *TourRobot(), *this);
     RCLCPP_INFO(get_logger(),
                 "active room finish queued: local_goals=%zu unknown=%zu %s",
-                committed_tour_.size(),
+                tour_.goals().size(),
                 explorer_.ReachableUnknownCells(rx, ry),
                 explorer_.RegionAudit().c_str());
   }
@@ -909,7 +831,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   void StartCompletingProbe() {
     ++completing_probe_rounds_;
     mission_.BeginCompleting();
-    committed_tour_.clear();
+    tour_.Suspend();
     // Failure cools hid unfinished alcove mouths from the exploring tour.
     // Completing must see them again or PARTIAL leaves visible white tips.
     explorer_.ClearFailedBlacklist();
@@ -1031,28 +953,9 @@ class AutonomousExplorer final : public rclcpp::Node,
       next_selection_ = now() + rclcpp::Duration::from_seconds(0.6);
       return true;
     }
-    const double rx = Pose()->pose.position.x;
-    const double ry = Pose()->pose.position.y;
     BuildTour();
-    std::deque<Goal> distant;
-    for (const auto& goal : committed_tour_) {
-      if (RecentlyDemoted(goal)) continue;
-      if (std::hypot(goal.x - rx, goal.y - ry) < 1.8) continue;
-      distant.push_back(goal);
-    }
-    auto leftovers = explorer_.SelectLeftoverApproaches(rx, ry, 8);
-    leftovers = explorer_.OrderByRegion(std::move(leftovers), rx, ry,
-                                        Yaw(Pose()->pose.orientation));
-    for (auto& goal : leftovers) {
-      if (std::hypot(goal.x - rx, goal.y - ry) < 1.5) continue;
-      if (!explorer_.IsCorridorMouth(goal.frontier_x, goal.frontier_y) &&
-          explorer_.MouthGapWidth(goal.frontier_x, goal.frontier_y) < .50)
-        continue;
-      distant.push_front(std::move(goal));
-    }
-    committed_tour_.clear();
-    for (auto& goal : distant) committed_tour_.push_back(std::move(goal));
-    if (committed_tour_.empty()) {
+    tour_.PrioritizeDistant(explorer_, *TourRobot(), *this);
+    if (tour_.goals().empty()) {
       RCLCPP_WARN(get_logger(), "Tip rescue found no distant mouth to retry");
       return false;
     }
@@ -1068,12 +971,12 @@ class AutonomousExplorer final : public rclcpp::Node,
 
   void FinishCompleting() {
     mission_.ResumeExploring();
-    committed_tour_.clear();
+    tour_.Suspend();
     BuildTour();
-    if (!committed_tour_.empty() || explorer_.candidate_frontier_goals() > 0) {
+    if (!tour_.goals().empty() || explorer_.candidate_frontier_goals() > 0) {
       RCLCPP_INFO(get_logger(),
                   "Completing probe finished; normal candidates=%zu tour=%zu",
-                  explorer_.candidate_frontier_goals(), committed_tour_.size());
+                  explorer_.candidate_frontier_goals(), tour_.goals().size());
       SelectNextGoal();
       return;
     }
@@ -1160,7 +1063,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     navigation_.Cancel();
     ClearPublishedNavPaths();
     ClearDisplayedGoal();
-    if (!committed_tour_.empty()) committed_tour_.pop_front();
+    if (!tour_.goals().empty()) tour_.Advance();
     recovery_.Clear();
     retreat_attempted_ = false;
     if (EscapeOrShortRetreat("pinch unstick; peel into free",
@@ -1219,7 +1122,7 @@ class AutonomousExplorer final : public rclcpp::Node,
 
   // Goal lies on the outbound trail behind the robot — picking it after a
   // failed mouth is the post-脱困 折返.
-  bool GoalIsBehindTrail(const Goal& goal) const {
+  bool GoalIsBehindTrail(const Goal& goal) const override {
     if (!Pose() || pose_feedback_.trail().size() < 8) return false;
     const double rx = Pose()->pose.position.x;
     const double ry = Pose()->pose.position.y;
@@ -1312,13 +1215,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       entry_.SetPending(entry_.locked());
     if (entry_.pending()) {
       if (EntryProbeSatisfied()) {
-        explorer_.RecordAttempt(*entry_.pending(), true, false);
-        room_visits_.Forget(*entry_.pending());
-        ClearEntryMouthLock();
-        QueueActiveRegionFinish();
-        next_selection_ = now();
-        PublishStatus("SELECTING",
-                      "room entered; finishing active region first");
+        AcknowledgeEntry(navigation2d::exploration::EntryArrival::kSelection);
         return;
       }
       const int before_attempts = entry_.attempts();
@@ -1347,11 +1244,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     // Drop mouths the lidar already cleared; keep the remaining committed
     // order. Rebuilding the tour on every SelectNextGoal reordered T1..Tn and
     // made the robot U-turn between alcoves (triangular stutter in open space).
-    while (!committed_tour_.empty() &&
-           !explorer_.GoalRegionStillFrontier(committed_tour_.front())) {
-      committed_tour_.pop_front();
-    }
-    if (committed_tour_.empty()) BuildTour();
+    tour_.SkipResolved(explorer_);
+    if (tour_.goals().empty()) BuildTour();
     // A frontier extractor can emit many viewpoints around one wall.  Do not
     // synchronously exhaust that list when the local controller rejects a
     // viewpoint: that turns one transient costmap disagreement into hundreds
@@ -1362,21 +1256,21 @@ class AutonomousExplorer final : public rclcpp::Node,
     int attempted = 0;
     int rotated_reverse = 0;
     const double yaw = Yaw(Pose()->pose.orientation);
-    while (!committed_tour_.empty() && attempted < kCandidatePlanBudget) {
-      const Goal goal = committed_tour_.front();
+    while (!tour_.goals().empty() && attempted < kCandidatePlanBudget) {
+      const Goal goal = tour_.goals().front();
       if (!explorer_.GoalRegionStillFrontier(goal)) {
         RCLCPP_INFO(get_logger(), "Skipping resolved tour viewpoint (%.2f, %.2f)", goal.x, goal.y);
-        committed_tour_.pop_front();
+        tour_.Advance();
         continue;
       }
       if (RecentlyDemoted(goal)) {
         RCLCPP_INFO(get_logger(),
                     "Skipping recently demoted viewpoint (%.2f, %.2f)", goal.x,
                     goal.y);
-        committed_tour_.pop_front();
+        tour_.Advance();
         // Rebuild inside the open room. Do not pull a global goal while a
         // door in this room is still holding the tour.
-        if (committed_tour_.empty() && Pose()) BuildTour();
+        if (tour_.goals().empty() && Pose()) BuildTour();
         continue;
       }
       // Defer reverse goals only when they are far. A tip inside the local
@@ -1388,9 +1282,8 @@ class AutonomousExplorer final : public rclcpp::Node,
       const double goal_range = std::hypot(goal.x - Pose()->pose.position.x,
                                            goal.y - Pose()->pose.position.y);
       if (turn > 1.75 && goal_range > 2.5 &&
-          rotated_reverse < static_cast<int>(committed_tour_.size())) {
-        committed_tour_.pop_front();
-        committed_tour_.push_back(goal);
+          rotated_reverse < static_cast<int>(tour_.goals().size())) {
+        tour_.DeferCurrent(goal);
         ++rotated_reverse;
         continue;
       }
@@ -1403,7 +1296,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         completing_probe_rounds_ = 0;
         return;
       }
-      committed_tour_.pop_front();
+      tour_.Advance();
       ++attempted;
       // Start pinched in wall-corner inflation: every other goal fails the same
       // start check. Do not entry-probe / rebuild-tour — leave the pinch first.
@@ -1464,7 +1357,7 @@ class AutonomousExplorer final : public rclcpp::Node,
           ++scrape_reject_count_;
         }
         if (scrape_reject_count_ < 2) {
-          committed_tour_.push_back(goal);
+          tour_.RetryLater(goal);
           RCLCPP_WARN(get_logger(),
                       "Open-wall scrape reject (%s); rotate tour (soft %d/2) "
                       "gap=%.2f",
@@ -1500,7 +1393,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     }
     geometry_msgs::msg::Twist stop;
     command_publisher_->publish(stop);
-    if (!committed_tour_.empty() || attempted > 0 || explorer_.raw_frontier_cells() > 0) {
+    if (!tour_.goals().empty() || attempted > 0 || explorer_.raw_frontier_cells() > 0) {
       const std::size_t known_now = KnownCells();
       // One newly marked cell is scan noise, not map progress.  Resetting the
       // no-executable budget on +1 kept warehouse leftovers spinning until
@@ -1523,9 +1416,9 @@ class AutonomousExplorer final : public rclcpp::Node,
       // Empty tour with candidates>0 is the BLOCKED-DFS trap: mouths exist but
       // Order wiped them — treat as no-executable so completing/entry runs.
       const bool tour_unplannable =
-          committed_tour_.empty() && attempted > 0;
+          tour_.goals().empty() && attempted > 0;
       const bool tour_empty_with_candidates =
-          committed_tour_.empty() && attempted == 0 &&
+          tour_.goals().empty() && attempted == 0 &&
           explorer_.candidate_frontier_goals() > 0;
       const bool no_executable_mouths =
           explorer_.candidate_frontier_goals() == 0 || tour_unplannable ||
@@ -1536,7 +1429,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       if (explorer_.candidate_frontier_goals() > 0 &&
           explorer_.ActiveHoldsPassage()) {
         QueueActiveRegionFinish();
-        if (!committed_tour_.empty()) {
+        if (!tour_.goals().empty()) {
           next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
           PublishStatus("SELECTING",
                         "door still open; staying in the active room");
@@ -1607,7 +1500,7 @@ class AutonomousExplorer final : public rclcpp::Node,
 
   bool HandoffToNextTourGoal() {
     if (mission_.phase() != MissionPhase::kExploring || returning_ || !navigation_.has_session() ||
-        committed_tour_.size() < 2) return false;
+        tour_.goals().size() < 2) return false;
     const double distance = std::hypot(active_goal_.x - Pose()->pose.position.x,
                                        active_goal_.y - Pose()->pose.position.y);
     // A frontier viewpoint is a 360-degree observation pose, not a docking
@@ -1620,8 +1513,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     // Match BuildTour's ~5 m pocket: cross-hall handoff must stop at a decision
     // boundary so newly opened junction mouths are not skipped.
     constexpr double kHandoffPocketM = 5.0;
-    while (next_index < committed_tour_.size()) {
-      const Goal next = committed_tour_[next_index];
+    while (next_index < tour_.goals().size()) {
+      const Goal next = tour_.goals()[next_index];
       if (!explorer_.GoalRegionStillFrontier(next)) {
         ++next_index;
         continue;
@@ -1647,8 +1540,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         // Drop the completed viewpoint and any resolved entries before the
         // newly active goal; leave that goal at the front for normal result
         // bookkeeping after it is reached.
-        for (std::size_t index = 0; index < next_index; ++index)
-          committed_tour_.pop_front();
+        tour_.HandoffThrough(next_index);
         PublishStatus("NAVIGATING", "continuous handoff to next frontier viewpoint");
         return true;
       }
@@ -1728,7 +1620,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       if (attempt == 0) { continue; }
       goal.yaw = std::atan2(goal.y - ry, goal.x - rx);
       mission_.ResumeExploring();
-      committed_tour_.clear();
+      tour_.Suspend();
       if (StartNavigation(goal, false)) {
         RCLCPP_INFO(get_logger(),
                     "Visiting unentered space before return: goal=(%.2f, %.2f) area=%.2f m2 try=%d/%d",
@@ -1758,7 +1650,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     if (TryVisitUnenteredSpace()) return;
     mission_.BeginReturning();
     returning_ = true;
-    committed_tour_.clear();
+    tour_.Suspend();
     ClearEntryMouthLock();
     if (force_return) {
       return_.MarkPartial();
@@ -1851,7 +1743,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     ClearPublishedNavPaths();
     ClearDisplayedGoal();
     recovery_.Clear();
-    if (!committed_tour_.empty()) committed_tour_.pop_front();
+    if (!tour_.goals().empty()) tour_.Advance();
     // Dwell before hopping mouths — immediate BuildTour caused junction thrash.
     next_selection_ = now() + rclcpp::Duration::from_seconds(1.5);
     PublishStatus("SELECTING", reason);
@@ -1871,48 +1763,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     ClearEntryMouthLock();
     navigation_.Cancel();
     recovery_.Clear();
-    constexpr double kLocalHopM = 4.0;
-    const double rx = Pose() ? Pose()->pose.position.x : tip.x;
-    const double ry = Pose() ? Pose()->pose.position.y : tip.y;
-    const auto is_local = [&](const Goal& goal) {
-      return std::hypot(goal.x - rx, goal.y - ry) <= kLocalHopM ||
-             std::hypot(goal.frontier_x - tip.frontier_x,
-                        goal.frontier_y - tip.frontier_y) <= kLocalHopM;
-    };
-    std::deque<Goal> local;
-    std::deque<Goal> far;
-    for (const auto& goal : committed_tour_) {
-      if (SameEntryMouth(goal, tip) || RecentlyDemoted(goal)) continue;
-      if (is_local(goal))
-        local.push_back(goal);
-      else
-        far.push_back(goal);
-    }
-    if (Pose()) {
-      auto mouths = explorer_.SelectGoals(rx, ry);
-      mouths = explorer_.OrderByRegion(std::move(mouths), rx, ry,
-                                       Yaw(Pose()->pose.orientation));
-      for (const auto& candidate : mouths) {
-        if (SameEntryMouth(candidate, tip) || RecentlyDemoted(candidate))
-          continue;
-        if (!is_local(candidate)) continue;
-        const bool duplicate = std::any_of(
-            local.begin(), local.end(),
-            [&](const Goal& prior) { return SameEntryMouth(prior, candidate); });
-        if (!duplicate) local.push_back(candidate);
-      }
-      if (local.empty()) {
-        for (const auto& candidate : mouths) {
-          if (SameEntryMouth(candidate, tip) || RecentlyDemoted(candidate))
-            continue;
-          far.push_back(candidate);
-          break;
-        }
-      }
-    }
-    committed_tour_.clear();
-    for (auto& goal : local) committed_tour_.push_back(std::move(goal));
-    for (auto& goal : far) committed_tour_.push_back(std::move(goal));
+    tour_.AfterWallTip(explorer_, tip, TourRobot(), *this);
     cooled_signatures_.clear();
     latest_map_replans_ = 0;
     mapped_obstacle_rejects_ = 0;
@@ -2087,7 +1938,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     return true;
   }
 
-  bool RecentlyDemoted(const Goal& goal) {
+  bool RecentlyDemoted(const Goal& goal) override {
     if (!recently_demoted_ || recently_demoted_until_.nanoseconds() == 0)
       return false;
     if (now() >= recently_demoted_until_) return false;
@@ -2157,7 +2008,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         .raw_frontier_cells = explorer_.raw_frontier_cells(),
         .unresolved_frontier_cells = explorer_.unresolved_frontier_cells(),
         .candidates = explorer_.candidate_frontier_goals(),
-        .tour = committed_tour_,
+        .tour = tour_.goals(),
         .active_goal = active_goal_,
         .navigation = telemetry_.state(),
         .planning_failure = last_planning_failure_,
@@ -2208,7 +2059,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       if (StartEntryProbe()) return true;
       explorer_.RecordAttempt(active_goal_, false);
       ClearEntryMouthLock();
-      if (!committed_tour_.empty()) committed_tour_.pop_front();
+      if (!tour_.goals().empty()) tour_.Advance();
       retreat_attempted_ = false;
       if (EscapeOrShortRetreat(
               "mapped-obstacle thrash; peel then retry local pocket",
@@ -2229,7 +2080,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                            3000u);
     }
     retreat_attempted_ = false;
-    committed_tour_.clear();
+    tour_.Suspend();
     PublishStatus("SELECTING", "leaving pinch after mapped-obstacle rejects");
     if (EscapeOrShortRetreat(
             "leaving pinch after mapped-obstacle rejects; peel",
@@ -2310,7 +2161,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     carrot_publisher_->publish(carrot);
     const auto [tour, frontiers] = debug_paths_.Tour(
         global.header, map_ ? &*map_ : nullptr, Pose()->pose.position.x,
-        Pose()->pose.position.y, active_goal_, committed_tour_);
+        Pose()->pose.position.y, active_goal_, tour_.goals());
     tour_publisher_->publish(tour);
     frontiers_publisher_->publish(frontiers);
     PublishFrontierDebug();
@@ -2369,18 +2220,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       if (entry_.pending() && Pose() && entry_.crawl_ticks() > 0 &&
           entry_.crawl_ticks() <= 40) {
         if (EntryProbeSatisfied()) {
-          recently_demoted_ = *entry_.pending();
-          recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(12.0);
-          explorer_.RecordAttempt(*entry_.pending(), true, false);
-          room_visits_.Forget(*entry_.pending());
-          ClearEntryMouthLock();
-          QueueActiveRegionFinish();
-          next_selection_ = now();
-          PublishStatus("SELECTING",
-                        "room entered; finishing active region first");
-          RCLCPP_INFO(get_logger(),
-                      "room entered at pose=(%.2f,%.2f) (open-loop crawl)",
-                      Pose()->pose.position.x, Pose()->pose.position.y);
+          AcknowledgeEntry(navigation2d::exploration::EntryArrival::kCrawl);
           return;
         }
         const double rx = Pose()->pose.position.x;
@@ -2437,20 +2277,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     // tracking the room-side probe so the chassis finishes into the pocket.
     if (entry_.pending() && !returning_ && !retreat_goal_ && Pose() &&
         EntryProbeSatisfied()) {
-      recently_demoted_ = *entry_.pending();
-      recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(12.0);
-      explorer_.RecordAttempt(*entry_.pending(), true, false);
-      room_visits_.Forget(*entry_.pending());
-      ClearEntryMouthLock();
-      // Queue in-room leftovers now (while still driving the probe) so a later
-      // stall/abandon cannot soft-unlock out of the kitchen with white left.
-      QueueActiveRegionFinish();
-      pending_region_finish_ = true;
-      PublishStatus("NAVIGATING",
-                    "room entered; finishing probe inside active region");
-      RCLCPP_INFO(get_logger(),
-                  "room entered at pose=(%.2f,%.2f) (mid-drive mouth cross)",
-                  Pose()->pose.position.x, Pose()->pose.position.y);
+      AcknowledgeEntry(navigation2d::exploration::EntryArrival::kDriving);
       return;
     }
     // Goal already in the observation disk — finish it instead of sitting on
@@ -2479,15 +2306,7 @@ class AutonomousExplorer final : public rclcpp::Node,
             LockEntryMouth(active_goal_);
           }
           if (EntryProbeSatisfied()) {
-            explorer_.RecordAttempt(*entry_.pending(), true, false);
-            room_visits_.Forget(*entry_.pending());
-            ClearEntryMouthLock();
-            QueueActiveRegionFinish();
-            next_selection_ = now();
-            PublishStatus("SELECTING", "room entered; finishing active region first");
-            RCLCPP_INFO(get_logger(),
-                        "room entered at pose=(%.2f,%.2f) (arrived near probe)",
-                        Pose()->pose.position.x, Pose()->pose.position.y);
+            AcknowledgeEntry(navigation2d::exploration::EntryArrival::kNearProbe);
             return;
           }
           if (entry_.attempts() < EntryAttemptBudget() && StartEntryProbe()) return;
@@ -2505,7 +2324,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         }
         explorer_.RecordAttempt(active_goal_, true);
         ClearEntryMouthLock();
-        if (!committed_tour_.empty()) committed_tour_.pop_front();
+        if (!tour_.goals().empty()) tour_.Advance();
         next_selection_ = now();
         PublishStatus("SELECTING", "arrived at viewpoint; continuing tour");
         return;
@@ -2695,7 +2514,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         }
         // Drop only this viewpoint; keep the pocket nominatable.
         if (!retreat_goal_) explorer_.RecordAttempt(active_goal_, false);
-        if (!committed_tour_.empty()) committed_tour_.pop_front();
+        if (!tour_.goals().empty()) tour_.Advance();
         retreat_goal_ = false;
         next_selection_ = now();
         PublishStatus("SELECTING",
@@ -2718,7 +2537,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       ClearEntryMouthLock();
       retreat_goal_ = false;
       retreat_attempted_ = false;  // allow a short trail exit from this cell
-      committed_tour_.clear();
+      tour_.Suspend();
       cooled_signatures_.clear();
       if (EscapeOrShortRetreat("leaving alcove tip; peel",
                                "leaving alcove tip; short trail retreat"))
@@ -2766,12 +2585,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         PublishStatus("SELECTING", "left the pinched corridor");
       } else if (entry_.pending()) {
         if (EntryProbeSatisfied()) {
-          explorer_.RecordAttempt(*entry_.pending(), true, false);
-          room_visits_.Forget(*entry_.pending());
-          ClearEntryMouthLock();
-          QueueActiveRegionFinish();
-          next_selection_ = now();
-          PublishStatus("SELECTING", "room entered; finishing active region first");
+          AcknowledgeEntry(navigation2d::exploration::EntryArrival::kNavigationSucceeded);
         } else if (entry_.attempts() < EntryAttemptBudget() && StartEntryProbe()) {
           return;
         } else {
@@ -2806,7 +2620,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       } else if (explorer_.GoalRegionStillFrontier(active_goal_)) {
         // Open-wall frontier (no door throat): observe done, do not entry-lock.
         explorer_.RecordAttempt(active_goal_, true);
-        if (!committed_tour_.empty()) committed_tour_.pop_front();
+        if (!tour_.goals().empty()) tour_.Advance();
         next_selection_ = now();
         PublishStatus("SELECTING",
                       "open-wall frontier observed; continuing tour");
@@ -2814,7 +2628,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         explorer_.RecordAttempt(active_goal_, true);
         // Goal dispatch already CommitRegion'd; do not re-Enter the robot cell
         // (often still the hallway parent) or the room stack collapses.
-        if (!committed_tour_.empty()) committed_tour_.pop_front();
+        if (!tour_.goals().empty()) tour_.Advance();
         // After a mid-drive mouth cross, or while white remains in the active
         // room: cover local leftovers before soft-unlock hops out.
         const bool need_finish =
@@ -2978,7 +2792,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         ClearEntryMouthLock();
         recently_demoted_ = active_goal_;
         recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(8.0);
-        if (!committed_tour_.empty()) committed_tour_.pop_front();
+        if (!tour_.goals().empty()) tour_.Advance();
         recovery_.Clear();
         if (TryStartEscape()) {
           navigation_.Cancel();
@@ -3086,7 +2900,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         // Fall through and skip this viewpoint.
         if (force_return && !returning_) {
           navigation_.Cancel();
-          committed_tour_.clear();
+          tour_.Suspend();
           BeginReturn(true);
           return;
         }
@@ -3104,7 +2918,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         explorer_.RecordAttempt(active_goal_, false);
         recently_demoted_ = active_goal_;
         recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(25.0);
-        if (!committed_tour_.empty()) committed_tour_.pop_front();
+        if (!tour_.goals().empty()) tour_.Advance();
         if (TryStartEscape()) return;
         next_selection_ = now();
         PublishStatus("SELECTING", "no motion against the jamb; leaving this route");
@@ -3123,7 +2937,7 @@ class AutonomousExplorer final : public rclcpp::Node,
           explorer_.RecordAttempt(active_goal_, false);
         FinishCompleting();
       } else {
-        if (!committed_tour_.empty()) committed_tour_.pop_front();
+        if (!tour_.goals().empty()) tour_.Advance();
         next_selection_ = now();
         PublishStatus("SELECTING", first_segment_stall ?
             "first-segment failed; skipping cooled viewpoint" :
@@ -3139,7 +2953,6 @@ class AutonomousExplorer final : public rclcpp::Node,
   double goal_timeout_s_ = 55.;
   double simulation_speed_ = 1.;
   std::uint64_t map_revision_ = 0;
-  std::uint64_t tour_revision_ = 0;
   int empty_frontier_cycles_ = 0;
   int no_executable_frontier_cycles_ = 0;
   std::size_t last_no_executable_known_cells_ = 0;
@@ -3205,7 +3018,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   rclcpp::Time recently_demoted_until_{0, 0, RCL_ROS_TIME};
   double best_goal_path_progress_m_ = 0.;
   rclcpp::Time last_goal_path_progress_time_{0, 0, RCL_ROS_TIME};
-  std::deque<Goal> committed_tour_;
+  navigation2d::exploration::TourExecution tour_;
   rclcpp::Time goal_started_{0, 0, RCL_ROS_TIME};
   rclcpp::Time next_selection_{0, 0, RCL_ROS_TIME};
   rclcpp::Time frontier_probe_until_{0, 0, RCL_ROS_TIME};

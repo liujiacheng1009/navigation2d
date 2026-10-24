@@ -48,3 +48,7 @@ navigation2d_test(execution_watchdog_test navigation2d_core)
 navigation2d_test(exploration_planning_map_adapter_test navigation2d_exploration_io)
 
 navigation2d_test(entry_probe_executor_test navigation2d_exploration_application)
+
+navigation2d_test(tour_execution_test navigation2d_exploration_application)
+
+navigation2d_test(entry_completion_test navigation2d_exploration_application)

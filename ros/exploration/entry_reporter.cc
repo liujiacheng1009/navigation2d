@@ -22,11 +22,35 @@ void ReportEntry(const rclcpp::Logger& logger, const exploration::EntryNotice& n
                   mouth.frontier_x, mouth.frontier_y, notice.attempts, notice.gap_m,
                   notice.free_depth_m);
       break;
-    case EntryNoticeKind::kEntered:
-      sink.EntryStatus("SELECTING", "room entered; finishing active region first");
-      RCLCPP_INFO(logger, "room entered at pose=(%.2f,%.2f) (already past mouth)", notice.robot_x,
-                  notice.robot_y);
+    case EntryNoticeKind::kEntered: {
+      using exploration::EntryArrival;
+      const bool driving = notice.arrival == EntryArrival::kDriving;
+      sink.EntryStatus(driving ? "NAVIGATING" : "SELECTING",
+                       driving ? "room entered; finishing probe inside active region"
+                               : "room entered; finishing active region first");
+      switch (notice.arrival) {
+        case EntryArrival::kBeforeProbe:
+          RCLCPP_INFO(logger, "room entered at pose=(%.2f,%.2f) (already past mouth)",
+                      notice.robot_x, notice.robot_y);
+          break;
+        case EntryArrival::kCrawl:
+          RCLCPP_INFO(logger, "room entered at pose=(%.2f,%.2f) (open-loop crawl)", notice.robot_x,
+                      notice.robot_y);
+          break;
+        case EntryArrival::kDriving:
+          RCLCPP_INFO(logger, "room entered at pose=(%.2f,%.2f) (mid-drive mouth cross)",
+                      notice.robot_x, notice.robot_y);
+          break;
+        case EntryArrival::kNearProbe:
+          RCLCPP_INFO(logger, "room entered at pose=(%.2f,%.2f) (arrived near probe)",
+                      notice.robot_x, notice.robot_y);
+          break;
+        case EntryArrival::kNavigationSucceeded:
+        case EntryArrival::kSelection:
+          break;
+      }
       break;
+    }
     case EntryNoticeKind::kTooNear:
     case EntryNoticeKind::kPlanRejected:
       RCLCPP_WARN(logger,

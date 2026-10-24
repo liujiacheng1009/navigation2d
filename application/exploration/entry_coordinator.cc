@@ -100,4 +100,13 @@ bool EntryCoordinator::Satisfied(double rx, double ry, const ExplorationGoal& ac
   const auto depth = InteriorDepth(rx, ry, active_goal);
   return depth && EnoughDepth(*depth, gap);
 }
+bool EntryCoordinator::Satisfied(double rx, double ry, const ExplorationGoal& active_goal,
+                                 const FrontierExplorer& explorer) const {
+  const auto depth = InteriorDepth(rx, ry, active_goal);
+  if (!depth) {
+    return false;
+  }
+  const auto& mouth = locked_.value_or(*pending_);
+  return EnoughDepth(*depth, explorer.MouthGapWidth(mouth.frontier_x, mouth.frontier_y));
+}
 }  // namespace navigation2d::exploration

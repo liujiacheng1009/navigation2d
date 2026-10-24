@@ -83,5 +83,9 @@ navigation2d_geometry 边界，尚未把所有概念层拆成独立 target。
 
 测试注册集中在 `test/CMakeLists.txt`，保留原断言开关、Acados/快照编译定义和二进制输出位置；根 CMake 只装配产品库与测试目录。
 
-- `application/exploration/entry_probe_executor`：入口靠近、探测、已入室判定和证据提交的同步流程；引用现有状态所有者，不保存节点或共享可写 Context。`EntryProbeActions` 只提供导航、冷却、房间调度和通知能力。
+- `application/exploration/entry_probe_executor`：入口靠近、探测、已入室判定和证据提交的同步流程；引用现有状态所有者，不保存节点或共享可写 Context。`EntryActions` 只提供导航、冷却、房间调度和通知能力。
 - `ros/exploration/entry_reporter`：入口事件的 ROS 日志与状态文案；状态发布继续经过节点出口，保持日志/发布先后顺序。
+
+- `application/exploration/tour_execution`：唯一拥有已承诺 tour 队列及版本，向节点提供只读视图；负责构建、房间收尾、候选游标、连续交接和远端救援排序的提交。`mouth_tour_order` 与 `wall_tip_tour_order` 分别计算原有的三段/两段优先级，保留不同的区域与轨迹方向规则。
+
+- `application/exploration/entry_completion`：统一入口确认和房间收尾的顺序，显式区分探测前、爬行、行驶中、近目标及成功/选择入口；保留 12/14 秒冷却的前后顺序，不把过门口计为区域完成。`entry_actions` 是入口能力与通知协议，不保留服务或共享可写状态。

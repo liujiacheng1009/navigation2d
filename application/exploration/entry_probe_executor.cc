@@ -2,10 +2,12 @@
 
 #include <cmath>
 
+#include "navigation2d/application/exploration/entry_completion.h"
+#include "navigation2d/application/exploration/entry_target.h"
 #include "navigation2d/geometry/robot_geometry.h"
 namespace navigation2d::exploration {
 namespace {
-bool Approach(const ExplorationGoal& mouth, EntryProbeActions& actions,
+bool Approach(const ExplorationGoal& mouth, EntryActions& actions,
               const EntryProbeObservation& observation) {
   const double rx = observation.robot_x, ry = observation.robot_y;
   const double range = std::hypot(rx - mouth.frontier_x, ry - mouth.frontier_y);
@@ -29,31 +31,17 @@ bool Approach(const ExplorationGoal& mouth, EntryProbeActions& actions,
   return true;
 }
 bool CloseIfEntered(EntryCoordinator& entry, FrontierExplorer& explorer, RoomVisitLedger& ledger,
-                    EntryProbeActions& actions, EntryProbeObservation observation,
-                    EntryNotice& notice) {
+                    EntryActions& actions, EntryProbeObservation observation, EntryNotice& notice) {
   const auto& target = notice.target;
-  const auto depth = entry.InteriorDepth(observation.robot_x, observation.robot_y, target);
-  const auto& mouth = entry.locked().value_or(*entry.pending());
-  if (depth && EntryCoordinator::EnoughDepth(
-                   *depth, explorer.MouthGapWidth(mouth.frontier_x, mouth.frontier_y))) {
-    explorer.RecordAttempt(*entry.pending(), true, false);
-    ledger.Forget(*entry.pending());
-    // Cool only the mouth, not its region: remaining room cells must stay
-    // eligible for the active-room finishing pass.
-    actions.CoolEnteredMouth(*entry.pending(), 14.);
-    entry.Clear();
-    actions.QueueActiveRegionFinish();
-    actions.SelectAfterEntry();
-    notice.kind = EntryNoticeKind::kEntered;
-    notice.robot_x = observation.robot_x;
-    notice.robot_y = observation.robot_y;
-    actions.ReportEntry(notice);
+  if (entry.Satisfied(observation.robot_x, observation.robot_y, target, explorer)) {
+    CompleteEntryArrival(entry, explorer, ledger, actions, EntryArrival::kBeforeProbe,
+                         observation.robot_x, observation.robot_y);
     return true;
   }
   return false;
 }
 EntryProbeResult DispatchProbe(EntryCoordinator& entry, FrontierExplorer& explorer,
-                               RoomVisitLedger& ledger, EntryProbeActions& actions,
+                               RoomVisitLedger& ledger, EntryActions& actions,
                                EntryProbeObservation observation, EntryNotice& notice) {
   const auto& target = notice.target;
   // The attempt counted for the inside check is also this probe attempt.
@@ -82,7 +70,7 @@ EntryProbeResult DispatchProbe(EntryCoordinator& entry, FrontierExplorer& explor
 }
 }  // namespace
 EntryProbeResult ExecuteEntryProbe(EntryCoordinator& entry, FrontierExplorer& explorer,
-                                   RoomVisitLedger& ledger, EntryProbeActions& actions,
+                                   RoomVisitLedger& ledger, EntryActions& actions,
                                    EntryProbeObservation observation) {
   if (!entry.pending()) {
     return EntryProbeResult::kIdle;
