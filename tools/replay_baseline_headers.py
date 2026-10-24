@@ -22,6 +22,12 @@ def baseline_link(command, node_object, core):
     # adapters must never be linked against the old core or its private ABI.
     result = [arg for arg in command if not (arg.endswith('.o') and not arg.startswith('-'))
               or arg == str(node_object)]
+    # The frozen monolithic core already owns geometry and application code.
+    # Keep it independent of any later navigation2d target split, even when a
+    # candidate archive would currently happen to contribute no symbols.
+    result = [arg for arg in result if arg.startswith('-') or not (
+        Path(arg).name.startswith('libnavigation2d_') and arg.endswith('.a') and
+        Path(arg).name != 'libnavigation2d_core.a')]
     indices = [index for index, arg in enumerate(result) if arg.endswith('libnavigation2d_core.a')]
     if len(indices) != 1:
         raise ValueError('unexpected baseline core link contract')

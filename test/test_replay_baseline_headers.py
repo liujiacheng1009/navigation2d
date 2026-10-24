@@ -28,7 +28,11 @@ class BaselineInputs(unittest.TestCase):
 
     def test_strip_candidate_objects_and_bind_exactly_one_core(self):
         command = ['c++', 'baseline.o', 'candidate_adapter.cc.o', '-o', 'baseline',
-                   '/current/libnavigation2d_core.a', '-lrclcpp']
+                   '/current/libnavigation2d_core.a',
+                   '/current/libnavigation2d_exploration_application.a',
+                   '/current/libnavigation2d_exploration_io.a',
+                   '/current/libnavigation2d_geometry.a',
+                   '/current/libnavigation2d_future_private.a', '-lrclcpp']
         self.assertEqual(module.baseline_link(command, 'baseline.o', '/frozen/core.a'),
                          ['c++', 'baseline.o', '-o', 'baseline', '/frozen/core.a', '-lrclcpp'])
         with self.assertRaisesRegex(ValueError, 'link contract'):
