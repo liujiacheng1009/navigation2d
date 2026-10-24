@@ -316,3 +316,9 @@ executor checks the latch before reading lidar, requires Euclidean movement
 through `SelectTrailRetreat`, marks purpose before dispatch, and cancels trail
 evidence on rejected navigation. `GoalBehindDrivenTrail` retains the bounded
 reverse trail walk independently of ROS pose/trail storage.
+
+`GoalExecutionWatch` owns the timeout, start stamp and monotone path-progress
+anchor. It reads a borrowed clock only when the original short-circuit flow
+needs elapsed time. The failure predicate retains return docking exemption,
+first-segment recovery, tight-front, mid-path pinch and hard forward STOP gates.
+Nanosecond conversion uses division by 1e9, matching ROS Duration semantics.

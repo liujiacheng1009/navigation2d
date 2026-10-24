@@ -39,6 +39,7 @@
 #include "navigation2d/application/exploration/execution_command.h"
 #include "navigation2d/application/exploration/viewpoint_arrival.h"
 #include "navigation2d/application/exploration/retreat_execution.h"
+#include "navigation2d/application/exploration/goal_execution_watch.h"
 #include "navigation2d/application/exploration/selection_exhaustion.h"
 #include "navigation2d/application/exploration/viewpoint_rejection_executor.h"
 #include "navigation2d/application/exploration/viewpoint_rejections.h"
@@ -85,6 +86,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::ExecutionCommandEvidence,
                                  private navigation2d::exploration::ViewpointArrivalActions,
                                  private navigation2d::exploration::RetreatActions,
+                                 private navigation2d::exploration::GoalExecutionClock,
                                  private navigation2d::exploration::SelectionExhaustionActions,
                                  private navigation2d::exploration::ViewpointRejectionActions,
                                  private navigation2d::exploration::TourConstraints,
@@ -348,7 +350,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       // RPP slows in curves and near occupied space. Exploration goals get a
       // tighter budget so a mid-doorway crawl cannot burn 2+ minutes; return
       // home keeps the longer travel allowance.
-      goal_timeout_s_ = DispatchPolicy::GoalTimeout(returning, initial_state.global_path_length_m);
+      goal_execution_.SetTimeout(DispatchPolicy::GoalTimeout(returning, initial_state.global_path_length_m));
       navigation_.Accept();
       active_goal_ = goal;
       selected_algorithms_ = parameters_.navigation_profiles.For(purpose);
@@ -356,9 +358,9 @@ class AutonomousExplorer final : public rclcpp::Node,
       // Resume / latest-map replan of the same viewpoint must keep peel and
       // open-replan counters; only a materially new goal opens a session.
       recovery_.Begin(goal.x, goal.y);
-      goal_started_ = now();
-      best_goal_path_progress_m_ = 0.;
-      last_goal_path_progress_time_ = now();
+      const auto goal_started = now();
+      const auto goal_progress = now();
+      goal_execution_.Start(goal_started.nanoseconds(), goal_progress.nanoseconds());
       immobility_open_replans_ = 0;
       viewpoint_rejections_.ResetScrapes();
       PublishStatus(returning ? "RETURNING" :
@@ -1424,8 +1426,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     const bool tip_wedged =
         !entry_drive &&
         IsPinchGeometryStall(path_clear, body.front, body.side);
-    if (!pose_motion_.Stalled({now().nanoseconds(), goal_started_.nanoseconds(),
-                              last_goal_path_progress_time_.nanoseconds(), state.path_progress_m,
+    if (!pose_motion_.Stalled({now().nanoseconds(), goal_execution_.started_ns(),
+                              goal_execution_.progress_ns(), state.path_progress_m,
                               entry_drive, tip_wedged, navigation2d::AxisSwingClear(body.front)})) {
       return false;
     }
@@ -1535,6 +1537,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     }
   }
 
+  std::int64_t ExecutionNowNs() const override { return now().nanoseconds(); }
   bool RecentlyDemoted(const Goal& goal) override {
     // Preserve the missing-cooldown short circuit before reading the ROS clock.
     return viewpoint_rejections_.HasDemotion() &&
@@ -1915,10 +1918,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       return;
     }
     CaptureNavTelemetry(state, measured_velocity);
-    if (state.path_progress_m >= best_goal_path_progress_m_ + .08) {
-      best_goal_path_progress_m_ = state.path_progress_m;
-      last_goal_path_progress_time_ = now();
-    }
+    goal_execution_.ObserveProgress(state.path_progress_m, *this);
     // Driving a scrape chord into a wall pocket: do not wait for monitor STOP
     // after the nose is already in the corner (live: clear=0.13, cmd still
     // 0.27 m/s into south tip).
@@ -2014,8 +2014,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         (goal_distance_now < navigation2d::kSwingClearance() ||
          (state.global_path_length_m > .20 &&
           state.path_progress_m >= .80 * state.global_path_length_m)) &&
-        last_goal_path_progress_time_.nanoseconds() > 0 &&
-        (now() - last_goal_path_progress_time_).seconds() > 2.5 &&
+        goal_execution_.ProgressOlderThan(2.5, *this) &&
         state.requested_command.linear < .06 &&
         corridor_pinch;
     if (near_goal_alcove_crawl) {
@@ -2053,7 +2052,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                   "progress=%.2f/%.2f elapsed=%.1f retreat=%s",
                   goal_distance_now, front_range, side_range,
                   state.path_progress_m, state.global_path_length_m,
-                  (now() - goal_started_).seconds(),
+                  goal_execution_.Elapsed(*this),
                   retreat_.active() ? "yes" : "no");
       navigation_.Cancel();
       if (!retreat_.active()) explorer_.RecordAttempt(active_goal_, true);
@@ -2112,58 +2111,9 @@ class AutonomousExplorer final : public rclcpp::Node,
       } else {
         viewpoint_arrival_.Succeeded(explorer_, entry_, tour_, active_goal_, *TourRobot(), *this);
       }
-    } else if (state.status == navigation2d::NavigationStatus::kBlocked ||
-               // Explore goals used to skip the wall-clock timeout while the
-               // controller sat in kDockToGoal / terminal crawl. Keep the dock
-               // exemption only for the home return pose.
-               (((mission_.phase() == MissionPhase::kReturning || returning_)
-                     ? state.phase != navigation2d::NavigationPhase::kDockToGoal
-                     : true) &&
-                (now() - goal_started_).seconds() > goal_timeout_s_) ||
-               // NavigationSystem's internal recovery can keep returning a
-               // nominal command while the robot has made no progress on the
-               // first path segment.  Do not wait for the full path-length
-               // timeout (130-160 s in the maze) before trying the escape.
-               // Three recovery cycles are enough to distinguish a transient
-               // controller reset from a genuinely stuck target.
-               (state.path_progress_m < .05 && state.recoveries >= 3 &&
-                (now() - goal_started_).seconds() > 20.0) ||
-               // A frontier can pass the static-map clearance test but still
-               // terminate against a wall after the live scan reveals the
-               // final approach is too tight.  RPP then commands pure
-               // rotation (linear ~= 0) indefinitely.  Treat that as a local
-               // approach failure after a short grace period so the recovery
-               // can back out and select a different viewpoint.
-               (state.path_progress_m < .05 && state.requested_command.linear < .01 &&
-                navigation2d::HitBlocksSwing(front_range) &&
-                (now() - goal_started_).seconds() > 8.0) ||
-               // Mid-route pinch crawl: progress already left the first 5 cm,
-               // but the robot sits in a doorway spinning/creeping without
-               // meaningful advance. First-segment watches never fire here and
-               // the full goal timeout left the robot stuck for minutes.
-               // Tight front (or side while forward is also constrained)
-               // shortens the grace to 5 s. A parallel room wall with open
-               // forward must not count as pinch — that froze robots mid-room.
-               (state.path_progress_m >= .05 &&
-                last_goal_path_progress_time_.nanoseconds() > 0 &&
-                (now() - last_goal_path_progress_time_).seconds() >
-                    (corridor_pinch ? 5.0 : 10.0) &&
-                (navigation2d::HitBlocksSwing(front_range) ||
-                 (state.recoveries >= 2 && !forward_clearly_open) ||
-                 (state.requested_command.linear < .05 &&
-                  std::abs(state.requested_command.angular) > .15 &&
-                  !forward_clearly_open))) ||
-               // Mid-route safety latch: only when the forward corridor is
-               // actually blocked. Side-jamb STOP during a door entry is not a
-               // failed mouth — abandoning it caused hesitate/replan loops.
-               (state.path_progress_m >= .05 &&
-                state.collision_monitor_action ==
-                    navigation2d::CollisionMonitorAction::kStop &&
-                state.requested_command.linear > .01 &&
-                state.minimum_ttc_s < .15 &&
-                navigation2d::HitInsideBody(front_range) &&
-                last_goal_path_progress_time_.nanoseconds() > 0 &&
-                (now() - last_goal_path_progress_time_).seconds() > 2.0)) {
+    } else if (goal_execution_.FailureDue(
+                   state, mission_.phase() == MissionPhase::kReturning || returning_,
+                   front_range, corridor_pinch, forward_clearly_open, *this)) {
       const bool monitor_stop =
           state.status == navigation2d::NavigationStatus::kBlocked &&
           state.collision_monitor_action ==
@@ -2178,8 +2128,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         const double path_clear =
             ActivePathMargin(state.global_planning.path_min_clearance_m);
         if (IsCornerTipStall(path_clear, front_range, side_range) &&
-            last_goal_path_progress_time_.nanoseconds() > 0 &&
-            (now() - last_goal_path_progress_time_).seconds() > 2.0) {
+            goal_execution_.ProgressOlderThan(2.0, *this)) {
           BreakWallScrapeThrash("corner-tip CARROT stall");
           return;
         }
@@ -2193,8 +2142,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         // a mid-room wall. Retreating here left CARROT inside the room.
         if (entry_.locked() || entry_.pending()) {
           if (!entry_.pending()) entry_.SetPending(entry_.locked());
-          if (last_goal_path_progress_time_.nanoseconds() > 0 &&
-              (now() - last_goal_path_progress_time_).seconds() > 4.0) {
+          if (goal_execution_.ProgressOlderThan(4.0, *this)) {
             navigation_.Cancel();
             // Keep cooled_signatures_: clearing re-enabled the banned chord
             // and restarted the probe↔retreat shuttle.
@@ -2219,8 +2167,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         }
         // Open forward + side STOP: replan once, never peel (wide-room false
         // scrape thrash). Progress stall alone is not a wall pocket.
-        if (last_goal_path_progress_time_.nanoseconds() > 0 &&
-            (now() - last_goal_path_progress_time_).seconds() > 6.0) {
+        if (goal_execution_.ProgressOlderThan(6.0, *this)) {
           if (recovery_.open_replans < 1 &&
               ReplanActiveGoalOnLatestMap(
                   "open-forward side stall; replan without peel")) {
@@ -2272,7 +2219,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       RCLCPP_WARN(get_logger(),
                   "Navigation2D frontier failed: status=%s phase=%d elapsed=%.1f replans=%d path=%.2f requested=(%.3f,%.3f) published=(%.3f,%.3f) controller_maneuver=%d intentional_stop=%s monitor_action=%d ttc=%.3f path_signature=%llu planner_error=%s",
                   state.status == navigation2d::NavigationStatus::kBlocked ? "blocked" : "timeout",
-                  static_cast<int>(state.phase), (now() - goal_started_).seconds(), state.replans,
+                  static_cast<int>(state.phase), goal_execution_.Elapsed(*this), state.replans,
                   state.global_path_length_m,
                   state.requested_command.linear, state.requested_command.angular,
                   state.published_command.linear, state.published_command.angular,
@@ -2285,11 +2232,9 @@ class AutonomousExplorer final : public rclcpp::Node,
       const bool first_segment_stall = state.path_progress_m < .05;
       const bool mid_path_pinch =
           state.path_progress_m >= .05 &&
-          last_goal_path_progress_time_.nanoseconds() > 0 &&
-          (now() - last_goal_path_progress_time_).seconds() >
-              (corridor_pinch ? 5.0 : 10.0);
+          goal_execution_.ProgressOlderThan(corridor_pinch ? 5.0 : 10.0, *this);
       const bool timed_out =
-          (now() - goal_started_).seconds() > goal_timeout_s_;
+          goal_execution_.TimedOut(*this);
 
       // Timeout: demote without peeling back onto the same goal.
       if (exploring_drive && timed_out && !first_segment_stall &&
@@ -2407,7 +2352,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     }
   }
 
-  double goal_timeout_s_ = 55.;
+  navigation2d::exploration::GoalExecutionWatch goal_execution_;
   std::uint64_t map_revision_ = 0;
   navigation2d::exploration::SelectionExhaustion selection_exhaustion_;
   int latest_map_replans_ = 0;
@@ -2461,10 +2406,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   navigation2d::exploration::ReturnCoordinator return_;
   navigation2d::exploration::EntryCoordinator entry_;
   navigation2d::exploration::GoalRecoverySession recovery_;
-  double best_goal_path_progress_m_ = 0.;
-  rclcpp::Time last_goal_path_progress_time_{0, 0, RCL_ROS_TIME};
   navigation2d::exploration::TourExecution tour_;
-  rclcpp::Time goal_started_{0, 0, RCL_ROS_TIME};
   rclcpp::Time next_selection_{0, 0, RCL_ROS_TIME};
   rclcpp::Time velocity_stamp_{0, 0, RCL_ROS_TIME};
   rclcpp::Time last_debug_publish_{0, 0, RCL_ROS_TIME};
