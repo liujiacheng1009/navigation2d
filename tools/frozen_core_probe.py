@@ -11,6 +11,14 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def archive_digests(command, directory):
+    # Link inputs are authoritative after the compatibility core is split.
+    # Resolve against the target's actual link working directory.
+    archives = [Path(arg) if Path(arg).is_absolute() else directory / arg
+                for arg in command if arg.endswith('.a') and not arg.startswith('-')]
+    return {str(path.resolve(strict=True)): digest(path) for path in archives}
+
+
 def build_probe(build, target_name, source, headers, baseline_core, output):
     build, source = Path(build).resolve(strict=True), Path(source).resolve(strict=True)
     baseline_core, output = Path(baseline_core).resolve(strict=True), Path(output).resolve()
@@ -31,6 +39,8 @@ def build_probe(build, target_name, source, headers, baseline_core, output):
         if line.startswith(('CXX_DEFINES =', 'CXX_INCLUDES =', 'CXX_FLAGS =')):
             flags.extend(shlex.split(line.split('=', 1)[1]))
     template = shlex.split((target / 'link.txt').read_text())
+    candidate_link = template.copy()
+    candidate_archives = archive_digests(candidate_link, build / 'test')
     obj, binary = output / 'baseline.o', output / 'baseline'
     compilation = compile_cached(template[0], ['-I' + str(header_root), *flags], source, obj)
     objects = [i for i, token in enumerate(template) if token.endswith('.o')]
@@ -40,6 +50,8 @@ def build_probe(build, target_name, source, headers, baseline_core, output):
     template[template.index('-o') + 1] = str(binary)
     link = baseline_link(template, obj, baseline_core)
     subprocess.run(link, cwd=build / 'test', check=True)
+    if archive_digests(candidate_link, build / 'test') != candidate_archives:
+        raise RuntimeError('candidate archives changed while capturing the contract')
     if snapshot(header_root) != header_hashes:
         raise RuntimeError('frozen headers changed while compiling')
     candidate = build / 'test' / target_name
@@ -48,5 +60,7 @@ def build_probe(build, target_name, source, headers, baseline_core, output):
                   'baseline_binary_sha256': digest(binary),
                   'candidate_binary_sha256': digest(candidate),
                   'source_sha256': digest(source), 'baseline_headers': header_hashes,
-                  'baseline_compilation': compilation, 'baseline_link': link}
+                  'baseline_compilation': compilation, 'baseline_link': link,
+                  'candidate_link': candidate_link, 'candidate_link_directory': str(build / 'test'),
+                  'candidate_archive_sha256': candidate_archives}
     return binary, candidate, provenance

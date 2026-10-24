@@ -31,59 +31,8 @@ add_library(navigation2d_geometry STATIC geometry/robot_geometry.cc)
 target_link_libraries(navigation2d_geometry PUBLIC navigation2d_values)
 target_compile_options(navigation2d_geometry PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
-add_library(navigation2d_core STATIC
-  application/algorithm_registry.cc application/builtin_algorithms.cc
-  application/navigation_config.cc application/navigation_configuration.cc
-  configuration/navigation_yaml.cc configuration/planning_yaml.cc
-  configuration/control_yaml.cc configuration/safety_yaml.cc
-  configuration/navigation_validation.cc
-  costmap/grid_2d.cc costmap/layered_costmap.cc
-  planning/search_core.cc planning/incremental_search.cc planning/collision_checker.cc
-  planning/obstacle_heuristic.cc planning/grid_search.cc
-  planning/motion_primitives.cc planning/path_smoother.cc planning/dijkstra_planner.cc planning/astar_planner.cc
-  planning/state_lattice_planner.cc
-  planning/theta_star_planner.cc planning/planner_factory.cc
-  control/regulated_pure_pursuit.cc control/dwa_controller.cc control/nav2_mppi_core.cc
-  control/mppi_controller.cc control/dynamic_safety.cc
-  control/safe_corridor.cc control/collision_monitor.cc control/mpc_controller.cc
-  configuration/vehicle_config.cc
-  exploration/exploration_policy.cc
-  exploration/frontier_explorer.cc exploration/live_route_safety.cc
-  exploration/frontier_tracks.cc exploration/frontier_visit_memory.cc
-  exploration/frontier_travel_graph.cc exploration/bootstrap_frontier_travel.cc
-  exploration/region_scheduler.cc
-  application/execution_watchdog.cc
-  application/navigation_failure.cc
-  application/command_safety_pipeline.cc
-  application/docking_servo.cc
-  application/command_stall_watch.cc application/route_preparation.cc planning/path_geometry.cc
-  planning/route_identity.cc planning/path_metrics.cc
-  application/navigation_system.cc)
-target_include_directories(navigation2d_core PUBLIC "${PROJECT_SOURCE_DIR}/..")
-target_include_directories(navigation2d_core SYSTEM PRIVATE "${decomp_util_SOURCE_DIR}/include")
-target_link_libraries(navigation2d_core PUBLIC navigation2d_geometry PRIVATE yaml-cpp)
-if(NAVIGATION2D_ACADOS_GENERATED_DIR)
-  if(NOT NAVIGATION2D_ACADOS_ROOT)
-    message(FATAL_ERROR "NAVIGATION2D_ACADOS_ROOT is required with NAVIGATION2D_ACADOS_GENERATED_DIR")
-  endif()
-  set(NAVIGATION2D_ACADOS_SOLVER
-      "${NAVIGATION2D_ACADOS_GENERATED_DIR}/libacados_ocp_solver_navigation2d_mpcc.so")
-  if(NOT EXISTS "${NAVIGATION2D_ACADOS_SOLVER}")
-    message(FATAL_ERROR "generated acados solver not found: ${NAVIGATION2D_ACADOS_SOLVER}")
-  endif()
-  target_sources(navigation2d_core PRIVATE control/acados_mpc_backend.cc)
-  target_include_directories(navigation2d_core PRIVATE
-      "${NAVIGATION2D_ACADOS_GENERATED_DIR}" "${NAVIGATION2D_ACADOS_ROOT}/include"
-      "${NAVIGATION2D_ACADOS_ROOT}/include/blasfeo/include"
-      "${NAVIGATION2D_ACADOS_ROOT}/include/hpipm/include")
-  target_link_libraries(navigation2d_core PUBLIC "${NAVIGATION2D_ACADOS_SOLVER}"
-      "${NAVIGATION2D_ACADOS_ROOT}/lib/libacados.so"
-      "${NAVIGATION2D_ACADOS_ROOT}/lib/libhpipm.so"
-      "${NAVIGATION2D_ACADOS_ROOT}/lib/libblasfeo.so")
-else()
-  target_sources(navigation2d_core PRIVATE control/acados_mpc_backend_stub.cc)
-endif()
-target_compile_options(navigation2d_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
+include(cmake/libraries.cmake)
+
 add_library(navigation2d_simulation STATIC simulation/navigation_simulator.cc)
 target_link_libraries(navigation2d_simulation PUBLIC navigation2d_core)
 add_executable(navigation2d_benchmark application/benchmark_runner.cc)

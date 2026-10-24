@@ -188,3 +188,37 @@ and known coverage is below 10000 cells. It changes discovery distances, never
 the safe viewpoint mask. The explorer still checks that mask before nominating
 an executable goal; navigation still validates the live route. The stage moves
 its result buffers and does not copy either occupancy map.
+
+### Build dependency boundaries
+
+`cmake/libraries.cmake` defines map, planning, control, exploration, generic
+registry, configuration and builtin assembly targets. `planner_factory.cc`
+belongs to builtin assembly because its compatibility functions select concrete
+registered algorithms. YAML is linked by configuration; DecompUtil and Acados
+remain implementation dependencies of control. Each owned implementation keeps
+the existing C++20 and strict warning settings.
+
+```mermaid
+flowchart TD
+  Core[navigation2d_core compatibility target] --> Config[configuration]
+  Core --> Builtins[builtin algorithm assembly]
+  Core --> Explore[exploration]
+  Config --> Registry[generic registry]
+  Builtins --> Registry
+  Builtins --> Control[control]
+  Control --> Plan[planning]
+  Plan --> Map[costmap]
+  Map --> Geometry[geometry / values]
+  Explore --> Geometry
+```
+
+Consumers keep linking the CMake `navigation2d_core` target, which propagates
+its dependencies. Its archive alone is no longer a complete distribution.
+Domain consumers can link their specific targets directly. The registry and
+configuration boundary executables verify that configuration/custom algorithm
+registration can link and run without concrete planning/control backends.
+Existing differential probes retain the independently frozen original monolithic
+baseline (or its verified executable bundle); do not replace that baseline with
+one archive from the new split. Contract manifests capture all candidate archive
+digests and link order, rather than treating the facade archive as the whole
+implementation.
