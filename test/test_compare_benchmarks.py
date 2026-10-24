@@ -26,6 +26,15 @@ class ComparisonContract(unittest.TestCase):
         self.assertNotEqual(module.behavior(baseline),
                             module.behavior(dict(baseline, budget_us=200)))
 
+    def test_entry_timings_are_explicit_and_do_not_hide_budgets(self):
+        baseline = {'trace': [1], 'approach_us': 10, 'unavailable_us': 2,
+                    'probe_us': 5, 'inside_us': 3, 'cooling_us': 1, 'entry_budget_us': 8}
+        changed = dict(baseline, approach_us=20, unavailable_us=4, probe_us=10,
+                       inside_us=6, cooling_us=2)
+        self.assertEqual(module.behavior(baseline), module.behavior(changed))
+        self.assertNotEqual(module.behavior(baseline),
+                            module.behavior(dict(baseline, entry_budget_us=9)))
+
     def test_pair_interval_identifies_constant_slowdown(self):
         lower, upper = module.interval([5.] * 30)
         self.assertEqual((lower, upper), (5., 5.))

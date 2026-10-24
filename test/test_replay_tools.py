@@ -20,6 +20,8 @@ class ReplayContract(unittest.TestCase):
         self.assertNotRegex(adapted, r'(?:->|\.)\s*publish\s*\(')
         self.assertIn('replay_.ProbeCommand(', adapted)
         self.assertIn('RunExplorerReplay<AutonomousExplorer>', adapted)
+        self.assertIn('RunEntryProbeReplay<AutonomousExplorer>', adapted)
+        self.assertIn('entry_.SetPending(goal);', adapted)
         for output in ['other->publish(command);', 'other.publish(command);']:
             with self.assertRaisesRegex(ValueError, 'real outputs'):
                 builder.adapt(source + output, 'fixture')

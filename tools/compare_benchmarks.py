@@ -23,7 +23,8 @@ METRICS = ('wall_seconds', 'control_cycle_p50_us', 'control_cycle_p95_us',
 # Explicit measured fields only: a future timeout_seconds or budget_us is
 # behavior until the output schema deliberately declares it a measurement.
 TIMING_FIELDS = {'wall_seconds', 'peak_rss_kb', 'global_plan_seconds',
-                 'global_plan_first_solution_seconds', 'tick_us'} | {
+                 'global_plan_first_solution_seconds', 'tick_us', 'approach_us',
+                 'unavailable_us', 'probe_us', 'inside_us', 'cooling_us'} | {
     f'{family}_p{percentile}_us'
     for family in ('control_cycle', 'controller_solve', 'pure_solver', 'global_plan',
                    'global_plan_first_solution', 'tick')

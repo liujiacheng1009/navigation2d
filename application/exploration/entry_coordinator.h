@@ -25,12 +25,12 @@ struct EntryCrawlStep {
 // neither queries ROS nor publishes commands or commits navigation goals.
 class EntryCoordinator {
  public:
+  static bool SameMouth(const ExplorationGoal& a, const ExplorationGoal& b);
   void Lock(const ExplorationGoal& mouth, bool easy, EntryEvidence evidence);
   void Clear();
   void SetPending(std::optional<ExplorationGoal> goal) { pending_ = std::move(goal); }
   void ClearPending() { pending_.reset(); }
   void CountAttempt() { ++attempts_; }
-  void CancelAttempt() { --attempts_; }
   void NoteEvidence(EntryEvidence evidence) { evidence_ = evidence; }
   void StartCrawl() { crawl_ticks_ = 1; }
   // Caller checks the live segment before requesting motion, then publishes

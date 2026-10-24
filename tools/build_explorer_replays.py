@@ -31,6 +31,9 @@ def adapt(source, label):
     entry = 'entry_probe_attempts_' if old else 'entry_.attempts()'
     escapes = 'return_escape_attempts_' if old else 'return_.escapes()'
     navigation = 'navigation_ != nullptr' if old else 'navigation_.has_session()'
+    pending = 'pending_entry_goal_' if old else 'entry_.pending()'
+    locked = 'locked_entry_mouth_' if old else 'entry_.locked()'
+    set_pending = 'pending_entry_goal_ = goal;' if old else 'entry_.SetPending(goal);'
     if 'pose_feedback_' in source:
         observe_pose = 'pose_feedback_.ObserveLocalization(pose);'
     else:
@@ -51,6 +54,9 @@ def adapt(source, label):
   void ReplayObservePose(const geometry_msgs::msg::PoseStamped& pose) {{ {observe_pose} }}
   int ReplayPhase() const {{ return static_cast<int>({phase}); }}
   bool ReplayFinished() const {{ return {finished}; }}
+  void ReplaySetPendingEntry(const Goal& goal) {{ {set_pending} }}
+  bool ReplayPendingEntry() const {{ return {pending}.has_value(); }}
+  bool ReplayLockedEntry() const {{ return {locked}.has_value(); }}
   navigation2d::test::ReplayOutputs replay_;
   rclcpp::Time now() const {{ return replay_.probe_time_; }}
   int ReplayEntryAttempts() const {{ return {entry}; }}
@@ -67,7 +73,12 @@ def adapt(source, label):
     source = source.replace('/tmp/sweepnav-navigation-map-', f'/tmp/replay-{label}-map-')
     source += '''
 #include "navigation2d/test/replay/explorer_scenario.h"
+#include "navigation2d/test/replay/entry_probe_scenario.h"
 int main(int argc, char** argv) {
+  if (argc > 1 && (std::string(argv[1]) == "entry" ||
+                   std::string(argv[1]) == "entry-benchmark")) {
+    return navigation2d::test::RunEntryProbeReplay<AutonomousExplorer>(argc, argv);
+  }
   return navigation2d::test::RunExplorerReplay<AutonomousExplorer>(argc, argv);
 }
 '''

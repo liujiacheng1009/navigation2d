@@ -82,3 +82,6 @@ navigation2d_geometry 边界，尚未把所有概念层拆成独立 target。
 并通过 A/A→A/B 检查轨迹、非计时输出及性能。该回放替换发布器，不代表 DDS 或板端验收。
 
 测试注册集中在 `test/CMakeLists.txt`，保留原断言开关、Acados/快照编译定义和二进制输出位置；根 CMake 只装配产品库与测试目录。
+
+- `application/exploration/entry_probe_executor`：入口靠近、探测、已入室判定和证据提交的同步流程；引用现有状态所有者，不保存节点或共享可写 Context。`EntryProbeActions` 只提供导航、冷却、房间调度和通知能力。
+- `ros/exploration/entry_reporter`：入口事件的 ROS 日志与状态文案；状态发布继续经过节点出口，保持日志/发布先后顺序。

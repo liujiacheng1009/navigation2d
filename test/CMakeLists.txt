@@ -46,3 +46,5 @@ navigation2d_test(docking_servo_test navigation2d_core)
 navigation2d_test(command_safety_pipeline_test navigation2d_core)
 navigation2d_test(execution_watchdog_test navigation2d_core)
 navigation2d_test(exploration_planning_map_adapter_test navigation2d_exploration_io)
+
+navigation2d_test(entry_probe_executor_test navigation2d_exploration_application)

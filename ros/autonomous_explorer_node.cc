@@ -34,7 +34,8 @@
 #include "navigation2d/application/exploration/mission_lifecycle.h"
 #include "navigation2d/application/exploration/recovery_session.h"
 #include "navigation2d/application/exploration/entry_coordinator.h"
-#include "navigation2d/application/exploration/entry_target.h"
+#include "navigation2d/application/exploration/entry_probe_executor.h"
+#include "navigation2d/ros/exploration/entry_reporter.h"
 #include "navigation2d/application/exploration/status_serializer.h"
 #include "navigation2d/application/exploration/room_visit_ledger.h"
 #include "navigation2d/application/exploration/navigation_telemetry.h"
@@ -88,7 +89,9 @@ navigation2d::FrontierExplorerConfig ExplorerConfig(rclcpp::Node& node) {
 }
 
 class AutonomousExplorer final : public rclcpp::Node,
-                                 private navigation2d::exploration::ReturnActions {
+                                 private navigation2d::exploration::ReturnActions,
+                                 private navigation2d::exploration::EntryProbeActions,
+                                 private navigation2d::exploration_ros::EntryStatusSink {
  public:
   AutonomousExplorer() : Node("sweepnav_autonomous_explorer"), explorer_(ExplorerConfig(*this)) {
     pose_source_ = declare_parameter<std::string>("pose_source", "localization2d");
@@ -612,9 +615,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   bool SameEntryMouth(const Goal& a, const Goal& b) const {
-    return std::hypot(a.frontier_x - b.frontier_x, a.frontier_y - b.frontier_y) <
-               .75 ||
-           std::hypot(a.x - b.x, a.y - b.y) < .55;
+    return navigation2d::exploration::EntryCoordinator::SameMouth(a, b);
   }
 
   // Real door/alcove only: CorridorMouthAt AND throat in [0.50, 1.40] m.
@@ -676,129 +677,28 @@ class AutonomousExplorer final : public rclcpp::Node,
     return false;
   }
 
-  bool StartEntryProbe() {
-    if (!entry_.pending() || !Pose()) return false;
-    if (RecentlyDemoted(*entry_.pending())) return false;
-    // Commit to one mouth: hopping across kitchen / alcove frontiers while the
-    // robot sits on the threshold produces the scribble thrash in the red box.
-    if (!entry_.locked() || !SameEntryMouth(*entry_.locked(), *entry_.pending()))
-      LockEntryMouth(*entry_.pending());
-    else
-      entry_.SetPending(*entry_.locked());
-    // Far from the mouth: step along the ray toward the frontier until the
-    // remaining gap is the poke distance. The stored viewpoint can sit behind
-    // the robot; navigating there is the open-room reverse, and once the
-    // chassis is already inside goal tolerance that navigation succeeds every
-    // tick and the robot freezes (live: pose=(-1.69,-0.50) goal=(-1.81,-0.45)
-    // while the frontier stayed 2.06 m south).
-    {
-      const double fx = entry_.pending()->frontier_x;
-      const double fy = entry_.pending()->frontier_y;
-      const double rx = Pose()->pose.position.x;
-      const double ry = Pose()->pose.position.y;
-      const double mouth_range = std::hypot(rx - fx, ry - fy);
-      constexpr double kPokeRange = 1.55;
-      const double travel = mouth_range - kPokeRange;
-      if (travel > navigation2d::kSwingClearance()) {
-        Goal approach = *entry_.pending();
-        approach.x = rx + travel * (fx - rx) / mouth_range;
-        approach.y = ry + travel * (fy - ry) / mouth_range;
-        approach.yaw = std::atan2(fy - ry, fx - rx);
-        paint_driven_corridor_ = true;
-        paint_trail_budget_m_ = 8.0;
-        cooled_signatures_.clear();
-        if (StartNavigation(approach, false)) {
-          RCLCPP_INFO(get_logger(),
-                      "Entry approach standoff: frontier=(%.2f,%.2f) "
-                      "range=%.2f step=(%.2f,%.2f)",
-                      fx, fy, mouth_range, approach.x, approach.y);
-          PublishStatus("COMPLETING", "approaching sealed-room mouth");
-          return true;
-        }
-      }
-    }
-    const auto selection = navigation2d::exploration::SelectEntryTarget(
-        explorer_, *entry_.pending(), Pose()->pose.position.x,
-        Pose()->pose.position.y, entry_.attempts());
-    const auto& probe = selection.goal;
-    const double gap = selection.gap_m;
-    const double free_depth = selection.free_depth_m;
-    const double used_min_depth = selection.minimum_depth_m;
-    const bool easy_door = selection.easy;
-    if (!probe) {
-      entry_.CountAttempt();
-      RCLCPP_WARN(get_logger(),
-                  "Entry probe unavailable: frontier=(%.2f,%.2f) attempts=%d "
-                  "gap=%.2f free_depth=%.2f",
-                  entry_.pending()->frontier_x, entry_.pending()->frontier_y,
-                  entry_.attempts(), gap, free_depth);
-      return false;
-    }
-    // Already past the jambs: close the mouth without StartNavigation (live:
-    // already-past logged dozens of times/sec while re-locking the same door).
-    {
-      const Goal prior_active = active_goal_;
-      active_goal_ = *probe;
-      entry_.CountAttempt();
-      const bool already_in = EntryProbeSatisfied();
-      if (already_in) {
-        explorer_.RecordAttempt(*entry_.pending(), true, false);
-        room_visits_.Forget(*entry_.pending());
-        recently_demoted_ = *entry_.pending();
-        recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(14.0);
-        // Do not CoolRegion the mouth — that hid kitchen leftovers and made
-        // the tour soft-unlock out after a doorway peek.
-        ClearEntryMouthLock();
-        QueueActiveRegionFinish();
-        active_goal_ = prior_active;
-        next_selection_ = now();
-        PublishStatus("SELECTING",
-                      "room entered; finishing active region first");
-        RCLCPP_INFO(get_logger(),
-                    "room entered at pose=(%.2f,%.2f) (already past mouth)",
-                    Pose()->pose.position.x, Pose()->pose.position.y);
-        return false;  // mouth closed; caller should not treat as active drive
-      }
-      active_goal_ = prior_active;
-      entry_.CancelAttempt();
-    }
-    entry_.CountAttempt();
-    entry_.NoteEvidence({KnownCells(), map_revision_});
-    // Reopen only unknown/free trail cells (not occupied) so pinch escapes
-    // still work without inventing through-wall entry chords.
+  bool EntryMouthCooling(const Goal& mouth) override { return RecentlyDemoted(mouth); }
+  void PrepareEntryPlan(double trail_budget_m) override {
     paint_driven_corridor_ = true;
-    paint_trail_budget_m_ = 4.0;
-    // Entry plans must not inherit cooled hallway chords — those forced
-    // first-segment replay failures with progress=0 at the wrong pose.
+    paint_trail_budget_m_ = trail_budget_m;
     cooled_signatures_.clear();
-    room_visits_.Remember(*entry_.pending(), *probe);
-    // A target inside goal tolerance "arrives" on the first tick without
-    // moving, and the retry picks the same spot again.
-    if (std::hypot(probe->x - Pose()->pose.position.x,
-                   probe->y - Pose()->pose.position.y) <= kExploreGoalTolerance) {
-      RCLCPP_WARN(get_logger(),
-                  "Entry probe rejected: target=(%.2f,%.2f) depth=%.2f attempt=%d "
-                  "gap=%.2f reason=target within goal tolerance of robot",
-                  probe->x, probe->y, used_min_depth, entry_.attempts(), gap);
-      return false;
-    }
-    if (!StartNavigation(*probe, false)) {
-      RCLCPP_WARN(get_logger(),
-                  "Entry probe rejected: target=(%.2f,%.2f) depth=%.2f attempt=%d "
-                  "gap=%.2f reason=%s",
-                  probe->x, probe->y, used_min_depth, entry_.attempts(), gap,
-                  last_planning_failure_.empty() ? "unknown" :
-                      last_planning_failure_.c_str());
-      return false;
-    }
-    RCLCPP_INFO(get_logger(),
-                "Entry probe started: frontier=(%.2f,%.2f) target=(%.2f,%.2f) "
-                "depth=%.2f attempt=%d gap=%.2f easy=%s",
-                entry_.pending()->frontier_x, entry_.pending()->frontier_y,
-                probe->x, probe->y, used_min_depth, entry_.attempts(), gap,
-                easy_door ? "yes" : "no");
-    PublishStatus("COMPLETING", "crossing frontier entry and waiting for map growth");
-    return true;
+  }
+  bool NavigateEntry(const Goal& goal) override { return StartNavigation(goal, false); }
+  void CoolEnteredMouth(const Goal& mouth, double seconds) override {
+    recently_demoted_ = mouth;
+    recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(seconds);
+  }
+  void SelectAfterEntry() override { next_selection_ = now(); }
+  void EntryStatus(const char* phase, const char* reason) override { PublishStatus(phase, reason); }
+  void ReportEntry(const navigation2d::exploration::EntryNotice& notice) override {
+    navigation2d::exploration_ros::ReportEntry(get_logger(), notice, last_planning_failure_, *this);
+  }
+  bool StartEntryProbe() {
+    if (!Pose()) { return false; }
+    const auto result = navigation2d::exploration::ExecuteEntryProbe(
+        entry_, explorer_, room_visits_, *this,
+        {Pose()->pose.position.x, Pose()->pose.position.y, map_revision_, kExploreGoalTolerance});
+    return result == navigation2d::exploration::EntryProbeResult::kDriving;
   }
 
   double EntryProbeDepth() const {
@@ -818,7 +718,7 @@ class AutonomousExplorer final : public rclcpp::Node,
 
   // After crossing a mouth: queue in-room leftovers before any hallway tour so
   // the kitchen white pocket is observed before soft-unlock hops out.
-  void QueueActiveRegionFinish() {
+  void QueueActiveRegionFinish() override {
     if (!Pose()) return;
     const double rx = Pose()->pose.position.x;
     const double ry = Pose()->pose.position.y;

@@ -116,3 +116,17 @@ Linking always runs with the current libraries. The original source path and
 compiler flags are retained; the frozen baseline binary digest stayed identical
 when enabling the cache. `--no-object-cache` forces a fresh object build. Cache
 inputs and hit/miss information are recorded alongside the replay manifest.
+
+### 入口流程对照
+
+生成的 `baseline entry` 与 `candidate entry` 使用真实探索器、导航会话和固定地图，直接调用入口流程，比较靠近、无探测点、启动探测、已入室与冷却场景的结果、预算、导航状态和发布摘要。该场景补足 normal/stuck 未进入入口分支的缺口；不替代实际穿门的 ROS 闭环。运行时沿用相同 ROS 参数，逐项比较 JSON，不能只检查进程退出码。
+
+```bash
+ROS_DOMAIN_ID=211 python3 tools/check_entry_replay.py \
+  --baseline /tmp/navigation-refactor-replay/baseline \
+  --candidate /tmp/navigation-refactor-replay/candidate \
+  --output /tmp/entry-parity.json -- \
+  --ros-args --log-level fatal -p vehicle_config:=config/navigation2d.yaml
+```
+
+`entry-benchmark` 执行同样五种分支，分别输出 `approach_us`、`unavailable_us`、`probe_us`、`inside_us`、`cooling_us`，并保留完整行为 trace、进程 wall time 和峰值 RSS。计时包围实际入口调用，未将构造节点算进各分支耗时；进程指标仍包含构造。使用 compare_benchmarks 的显式指标/范围、冻结 A/A 后交替 A/B，不将此场景视为穿门运动闭环。

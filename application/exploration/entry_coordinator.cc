@@ -5,6 +5,10 @@
 
 #include "navigation2d/geometry/robot_geometry.h"
 namespace navigation2d::exploration {
+bool EntryCoordinator::SameMouth(const ExplorationGoal& a, const ExplorationGoal& b) {
+  return std::hypot(a.frontier_x - b.frontier_x, a.frontier_y - b.frontier_y) < .75 ||
+         std::hypot(a.x - b.x, a.y - b.y) < .55;
+}
 void EntryCoordinator::Lock(const ExplorationGoal& mouth, bool easy, EntryEvidence evidence) {
   locked_ = mouth;
   pending_ = mouth;
