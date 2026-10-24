@@ -432,3 +432,7 @@ flowchart LR
 ### 口部任务归并与落点
 
 `MergeMouthGoals` 按首个匹配口部稳定归并，保留获胜任务的元数据及两者最大的格数/增益证据。`PlaceMouthGoals` 将尚在接近侧的目标推进到已观测自由格；中心线搜索保留原间隙、侧向与深度评分。两阶段同步读取地图，返回独立任务序列，既不提交区域上下文也不发送控制命令。
+
+### 剩余碎片目标
+
+`BuildSafeFrontierTravelGraph` 复用最近安全起点与四邻接传播，仅输出严格执行图。`BestLeftoverApproach` 查询单个边界的可执行观点，`SelectLeftoverViewpoints` 排序和去重；`LeftoverSelection::raw_frontier_cells` 未赋值表示未完成计数（输入无效或无安全起点），已赋值的零表示实际没有原始边界，调度器据此保留原来的遥测更新时机。口袋/永久记忆只读借用，排序结果独立拥有。

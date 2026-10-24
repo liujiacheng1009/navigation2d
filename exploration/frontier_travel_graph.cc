@@ -116,4 +116,27 @@ std::optional<FrontierTravelGraph> BuildFrontierTravelGraph(const ExplorationGri
   ApplyBootstrapFrontierTravel(map, observation, origin, travel);
   return FrontierTravelGraph{std::move(masks.safe), std::move(travel)};
 }
+std::optional<FrontierTravelGraph> BuildSafeFrontierTravelGraph(const ExplorationGrid& map,
+                                                                const ExplorationGrid& observation,
+                                                                double footprint_clearance_m,
+                                                                double robot_x, double robot_y) {
+  const PlanningGridView geometry(map, observation, footprint_clearance_m);
+  std::vector<unsigned char> safe(map.cells.size(), 0);
+  for (int row = 0; row < map.height; ++row) {
+    for (int col = 0; col < map.width; ++col) {
+      safe[static_cast<std::size_t>(row) * map.width + col] = geometry.SafeViewpoint(col, row);
+    }
+  }
+  const FrontierTravelOrigin origin{
+      static_cast<int>(std::floor((robot_x - map.origin_x) / map.resolution)),
+      static_cast<int>(std::floor((robot_y - map.origin_y) / map.resolution)),
+      static_cast<int>(std::ceil(1.0 / map.resolution))};
+  const int start = NearestStart(map, safe, origin);
+  if (start < 0) {
+    return std::nullopt;
+  }
+  auto travel = TravelDistances(map, safe, start);
+  return FrontierTravelGraph{std::move(safe), std::move(travel)};
+}
+
 }  // namespace navigation2d::frontier_internal

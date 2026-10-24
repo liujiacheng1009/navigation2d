@@ -1,4 +1,5 @@
 #include "navigation2d/exploration/frontier_explorer.h"
+#include "navigation2d/exploration/leftover_viewpoints.h"
 #include "navigation2d/exploration/mouth_goal_stages.h"
 #include "navigation2d/exploration/unvisited_space.h"
 #include "navigation2d/exploration/entry_probe_search.h"
@@ -238,145 +239,14 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectLeftoverApproach(
 
 std::vector<ExplorationGoal> FrontierExplorer::SelectLeftoverApproaches(
     double robot_x, double robot_y, int max_count) {
-  const auto& map = maps_.planning();
-  std::vector<ExplorationGoal> leftovers;
-  if (max_count <= 0 || map.width <= 2 || map.height <= 2 || map.resolution <= 0. ||
-      map.cells.size() != static_cast<std::size_t>(map.width * map.height))
-    return leftovers;
-  std::vector<unsigned char> frontier(map.cells.size(), 0);
-  // Same planning-radius graph as SelectGoals / StartNavigation. A looser
-  // ClearAt(.18) leftover was rejected as goal-occupied before execution.
-  std::vector<unsigned char> safe(map.cells.size(), 0);
-  for (int row = 0; row < map.height; ++row) for (int col = 0; col < map.width; ++col) {
-    const std::size_t index = static_cast<std::size_t>(row) * map.width + col;
-    safe[index] = SafeViewpoint(col, row);
+  auto selection = frontier_internal::SelectLeftoverViewpoints(
+      {maps_.planning(), maps_.observation(), config_.footprint_clearance, tips_, visits_},
+      robot_x, robot_y, max_count);
+  if (selection.raw_frontier_cells) {
+    unresolved_frontier_cells_ = *selection.raw_frontier_cells;
+    raw_frontier_cells_ = unresolved_frontier_cells_;
   }
-  const int robot_col = static_cast<int>(std::floor((robot_x - map.origin_x) / map.resolution));
-  const int robot_row = static_cast<int>(std::floor((robot_y - map.origin_y) / map.resolution));
-  int start = -1;
-  double start_distance = std::numeric_limits<double>::infinity();
-  const int start_search = static_cast<int>(std::ceil(1.0 / map.resolution));
-  for (int row = std::max(0, robot_row - start_search);
-       row <= std::min(map.height - 1, robot_row + start_search); ++row)
-  for (int col = std::max(0, robot_col - start_search);
-       col <= std::min(map.width - 1, robot_col + start_search); ++col) {
-    const int index = row * map.width + col;
-    if (!safe[index]) continue;
-    const double distance = std::hypot(col - robot_col, row - robot_row);
-    if (distance < start_distance) { start_distance = distance; start = index; }
-  }
-  if (start < 0) return leftovers;
-  std::vector<int> travel_cells(map.cells.size(), -1);
-  std::deque<int> reachable{start};
-  travel_cells[start] = 0;
-  constexpr int cardinal_x[] = {-1, 1, 0, 0};
-  constexpr int cardinal_y[] = {0, 0, -1, 1};
-  while (!reachable.empty()) {
-    const int current = reachable.front(); reachable.pop_front();
-    const int row = current / map.width, col = current % map.width;
-    for (int direction = 0; direction < 4; ++direction) {
-      const int x = col + cardinal_x[direction], y = row + cardinal_y[direction];
-      if (x < 0 || y < 0 || x >= map.width || y >= map.height) continue;
-      const int next = y * map.width + x;
-      if (!safe[next] || travel_cells[next] >= 0) continue;
-      travel_cells[next] = travel_cells[current] + 1;
-      reachable.push_back(next);
-    }
-  }
-  for (int row = 0; row < map.height; ++row) for (int col = 0; col < map.width; ++col) {
-    const int index = row * map.width + col;
-    if (RawFrontier(col, row)) frontier[index] = 1;
-  }
-  unresolved_frontier_cells_ = CountRawFrontierCells();
-  raw_frontier_cells_ = unresolved_frontier_cells_;
-  if (raw_frontier_cells_ == 0) return leftovers;
-  // Leftover free/unknown specks are often smaller than
-  // minimum_frontier_cells, so the exploring tour drops them.  The pocket
-  // they belong to is usually still reachable through ordinary open space.
-  // Place a normal viewpoint on that open graph; the planner takes the wide
-  // route, it does not squeeze a 1.2 m end gap.
-  constexpr double kLeftoverRadius = 6.0;
-  const int leftover_search = static_cast<int>(std::ceil(kLeftoverRadius / map.resolution));
-  struct RankedLeftover {
-    ExplorationGoal goal;
-    bool room_mouth = false;
-  };
-  std::vector<RankedLeftover> ranked;
-  // Completing must still see mouths that narrow failure cools hid from the
-  // exploring tour. Wide pocket cools (>=1.5 m, tip-leave / thrash) must
-  // suppress leftovers too — otherwise the robot re-enters a wall tip with a
-  // frontier_cells=0 retreat ping-pong and never escapes.
-  const std::size_t known_now = KnownCells();
-  const auto leftover_suppressed = [&](double x, double y) {
-    if (tips_.Blocked(x, y) || PersistentlyBlacklisted(x, y)) return true;
-    return visits_.WidePocket(x, y, known_now);
-  };
-  for (int index = 0; index < map.width * map.height; ++index) {
-    if (!frontier[index]) continue;
-    const int target_row = index / map.width, target_col = index % map.width;
-    const auto [frontier_x, frontier_y] = CellCenter(target_col, target_row);
-    if (leftover_suppressed(frontier_x, frontier_y)) continue;
-    // Skip tips with no reachable approach cell — wall-external unknown.
-    bool approachable = travel_cells[static_cast<std::size_t>(index)] >= 0;
-    if (!approachable) {
-      for (int dy = -1; dy <= 1 && !approachable; ++dy) {
-        for (int dx = -1; dx <= 1; ++dx) {
-          const int nc = target_col + dx, nr = target_row + dy;
-          if (nc < 0 || nr < 0 || nc >= map.width || nr >= map.height) continue;
-          if (travel_cells[static_cast<std::size_t>(nr * map.width + nc)] >= 0) {
-            approachable = true;
-            break;
-          }
-        }
-      }
-    }
-    if (!approachable) continue;
-    const bool room_mouth = CorridorMouthAt(map, frontier_x, frontier_y);
-    std::optional<ExplorationGoal> best_for_tip;
-    for (int row = std::max(0, target_row - leftover_search);
-         row <= std::min(map.height - 1, target_row + leftover_search); ++row) {
-      for (int col = std::max(0, target_col - leftover_search);
-           col <= std::min(map.width - 1, target_col + leftover_search); ++col) {
-        const int viewpoint_index = row * map.width + col;
-        if (!safe[viewpoint_index] || travel_cells[viewpoint_index] < 0 ||
-            !RawFree(col, row))
-          continue;
-        const auto [x, y] = CellCenter(col, row);
-        if (leftover_suppressed(x, y)) continue;
-        const double standoff = std::hypot(x - frontier_x, y - frontier_y);
-        if (standoff < kCloseStandoff() || standoff > kLeftoverRadius) continue;
-        const double clearance = OccupiedClearanceAt(map, col, row);
-        if (clearance < kPlanningRadius()) continue;
-        const double travel = travel_cells[viewpoint_index] * map.resolution;
-        ExplorationGoal candidate{x, y, std::atan2(frontier_y - y, frontier_x - x),
-                                  frontier_x, frontier_y, 1, map.resolution,
-                                  ViewpointScore(map.resolution, travel, standoff, .8,
-                                                 clearance),
-                                  true};
-        if (!best_for_tip || candidate.score > best_for_tip->score)
-          best_for_tip = candidate;
-      }
-    }
-    if (!best_for_tip) continue;
-    ranked.push_back({*best_for_tip, room_mouth});
-  }
-  std::sort(ranked.begin(), ranked.end(), [](const RankedLeftover& a,
-                                             const RankedLeftover& b) {
-    if (a.room_mouth != b.room_mouth) return a.room_mouth && !b.room_mouth;
-    return a.goal.score > b.goal.score;
-  });
-  for (const auto& entry : ranked) {
-    const bool duplicate = std::any_of(
-        leftovers.begin(), leftovers.end(), [&](const ExplorationGoal& prior) {
-          return std::hypot(prior.frontier_x - entry.goal.frontier_x,
-                            prior.frontier_y - entry.goal.frontier_y) < .80 ||
-                 std::hypot(prior.x - entry.goal.x, prior.y - entry.goal.y) < .80;
-        });
-    if (duplicate) continue;
-    leftovers.push_back(entry.goal);
-    if (static_cast<int>(leftovers.size()) >= max_count) break;
-  }
-  return leftovers;
+  return std::move(selection.goals);
 }
 
 std::vector<ExplorationGoal> FrontierExplorer::StableGoals(

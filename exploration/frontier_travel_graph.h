@@ -20,6 +20,11 @@ struct FrontierTravelOrigin {
 [[nodiscard]] std::optional<FrontierTravelGraph> BuildFrontierTravelGraph(
     const ExplorationGrid& planning, const ExplorationGrid& observation,
     double footprint_clearance_m, double robot_x, double robot_y);
+// Execution-only graph for leftover approaches: safe mask, nearest safe start,
+// four-neighbour distances. No discovery or bootstrap augmentation is applied.
+[[nodiscard]] std::optional<FrontierTravelGraph> BuildSafeFrontierTravelGraph(
+    const ExplorationGrid& planning, const ExplorationGrid& observation,
+    double footprint_clearance_m, double robot_x, double robot_y);
 // Internal bootstrap policy: a small observed map may use the raw free graph
 // to discover boundaries; the independent safe mask is never modified.
 // The distance buffer has planning.cells.size() entries; origin uses grid cells.
