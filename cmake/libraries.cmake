@@ -33,6 +33,8 @@ navigation2d_library(navigation2d_exploration
   exploration/frontier_tracks.cc exploration/frontier_visit_memory.cc exploration/region_scheduler.cc
   exploration/frontier_travel_graph.cc exploration/bootstrap_frontier_travel.cc
   exploration/frontier_reachability.cc exploration/viewpoint_settlement.cc
+  exploration/entry_probe_search.cc exploration/entry_probe_direction.cc
+  exploration/entry_probe_grid.cc exploration/mouth_gap.cc
   exploration/frontier_components.cc
   exploration/frontier_approach_viewpoints.cc
   exploration/frontier_viewpoint_search.cc

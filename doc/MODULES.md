@@ -410,3 +410,17 @@ execution-stall total is removed; exported counters/messages remain unchanged.
 ### 观测适配
 
 `scan_observation` 显式区分同步借用的范围视图和导航独立持有的扫描副本。`map_observation::ObservedRouteCutsWall` 负责 ROS 占用值与 planning-local 路线的 map-frame 转换，再委托领域路线验证器；保持未知/49/50 阈值及无位姿回退语义。
+
+### 入口探测计算阶段
+
+`entry_probe_direction` 保持未知区域质心→机器人到入口→原观点到入口的轴向优先级；`EntryProbeGrid` 只借用规划/观测地图，持有同步几何视图，返回独立四邻接距离。`entry_probe_search` 先按原深度、侧向、间隙与严格评分比较选取连通候选，再执行原几何回退；`mouth_gap` 保留窄轴自由长度。没有把回退改为可达性保证，也未调整安全半径。
+
+```mermaid
+flowchart LR
+  A[进入方向] --> B[四邻接距离]
+  B --> C[连通候选评分]
+  C --> D{有候选}
+  D -->|有| E[入口目标]
+  D -->|无| F[原几何回退]
+  F --> E
+```
