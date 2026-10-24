@@ -35,6 +35,7 @@ navigation2d_library(navigation2d_exploration
   exploration/frontier_reachability.cc exploration/viewpoint_settlement.cc
   exploration/entry_probe_search.cc exploration/entry_probe_direction.cc
   exploration/entry_probe_grid.cc exploration/mouth_gap.cc
+  exploration/free_space_distances.cc exploration/unvisited_space.cc
   exploration/frontier_components.cc
   exploration/frontier_approach_viewpoints.cc
   exploration/frontier_viewpoint_search.cc
