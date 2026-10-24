@@ -103,9 +103,11 @@ target_compile_features(navigation2d_exploration_application PUBLIC cxx_std_20)
 target_link_libraries(navigation2d_exploration_application PUBLIC navigation2d_core)
 target_compile_options(navigation2d_exploration_application PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
-add_library(navigation2d_exploration_io STATIC ros/exploration/artifact_writer.cc)
+add_library(navigation2d_exploration_io STATIC
+  ros/exploration/artifact_writer.cc
+  ros/exploration/planning_map_adapter.cc)
 target_compile_features(navigation2d_exploration_io PUBLIC cxx_std_20)
-target_link_libraries(navigation2d_exploration_io PUBLIC navigation2d_core)
+target_link_libraries(navigation2d_exploration_io PUBLIC navigation2d_exploration_application)
 target_compile_options(navigation2d_exploration_io PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 add_subdirectory(test)

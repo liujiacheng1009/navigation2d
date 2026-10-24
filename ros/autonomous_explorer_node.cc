@@ -5,7 +5,6 @@
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
-#include <fstream>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -26,6 +25,7 @@
 #include "navigation2d/ros/exploration/pose_feedback.h"
 #include "navigation2d/ros/exploration/map_observation.h"
 #include "navigation2d/ros/exploration/artifact_writer.h"
+#include "navigation2d/ros/exploration/planning_map_adapter.h"
 #include "navigation2d/application/exploration/return_coordinator.h"
 #include "navigation2d/application/exploration/recovery_policy.h"
 #include "navigation2d/application/exploration/escape_execution.h"
@@ -211,8 +211,8 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   navigation2d::Pose2d LocalPose(const geometry_msgs::msg::Pose& pose) const {
-    return navigation2d::MakePose2d(pose.position.x - navigation_origin_x_,
-                                    pose.position.y - navigation_origin_y_, Yaw(pose.orientation));
+    return navigation2d::MakePose2d(pose.position.x - planning_map_.origin_x(),
+                                    pose.position.y - planning_map_.origin_y(), Yaw(pose.orientation));
   }
 
   navigation2d::Twist2d FreshVelocity(const rclcpp::Time& reference) const {
@@ -265,12 +265,6 @@ class AutonomousExplorer final : public rclcpp::Node,
         goal = *settled;
       }
     }
-    navigation_origin_x_ = map_->info.origin.position.x;
-    navigation_origin_y_ = map_->info.origin.position.y;
-    map_snapshot_path_ = "/tmp/sweepnav-navigation-map-" + std::to_string(map_revision_) + ".json";
-    std::ofstream output(map_snapshot_path_);
-    output << "{\"width\":" << map_->info.width << ",\"height\":" << map_->info.height
-           << ",\"resolution\":" << map_->info.resolution << ",\"cells\":[";
     if (clear_start_pinch_) {
       paint_driven_corridor_ = true;
       clear_start_pinch_ = false;
@@ -282,7 +276,8 @@ class AutonomousExplorer final : public rclcpp::Node,
       paint_trail_budget_m_ = 0.;
     }
     const auto entry = entry_.pending() ? entry_.pending() : entry_.locked();
-    auto prepared = snapshot_builder_.Build(
+    // Preserve the loader's existing diagnosis for stream failures.
+    static_cast<void>(planning_map_.Prepare(
         ObservationGrid(),
         {.robot = navigation2d::MakePose2d(Pose()->pose.position.x, Pose()->pose.position.y,
                                           Yaw(Pose()->pose.orientation)),
@@ -292,16 +287,7 @@ class AutonomousExplorer final : public rclcpp::Node,
          .trail = pose_feedback_.trail(),
          .trail_budget_m = trail_budget,
          .returning = returning,
-         .map_revision = map_revision_},
-        std::move(planning_snapshot_));
-    planning_snapshot_ = std::move(prepared.snapshot);
-    for (std::size_t index = 0; index < prepared.cells.size(); ++index) {
-      if (index != 0) { output << ','; }
-      const auto cell = prepared.cells[index];
-      output << (planning_snapshot_.free_mask[index] ? 0 : (cell < 0 ? 255 : 254));
-    }
-    output << "]}";
-    output.close();
+         .map_revision = map_revision_}));
     PublishPlanningDebugMap(returning);
     bool home_goal = false;
     if (returning && mission_.home()) {
@@ -324,8 +310,8 @@ class AutonomousExplorer final : public rclcpp::Node,
          .home_goal = home_goal},
         navigation_profiles_.For(purpose));
     try {
-      navigation_.Begin(config, map_snapshot_path_, navigation2d::MakePose2d(
-          goal.x - navigation_origin_x_, goal.y - navigation_origin_y_, goal.yaw),
+      navigation_.Begin(config, planning_map_.path(), navigation2d::MakePose2d(
+          goal.x - planning_map_.origin_x(), goal.y - planning_map_.origin_y(), goal.yaw),
           std::vector<std::uint64_t>(cooled_signatures_.begin(), cooled_signatures_.end()));
       reported_recoveries_ = 0;
       // Do not commit active_goal_/returning_/recovery_ until the plan is
@@ -1934,7 +1920,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     if (cut_replans_ >= kMaxCutReplans) return false;
     ++cut_replans_;
     navigation_.Cancel();
-    if (planning_snapshot_.trail_budget_m > 0.) {
+    if (planning_map_.snapshot().trail_budget_m > 0.) {
       paint_driven_corridor_ = true;
     }
     RCLCPP_WARN(get_logger(),
@@ -2384,13 +2370,13 @@ class AutonomousExplorer final : public rclcpp::Node,
     std::vector<std::pair<double, double>> path_xy;
     path_xy.reserve(route.size());
     for (const auto& pose : route) {
-      path_xy.emplace_back(navigation2d::X(pose) + navigation_origin_x_,
-                           navigation2d::Y(pose) + navigation_origin_y_);
+      path_xy.emplace_back(navigation2d::X(pose) + planning_map_.origin_x(),
+                           navigation2d::Y(pose) + planning_map_.origin_y());
     }
     const double robot_x = Pose() ? Pose()->pose.position.x : path_xy.front().first;
     const double robot_y = Pose() ? Pose()->pose.position.y : path_xy.front().second;
     return navigation2d::exploration::RouteCutsMappedObstacle(
-        std::move(live), std::move(path_xy), planning_snapshot_, robot_x, robot_y,
+        std::move(live), std::move(path_xy), planning_map_.snapshot(), robot_x, robot_y,
         Pose() ? Yaw(Pose()->pose.orientation) : 0., Pose() ? ScanEvidence() : std::nullopt,
         execution_tick);
   }
@@ -2415,8 +2401,8 @@ class AutonomousExplorer final : public rclcpp::Node,
       ClearPublishedNavPaths();
       return;
     }
-    const auto global = debug_paths_.Global(navigation_.path(), navigation_origin_x_,
-                                            navigation_origin_y_, now());
+    const auto global = debug_paths_.Global(navigation_.path(), planning_map_.origin_x(),
+                                            planning_map_.origin_y(), now());
     path_publisher_->publish(global);
     const auto local = debug_paths_.Local(global, state.path_progress_m);
     local_trajectory_publisher_->publish(local);
@@ -3249,11 +3235,9 @@ class AutonomousExplorer final : public rclcpp::Node,
 
   std::string result_path_;
   std::string snapshot_path_;
-  std::string map_snapshot_path_;
   double max_duration_s_ = 600.;
   double goal_timeout_s_ = 55.;
   double simulation_speed_ = 1.;
-  double navigation_origin_x_ = 0., navigation_origin_y_ = 0.;
   std::uint64_t map_revision_ = 0;
   std::uint64_t tour_revision_ = 0;
   int empty_frontier_cycles_ = 0;
@@ -3288,8 +3272,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   double paint_trail_budget_m_ = 0.;
   // Trail budget the active plan was painted with (0 = not painted).
   // Per cell of the active plan's snapshot: 1 where the planner was told free.
-  navigation2d::exploration::PlanningSnapshotBuilder snapshot_builder_;
-  navigation2d::exploration::PlanningSnapshot planning_snapshot_;
+  navigation2d::exploration_io::PlanningMapAdapter planning_map_{"/tmp/sweepnav-navigation-map-"};
   bool clear_start_pinch_ = false;
   navigation2d::exploration::PoseMotionWatch pose_motion_;
   int immobility_recoveries_ = 0;
