@@ -19,9 +19,19 @@ class ReturnActions {
   virtual bool StartBreadcrumbTowardHome() = 0;
   virtual bool TryStartEscape() = 0;
 };
+class ReturnArrivalActions : public ReturnActions {
+ public:
+  virtual bool PlanDirectAfterHop(const ExplorationGoal& home) = 0;
+  virtual void DirectHomeAfterHopAccepted() = 0;
+  virtual void FinishReturn(bool partial) = 0;
+};
 class ReturnCoordinator {
  public:
   ReturnExecutionResult Execute(ReturnActions& actions);
+  // Called after cancelling the reached route. Home/robot use world-frame
+  // metres; direct retry precedes another breadcrumb hop and final completion.
+  void CompleteArrival(const ExplorationGoal& home, double robot_x, double robot_y,
+                       ReturnArrivalActions& actions);
   ReturnExecutionResult TryTrailOrEscape(ReturnActions& actions);
   ReturnExecutionResult Recover(ReturnRecoveryMode mode, ReturnActions& actions);
   ReturnIdleResult ContinueIdle(bool escape_pending, ReturnActions& actions);

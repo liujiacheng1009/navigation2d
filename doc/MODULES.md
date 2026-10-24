@@ -436,3 +436,7 @@ flowchart LR
 ### 剩余碎片目标
 
 `BuildSafeFrontierTravelGraph` 复用最近安全起点与四邻接传播，仅输出严格执行图。`BestLeftoverApproach` 查询单个边界的可执行观点，`SelectLeftoverViewpoints` 排序和去重；`LeftoverSelection::raw_frontier_cells` 未赋值表示未完成计数（输入无效或无安全起点），已赋值的零表示实际没有原始边界，调度器据此保留原来的遥测更新时机。口袋/永久记忆只读借用，排序结果独立拥有。
+
+### 同步任务转换
+
+`TryContinuousTourHandoff` 编排连续观点交接：拒绝候选后恢复原导航会话，接受后完成任务记账与状态发布，再释放旧会话。`TryUnenteredRoomVisits` 使用独立房间尝试账本，在准备/规划前消耗次数，并保持失败次数。`ReturnCoordinator::CompleteArrival` 唯一编排已到达返航路线后的直达、面包屑和结束顺序。ROS 适配器保留发布、日志与规划入口；整体任务推进器仍待迁移。

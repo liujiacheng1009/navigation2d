@@ -48,6 +48,8 @@
 #include "navigation2d/application/exploration/viewpoint_rejections.h"
 #include "navigation2d/application/exploration/entry_completion.h"
 #include "navigation2d/application/exploration/tour_execution.h"
+#include "navigation2d/application/exploration/continuous_tour_handoff.h"
+#include "navigation2d/application/exploration/room_visit_execution.h"
 #include "navigation2d/ros/exploration/entry_reporter.h"
 #include "navigation2d/application/exploration/status_serializer.h"
 #include "navigation2d/application/exploration/room_visit_ledger.h"
@@ -77,7 +79,9 @@ double NormalizeAngle(double value) {
 using Goal = navigation2d::ExplorationGoal;
 
 class AutonomousExplorer final : public rclcpp::Node,
-                                 private navigation2d::exploration::ReturnActions,
+                                 private navigation2d::exploration::ReturnArrivalActions,
+                                 private navigation2d::exploration::ContinuousHandoffActions,
+                                 private navigation2d::exploration::RoomVisitActions,
                                  private navigation2d::exploration::EntryActions,
                                  private navigation2d::exploration::EntrySelectionActions,
                                  private navigation2d::exploration::EntryCrawlActions,
@@ -1039,54 +1043,12 @@ class AutonomousExplorer final : public rclcpp::Node,
   bool HandoffToNextTourGoal() {
     if (mission_.phase() != MissionPhase::kExploring || returning_ || !navigation_.has_session() ||
         tour_.goals().size() < 2) return false;
-    const double distance = std::hypot(active_goal_.x - Pose()->x,
-                                       active_goal_.y - Pose()->y);
-    // A frontier viewpoint is a 360-degree observation pose, not a docking
-    // point. Once inside this small observation envelope, the lidar has the
-    // intended view and the next already-ranked task can be adopted without
-    // braking to zero at every frontier boundary.
-    if (distance > .24) return false;
-    const Goal completed = active_goal_;
-    std::size_t next_index = 1;
-    // Match BuildTour's ~5 m pocket: cross-hall handoff must stop at a decision
-    // boundary so newly opened junction mouths are not skipped.
-    constexpr double kHandoffPocketM = 5.0;
-    while (next_index < tour_.goals().size()) {
-      const Goal next = tour_.goals()[next_index];
-      if (!explorer_.GoalRegionStillFrontier(next)) {
-        ++next_index;
-        continue;
-      }
-      if (!explorer_.InSameReachableRegion(
-              Pose()->x, Pose()->y, next.x, next.y,
-              kHandoffPocketM) &&
-          !explorer_.InSameReachableRegion(
-              active_goal_.x, active_goal_.y, next.x, next.y, kHandoffPocketM))
-        return false;
-      const double next_bearing = std::atan2(
-          next.y - Pose()->y, next.x - Pose()->x);
-      const double direction_change = std::abs(NormalizeAngle(
-          next_bearing - Pose()->yaw));
-      // Continuous handoff is valid only when the next task continues the
-      // current motion direction. Switching a moving differential drive to
-      // a goal behind it creates an artificial emergency stop and lets
-      // inertia carry the base outside the newly planned corridor.
-      if (direction_change > .60) return false;
-      auto previous = std::move(navigation_);
-      if (StartNavigation(next, false)) {
-        explorer_.RecordAttempt(completed, true);
-        // Drop the completed viewpoint and any resolved entries before the
-        // newly active goal; leave that goal at the front for normal result
-        // bookkeeping after it is reached.
-        tour_.HandoffThrough(next_index);
-        PublishStatus("NAVIGATING", "continuous handoff to next frontier viewpoint");
-        return true;
-      }
-      navigation_ = std::move(previous);
-      explorer_.RecordAttempt(next, false);
-      ++next_index;
-    }
-    return false;
+    return navigation2d::exploration::TryContinuousTourHandoff(
+        tour_, explorer_, navigation_, active_goal_, *TourRobot(), *this);
+  }
+  bool NavigateHandoff(const Goal& goal) override { return StartNavigation(goal, false); }
+  void HandoffAccepted() override {
+    PublishStatus("NAVIGATING", "continuous handoff to next frontier viewpoint");
   }
 
   bool MaybePreemptForNearerMouth(double /*path_remaining_m*/) {
@@ -1139,35 +1101,36 @@ class AutonomousExplorer final : public rclcpp::Node,
   // passes it.
   bool TryVisitUnenteredSpace() {
     if (!Pose() || returning_ || mission_.phase() == MissionPhase::kReturning) return false;
-    if (room_visits_.empty()) return false;
-    constexpr int kVisitAttempts = navigation2d::exploration::RoomVisitLedger::kVisitAttempts;
-    const double rx = Pose()->x;
-    const double ry = Pose()->y;
-    const auto room_seeds = room_visits_.Seeds();
-    auto goals = explorer_.UnvisitedSpaceGoals(
-        pose_feedback_.trail(), navigation2d::kOpenRetreat(),
-        navigation2d::kRoomPocketDepthM() * navigation2d::kRoomPocketDepthM(),
-        room_seeds, navigation2d::kOpenRetreat());
-    std::sort(goals.begin(), goals.end(), [&](const Goal& a, const Goal& b) {
-      return std::hypot(a.x - rx, a.y - ry) < std::hypot(b.x - rx, b.y - ry);
-    });
-    for (auto& goal : goals) {
-      const int attempt = room_visits_.TryVisit(goal);
-      if (attempt == 0) { continue; }
-      goal.yaw = std::atan2(goal.y - ry, goal.x - rx);
-      mission_.ResumeExploring();
-      tour_.Suspend();
-      if (StartNavigation(goal, false)) {
-        RCLCPP_INFO(get_logger(),
-                    "Visiting unentered space before return: goal=(%.2f, %.2f) area=%.2f m2 try=%d/%d",
-                    goal.x, goal.y, goal.information_gain, attempt, kVisitAttempts);
-        PublishStatus("NAVIGATING", "visiting a room not yet entered");
-        return true;
-      }
+    return navigation2d::exploration::TryUnenteredRoomVisits(
+        room_visits_, explorer_, pose_feedback_.trail(), Pose()->x, Pose()->y, *this);
+  }
+  void PrepareRoomVisit() override {
+    mission_.ResumeExploring();
+    tour_.Suspend();
+  }
+  bool NavigateRoomVisit(const Goal& goal) override { return StartNavigation(goal, false); }
+  void ReportRoomVisit(const Goal& goal, int attempt, bool accepted) override {
+    if (accepted) {
+      RCLCPP_INFO(get_logger(),
+                  "Visiting unentered space before return: goal=(%.2f, %.2f) area=%.2f m2 try=%d/%d",
+                  goal.x, goal.y, goal.information_gain, attempt,
+                  navigation2d::exploration::RoomVisitLedger::kVisitAttempts);
+      PublishStatus("NAVIGATING", "visiting a room not yet entered");
+    } else {
       RCLCPP_WARN(get_logger(), "Unentered space goal unplannable at (%.2f, %.2f)",
                   goal.x, goal.y);
     }
-    return false;
+  }
+  bool PlanDirectAfterHop(const Goal& home) override {
+    evidence_budget_.RequestTrailReplay(80.0);
+    return StartNavigation(home, true);
+  }
+  void DirectHomeAfterHopAccepted() override {
+    PublishStatus("RETURNING", "direct route home available after breadcrumb hop");
+  }
+  void FinishReturn(bool partial) override {
+    Finish(true, partial ? "returned home early; some frontiers left unreachable"
+                         : "frontiers exhausted and robot returned through final-map global path");
   }
 
   void HandleReturnRecovery(navigation2d::exploration::ReturnRecoveryMode mode,
@@ -1989,25 +1952,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     if (state.status == navigation2d::NavigationStatus::kSucceeded) {
       navigation_.Cancel();
       if (mission_.phase() == MissionPhase::kReturning || returning_) {
-        const Goal home = MakeHomeGoal();
-        const double home_dist =
-            std::hypot(Pose()->x - home.x, Pose()->y - home.y);
-        if (return_.breadcrumbs() && home_dist > .40) {
-          // A hop moved the robot past whatever blocked the direct route;
-          // go straight home from here when the map allows, and only keep
-          // retracing the trail when it still does not.
-          evidence_budget_.RequestTrailReplay(80.0);
-          if (StartNavigation(home, true)) {
-            return_.UseBreadcrumbs(false);
-            PublishStatus("RETURNING", "direct route home available after breadcrumb hop");
-            return;
-          }
-          if (StartBreadcrumbTowardHome()) return;
-        }
-        return_.UseBreadcrumbs(false);
-        Finish(true, return_.partial()
-                         ? "returned home early; some frontiers left unreachable"
-                         : "frontiers exhausted and robot returned through final-map global path");
+        return_.CompleteArrival(MakeHomeGoal(), Pose()->x, Pose()->y, *this);
+        return;
       } else if (mission_.phase() == MissionPhase::kCompleting) {
         explorer_.RecordAttempt(active_goal_, true);
         FinishCompleting();

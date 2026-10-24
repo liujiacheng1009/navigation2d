@@ -74,7 +74,9 @@ add_library(navigation2d_exploration_application STATIC
   application/exploration/entry_coordinator.cc
   application/exploration/recovery_policy.cc
   application/exploration/return_geometry.cc
-  application/exploration/return_coordinator.cc)
+  application/exploration/return_coordinator.cc
+  application/exploration/continuous_tour_handoff.cc
+  application/exploration/room_visit_execution.cc)
 target_compile_features(navigation2d_exploration_application PUBLIC cxx_std_20)
 target_link_libraries(navigation2d_exploration_application PUBLIC navigation2d_core)
 target_compile_options(navigation2d_exploration_application PRIVATE -Wall -Wextra -Wpedantic -Werror)

@@ -1,4 +1,6 @@
 #include "navigation2d/application/exploration/return_coordinator.h"
+
+#include <cmath>
 namespace navigation2d::exploration {
 namespace {
 constexpr int kMaximumEscapes = 5;
@@ -78,4 +80,21 @@ ReturnStep ReturnCoordinator::NextStep(std::span<const std::pair<double, double>
                                        const ExplorationGoal& active_goal) const {
   return SelectReturnStep(trail, home, {rx, ry}, active_goal, breadcrumbs_);
 }
+void ReturnCoordinator::CompleteArrival(const ExplorationGoal& home, double robot_x, double robot_y,
+                                        ReturnArrivalActions& actions) {
+  const double home_distance = std::hypot(robot_x - home.x, robot_y - home.y);
+  if (breadcrumbs_ && home_distance > .40) {
+    if (actions.PlanDirectAfterHop(home)) {
+      breadcrumbs_ = false;
+      actions.DirectHomeAfterHopAccepted();
+      return;
+    }
+    if (actions.StartBreadcrumbTowardHome()) {
+      return;
+    }
+  }
+  breadcrumbs_ = false;
+  actions.FinishReturn(partial_);
+}
+
 }  // namespace navigation2d::exploration
