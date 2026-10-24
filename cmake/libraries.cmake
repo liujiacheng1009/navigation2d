@@ -32,6 +32,7 @@ navigation2d_library(navigation2d_exploration
   exploration/exploration_policy.cc exploration/frontier_explorer.cc exploration/live_route_safety.cc
   exploration/frontier_tracks.cc exploration/frontier_visit_memory.cc exploration/region_scheduler.cc
   exploration/frontier_travel_graph.cc exploration/bootstrap_frontier_travel.cc
+  exploration/frontier_reachability.cc exploration/viewpoint_settlement.cc
   exploration/frontier_components.cc
   exploration/frontier_approach_viewpoints.cc
   exploration/frontier_viewpoint_search.cc

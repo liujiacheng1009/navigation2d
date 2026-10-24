@@ -357,3 +357,9 @@ The four search passes have strict priority; later scores cannot replace an
 accepted earlier pass. Ray gain uses 144 rays with range steps from planning
 resolution and area from observation resolution. Region/tour state, admission,
 tracking and debug association remain in FrontierExplorer at this checkpoint.
+
+`FrontierReachability` borrows planning/observation geometry for bounded safe
+region connectivity and reachable carved-unknown counting. They retain their
+distinct clearance contracts. `SettleViewpoint` adjusts only x/y on original
+free evidence, preserving goal identity, metadata, strict distance ties and
+existing invalid-input guards; FrontierExplorer retains the public facade.
