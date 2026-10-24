@@ -65,8 +65,12 @@ int RunEntryProbeReplay(int argc, char** argv) {
     node->ReplayObservePose(pose);
     node->ReplaySetPendingEntry(mouth);
     if (name == "cooling") {
-      node->recently_demoted_ = mouth;
-      node->recently_demoted_until_ = node->now() + rclcpp::Duration::from_seconds(14.);
+      if constexpr (requires { node->DemoteViewpointForSeconds(mouth, 14.); }) {
+        node->DemoteViewpointForSeconds(mouth, 14.);
+      } else {
+        node->recently_demoted_ = mouth;
+        node->recently_demoted_until_ = node->now() + rclcpp::Duration::from_seconds(14.);
+      }
     }
     const auto begin = std::chrono::steady_clock::now();
     const bool driving = node->StartEntryProbe();

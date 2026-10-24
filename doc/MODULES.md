@@ -272,3 +272,35 @@ The differential driver covers 960 frames across two radii, four maps and six
 route shapes, including empty intervals and sub/above-threshold goal changes.
 It compares commands, collision verdicts and all maneuver diagnostics against
 independently frozen headers/core; benchmark mode must preserve the same trace.
+
+### Viewpoint rejection and entry execution
+
+`ViewpointRejections` owns the soft-scrape anchor/count and the single timed
+viewpoint demotion. `RejectOpenWallViewpoint` owns cooling-before-mutation,
+soft tour rotation and hard failure accounting. Clock conversion and logging
+remain adapters; the application stores nanoseconds, without a ROS clock.
+
+`ExecuteEntryCrawl` owns the arrival / segment check / command / retry order;
+`EntryCoordinator` still owns the mouth, attempts and tick counter. The last
+crawl command is published before stopping the crawl and testing retry budget.
+`ExecutionCommand` owns doorway velocity compensation and the final forward
+lidar body gate. Evidence is borrowed synchronously; map checks remain lazy.
+
+```mermaid
+flowchart TD
+  Tick[Mission tick] --> Active{Navigation session?}
+  Active -->|no; active crawl| Arrival{Inside mouth?}
+  Arrival -->|yes| Ack[Acknowledge entry]
+  Arrival -->|no| Segment{Body / segment blocked?}
+  Segment -->|yes| Abandon[Leave unresolved mouth]
+  Segment -->|no| Publish[Publish bounded crawl command]
+  Publish --> Budget{Final tick? Retry budget?}
+  Budget --> Retry[Probe or abandon]
+  Active -->|yes| Policy[Navigation command + safety hold]
+  Policy --> Crawl[Optional entry compensation]
+  Crawl --> Gate[Final forward lidar gate]
+  Gate --> Output[ROS command publication]
+```
+
+These are execution boundaries, not a completed mission abstraction. The ROS
+node still owns substantial selection, navigation outcome and recovery flow.
