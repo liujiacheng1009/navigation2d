@@ -1,4 +1,6 @@
 #include "navigation2d/application/exploration/entry_completion.h"
+
+#include "navigation2d/exploration/frontier_explorer.h"
 namespace navigation2d::exploration {
 void CompleteEntryArrival(EntryCoordinator& entry, FrontierExplorer& explorer,
                           RoomVisitLedger& ledger, EntryActions& actions, EntryArrival arrival,

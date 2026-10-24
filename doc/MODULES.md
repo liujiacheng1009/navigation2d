@@ -141,3 +141,34 @@ real navigation, captured outputs and an independent frozen source/header/core
 baseline. Each case owns its ROS context, including early mission shutdown.
 It uses the controlled explorer fixture's 0.05 m map and advances past bootstrap.
 These controlled probes do not replace complete exploration or board validation.
+
+### Goal selection ownership
+
+`SelectLockedEntry` gates ordinary tour selection. `EntryCoordinator` owns the
+mouth lock, pending target, attempts and crawl ticks. Its real-door policy keeps
+a latched easy mouth valid after map flooding; live fallback checks corridor
+geometry before measuring the gap. A failed probe may consume attempts or clear
+the lock, so selection reads the remaining budget after the action returns.
+`EntrySelectionResult` explicitly distinguishes handled work from continuing the
+tour. A missing pose cannot acknowledge arrival.
+
+`SelectionExhaustion` owns the empty/no-executable cycle counters and last
+meaningful known-cell count. A 500-cell gain resets the blocked budget and
+reopens residual probes; single-cell changes do not. The existing 2/3/6-cycle
+wait and 12-cycle mature-empty confirmation remain unchanged. The stop command
+precedes selection status and route clearing; range sensing remains lazy. The
+ROS adapter owns time and publications, while the executor owns their order.
+Neither executor retains action references or borrows a mutable node context.
+
+```mermaid
+flowchart TD
+  Select[Select next goal] --> Entry[Resolve locked entry]
+  Entry -->|handled| Yield[Return to event loop]
+  Entry -->|continue| Tour[Try committed tour]
+  Tour -->|accepted| Drive[Track navigation]
+  Tour -->|exhausted| Stop[Publish stop]
+  Stop --> Evidence[Update meaningful evidence budget]
+  Evidence --> Room[Check active-room and residual work]
+  Room --> Probe[Bounded completion probe]
+  Room --> Wait[Wait, rescue, or return]
+```

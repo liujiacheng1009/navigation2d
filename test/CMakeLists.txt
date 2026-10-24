@@ -79,3 +79,6 @@ navigation2d_assert_test(navigation_configuration_test navigation2d_core)
 target_link_libraries(navigation_configuration_test PRIVATE yaml-cpp)
 target_compile_definitions(navigation_configuration_test PRIVATE
   NAVIGATION2D_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+
+navigation2d_assert_test(entry_selection_test navigation2d_exploration_application)
+navigation2d_assert_test(selection_exhaustion_test navigation2d_exploration_application)

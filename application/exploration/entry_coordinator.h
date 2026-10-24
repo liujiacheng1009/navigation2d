@@ -4,9 +4,11 @@
 #include <optional>
 #include <utility>
 
-#include "navigation2d/exploration/frontier_explorer.h"
-#include "navigation2d/geometry/pose_2d.h"
+#include "navigation2d/exploration/frontier_types.h"
 #include "navigation2d/geometry/twist_2d.h"
+namespace navigation2d {
+class FrontierExplorer;
+}
 namespace navigation2d::exploration {
 struct EntryEvidence {
   std::size_t known_cells;
@@ -28,6 +30,14 @@ class EntryCoordinator {
   static bool SameMouth(const ExplorationGoal& a, const ExplorationGoal& b);
   void Lock(const ExplorationGoal& mouth, bool easy, EntryEvidence evidence);
   void Clear();
+  // Lock-time evidence and live fallback share the real-door policy. A latched
+  // easy mouth survives later map flooding that removes its corridor label.
+  void LockObserved(const ExplorationGoal&, const FrontierExplorer&, EntryEvidence);
+  [[nodiscard]] bool EasyNow(const FrontierExplorer&) const;
+  [[nodiscard]] int AttemptBudget(const FrontierExplorer& explorer) const {
+    return EasyNow(explorer) ? 14 : 6;
+  }
+  [[nodiscard]] static bool Passable(const ExplorationGoal&, const FrontierExplorer&);
   void SetPending(std::optional<ExplorationGoal> goal) { pending_ = std::move(goal); }
   void ClearPending() { pending_.reset(); }
   void CountAttempt() { ++attempts_; }

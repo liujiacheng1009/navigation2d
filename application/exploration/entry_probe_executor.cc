@@ -4,6 +4,7 @@
 
 #include "navigation2d/application/exploration/entry_completion.h"
 #include "navigation2d/application/exploration/entry_target.h"
+#include "navigation2d/exploration/frontier_explorer.h"
 #include "navigation2d/geometry/robot_geometry.h"
 namespace navigation2d::exploration {
 namespace {

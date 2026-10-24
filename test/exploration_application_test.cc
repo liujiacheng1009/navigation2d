@@ -1,4 +1,6 @@
 #include <cmath>
+
+#include "navigation2d/exploration/frontier_explorer.h"
 #include <limits>
 #include <stdexcept>
 

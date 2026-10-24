@@ -1,5 +1,7 @@
 #include "navigation2d/application/exploration/entry_probe_executor.h"
 
+#include "navigation2d/exploration/frontier_explorer.h"
+
 #include <cmath>
 #include <stdexcept>
 #include <string>

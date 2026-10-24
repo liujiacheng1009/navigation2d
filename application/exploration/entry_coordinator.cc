@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "navigation2d/exploration/frontier_explorer.h"
 #include "navigation2d/geometry/robot_geometry.h"
 namespace navigation2d::exploration {
 bool EntryCoordinator::SameMouth(const ExplorationGoal& a, const ExplorationGoal& b) {
@@ -16,6 +17,37 @@ void EntryCoordinator::Lock(const ExplorationGoal& mouth, bool easy, EntryEviden
   crawl_ticks_ = 0;
   easy_ = easy;
   evidence_ = evidence;
+}
+void EntryCoordinator::LockObserved(const ExplorationGoal& mouth, const FrontierExplorer& explorer,
+                                    EntryEvidence evidence) {
+  const bool easy = explorer.IsCorridorMouth(mouth.frontier_x, mouth.frontier_y) &&
+                    explorer.MouthGapWidth(mouth.frontier_x, mouth.frontier_y) >= .50 &&
+                    explorer.MouthGapWidth(mouth.frontier_x, mouth.frontier_y) <= 1.40;
+  Lock(mouth, easy, evidence);
+}
+bool EntryCoordinator::EasyNow(const FrontierExplorer& explorer) const {
+  const auto* mouth = ActiveMouth();
+  if (!mouth) {
+    return false;
+  }
+  if (locked_ && easy_) {
+    return true;
+  }
+  if (!explorer.IsCorridorMouth(mouth->frontier_x, mouth->frontier_y)) {
+    return false;
+  }
+  const double gap = explorer.MouthGapWidth(mouth->frontier_x, mouth->frontier_y);
+  return gap >= .50 && gap <= 1.40;
+}
+bool EntryCoordinator::Passable(const ExplorationGoal& goal, const FrontierExplorer& explorer) {
+  if (!std::isfinite(goal.frontier_x) || !std::isfinite(goal.frontier_y)) {
+    return false;
+  }
+  if (!explorer.IsCorridorMouth(goal.frontier_x, goal.frontier_y)) {
+    return false;
+  }
+  const double gap = explorer.MouthGapWidth(goal.frontier_x, goal.frontier_y);
+  return gap >= .35 && gap <= 1.40;
 }
 void EntryCoordinator::Clear() {
   locked_.reset();

@@ -1,5 +1,7 @@
 #include "navigation2d/application/exploration/entry_completion.h"
 
+#include "navigation2d/exploration/frontier_explorer.h"
+
 #include <cstdint>
 #include <stdexcept>
 #include <string>

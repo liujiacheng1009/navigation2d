@@ -34,6 +34,8 @@
 #include "navigation2d/application/exploration/recovery_session.h"
 #include "navigation2d/application/exploration/entry_coordinator.h"
 #include "navigation2d/application/exploration/entry_probe_executor.h"
+#include "navigation2d/application/exploration/entry_selection.h"
+#include "navigation2d/application/exploration/selection_exhaustion.h"
 #include "navigation2d/application/exploration/entry_completion.h"
 #include "navigation2d/application/exploration/tour_execution.h"
 #include "navigation2d/ros/exploration/entry_reporter.h"
@@ -72,6 +74,8 @@ using Goal = navigation2d::ExplorationGoal;
 class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::ReturnActions,
                                  private navigation2d::exploration::EntryActions,
+                                 private navigation2d::exploration::EntrySelectionActions,
+                                 private navigation2d::exploration::SelectionExhaustionActions,
                                  private navigation2d::exploration::TourConstraints,
                                  private navigation2d::exploration::DispatchActions,
                                  private navigation2d::exploration::CompletionActions,
@@ -430,10 +434,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   void LockEntryMouth(const Goal& mouth) override {
-    const bool easy = explorer_.IsCorridorMouth(mouth.frontier_x, mouth.frontier_y) &&
-        explorer_.MouthGapWidth(mouth.frontier_x, mouth.frontier_y) >= .50 &&
-        explorer_.MouthGapWidth(mouth.frontier_x, mouth.frontier_y) <= 1.40;
-    entry_.Lock(mouth, easy, {KnownCells(), map_revision_});
+    entry_.LockObserved(mouth, explorer_, {KnownCells(), map_revision_});
   }
 
   void ClearEntryMouthLock() override { entry_.Clear(); }
@@ -444,7 +445,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   // far sibling while the kitchen mouth was only briefly demoted (冤枉路).
   // Far mouths that were already queued stay, but local unfinished mouths
   // are rotated to the front so we do not leave the pocket for a detour.
-  void AbandonLockedEntryMouth(const std::string& reason) {
+  void AbandonLockedEntryMouth(const std::string& reason) override {
     Goal mouth = entry_.pending().value_or(
         entry_.locked().value_or(active_goal_));
     // Do not 1.1 m / 4000-cell blacklist the frontier: that hid the sealed
@@ -464,35 +465,20 @@ class AutonomousExplorer final : public rclcpp::Node,
     return navigation2d::exploration::EntryCoordinator::SameMouth(a, b);
   }
 
-  // Real door/alcove only: CorridorMouthAt AND throat in [0.50, 1.40] m.
-  // Open-room free span (live gap=1.65 along a wall) is NOT a mouth — treating
-  // it as "easy door" locked entry and thrash-abandoned the wrong place.
-  // Once locked, trust the latch: flooded throats flip IsCorridorMouth false.
-  bool EasyLockedMouth() const {
-    if (!entry_.pending() && !entry_.locked()) return false;
-    if (entry_.locked() && entry_.easy()) return true;
-    const Goal& mouth = *entry_.ActiveMouth();
-    if (!explorer_.IsCorridorMouth(mouth.frontier_x, mouth.frontier_y))
-      return false;
-    const double gap =
-        explorer_.MouthGapWidth(mouth.frontier_x, mouth.frontier_y);
-    return gap >= .50 && gap <= 1.40;
-  }
+  bool EasyLockedMouth() const { return entry_.EasyNow(explorer_); }
 
   bool PassableMouthGoal(const Goal& goal) const override {
-    if (!std::isfinite(goal.frontier_x) || !std::isfinite(goal.frontier_y))
-      return false;
-    if (!explorer_.IsCorridorMouth(goal.frontier_x, goal.frontier_y))
-      return false;
-    const double gap =
-        explorer_.MouthGapWidth(goal.frontier_x, goal.frontier_y);
-    return gap >= .35 && gap <= 1.40;
+    return navigation2d::exploration::EntryCoordinator::Passable(goal, explorer_);
   }
 
-  int EntryAttemptBudget() const {
-    // Wide free mouths must not be abandoned after a few PathCuts rejects —
-    // live log: gap=2.15 failed_goals→69 while the opening stayed clear.
-    return EasyLockedMouth() ? 14 : 6;
+  int EntryAttemptBudget() const { return entry_.AttemptBudget(explorer_); }
+
+  void DeferEntrySelection(navigation2d::exploration::EntrySelectionDelay delay) override {
+    next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+    PublishStatus("COMPLETING",
+        delay == navigation2d::exploration::EntrySelectionDelay::kWideMouthCrawl
+            ? "wide mouth blocked; crawling mid-gap instead of abandon"
+            : "entry plan rejected; budget remains");
   }
 
   // Promote only true corridor mouths into locked entry.
@@ -532,7 +518,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     recently_demoted_until_ = now() + rclcpp::Duration::from_seconds(seconds);
   }
   void MarkRegionFinishPending() override { pending_region_finish_ = true; }
-  void AcknowledgeEntry(navigation2d::exploration::EntryArrival arrival) {
+  void AcknowledgeEntry(navigation2d::exploration::EntryArrival arrival) override {
     navigation2d::exploration::CompleteEntryArrival(entry_, explorer_, room_visits_, *this,
         arrival, Pose()->pose.position.x, Pose()->pose.position.y);
   }
@@ -598,7 +584,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     NoteKnownProgress(known);
   }
 
-  void NoteKnownProgress(std::size_t known) {
+  void NoteKnownProgress(std::size_t known) override {
     if (last_progress_known_cells_ == 0 || known >= last_progress_known_cells_ + 500) {
       last_progress_known_cells_ = known;
       last_progress_time_ = now();
@@ -741,7 +727,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   bool ShouldKeepWaitingForFrontiers() const override {
-    return completion_.ShouldWait(explorer_.HasExploringWork(), no_executable_frontier_cycles_);
+    return completion_.ShouldWait(explorer_.HasExploringWork(), selection_exhaustion_.blocked_cycles());
   }
 
   bool TipPinchedNow() const override {
@@ -772,7 +758,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     cooled_signatures_.clear();
     explorer_.ClearFailedBlacklist();
     completion_.ResetBudget();
-    no_executable_frontier_cycles_ = 0;
+    selection_exhaustion_.ResetBlocked();
     reject_streak_ = 0;
     ClearEntryMouthLock();
     navigation_.Cancel();
@@ -1021,37 +1007,11 @@ class AutonomousExplorer final : public rclcpp::Node,
       BeginReturn(return_.partial());
       return;
     }
-    // Locked mouth owns the robot until crossed or hard-failed. Do not rebuild
-    // a living-room tour while the kitchen threshold is still open.
-    if (entry_.locked() && !entry_.pending())
-      entry_.SetPending(entry_.locked());
-    if (entry_.pending()) {
-      if (EntryProbeSatisfied()) {
-        AcknowledgeEntry(navigation2d::exploration::EntryArrival::kSelection);
-        return;
-      }
-      const int before_attempts = entry_.attempts();
-      if (before_attempts < EntryAttemptBudget() && StartEntryProbe()) return;
-      if (EasyLockedMouth() && entry_.attempts() < EntryAttemptBudget()) {
-        // Keep the lock on a wide mouth; open-loop crawl mid-gap instead of
-        // abandoning into a tour loop (live: "entry blocked" spam).
-        if (entry_.crawl_ticks() == 0) entry_.StartCrawl();
-        next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
-        PublishStatus("COMPLETING",
-                      "wide mouth blocked; crawling mid-gap instead of abandon");
-        return;
-      }
-      if (entry_.attempts() > before_attempts &&
-          entry_.attempts() < EntryAttemptBudget()) {
-        next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
-        PublishStatus("COMPLETING", "entry plan rejected; budget remains");
-        return;
-      }
-      // Plan failed at the mouth: leave it and continue the tour from HERE.
-      // Trail retreat "then retry" was the post-脱困 折返 (drive back, then
-      // re-approach the same doorway).
-      AbandonLockedEntryMouth(
-          "entry blocked; leave mouth and continue tour (no reverse)");
+    if ((entry_.pending() || entry_.locked()) &&
+        navigation2d::exploration::SelectLockedEntry(
+            entry_, explorer_, TourRobot(), active_goal_, *this) ==
+            navigation2d::exploration::EntrySelectionResult::kHandled) {
+      return;
     }
     // Drop mouths the lidar already cleared; keep the remaining committed
     // order. Rebuilding the tour on every SelectNextGoal reordered T1..Tn and
@@ -1100,9 +1060,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         continue;
       }
       if (StartNavigation(goal, false)) {
-        empty_frontier_cycles_ = 0;
-        frontier_probe_until_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
-        frontier_probe_count_ = 0;
+        selection_exhaustion_.GoalAccepted();
         reject_streak_ = 0;
         mission_.ResumeExploring();
         completion_.ResetBudget();
@@ -1203,111 +1161,23 @@ class AutonomousExplorer final : public rclcpp::Node,
       cooled_signatures_.clear();
       return;
     }
-    geometry_msgs::msg::Twist stop;
-    command_publisher_->publish(stop);
-    if (!tour_.goals().empty() || attempted > 0 || explorer_.raw_frontier_cells() > 0) {
-      const std::size_t known_now = KnownCells();
-      // One newly marked cell is scan noise, not map progress.  Resetting the
-      // no-executable budget on +1 kept warehouse leftovers spinning until
-      // the mission timeout without ever starting the home path.
-      constexpr std::size_t kMeaningfulKnownGrowth = 500;
-      if (known_now >= last_no_executable_known_cells_ + kMeaningfulKnownGrowth) {
-        no_executable_frontier_cycles_ = 0;
-        last_no_executable_known_cells_ = known_now;
-        frontier_probe_count_ = 0;
-        // New map evidence may open a tip the previous leftover missed.
-        completion_.ResetBudget();
-      }
-      NoteKnownProgress(known_now);
-      ++no_executable_frontier_cycles_;
-      const std::size_t reachable_unknown = explorer_.ReachableUnknownCells(
-          Pose()->pose.position.x, Pose()->pose.position.y);
-      // Nominated mouths that all fail StartNavigation are not executable
-      // either. Requiring candidates==0 skipped leftover completion and
-      // returned PARTIAL while the same 3 unplannable T-labels looped.
-      // Empty tour with candidates>0 is the BLOCKED-DFS trap: mouths exist but
-      // Order wiped them — treat as no-executable so completing/entry runs.
-      const bool tour_unplannable =
-          tour_.goals().empty() && attempted > 0;
-      const bool tour_empty_with_candidates =
-          tour_.goals().empty() && attempted == 0 &&
-          explorer_.candidate_frontier_goals() > 0;
-      const bool no_executable_mouths =
-          explorer_.candidate_frontier_goals() == 0 || tour_unplannable ||
-          tour_empty_with_candidates;
-      // Stay for a door only when this room still has a goal to run.
-      // Zero candidates means the room is finished; re-entering it here
-      // put the stack back and skipped coverage.
-      if (explorer_.candidate_frontier_goals() > 0 &&
-          explorer_.ActiveHoldsPassage()) {
-        QueueActiveRegionFinish();
-        if (!tour_.goals().empty()) {
-          next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
-          PublishStatus("SELECTING",
-                        "door still open; staying in the active room");
-          return;
-        }
-      }
-      if (no_executable_mouths && explorer_.ShouldCoverResiduals()) {
-        if (completion_.CanProbe()) {
-          StartCompletingProbe();
-          return;
-        }
-        // Completing probe can fail while sealed mouths still open into
-        // unknown rooms on later map updates. Returning here left rooms
-        // unexplored with PARTIAL and unresolved frontiers.
-        if (TipPinchedNow() &&
-            TryRescueDistantMouths("no-executable while tip-pinched"))
-          return;
-        if (ShouldKeepWaitingForFrontiers()) {
-          PublishStatus("SELECTING",
-                        "openable unknown remains; waiting for map update");
-          return;
-        }
-        BeginReturnOrRescue(reachable_unknown > 0 ||
-                            explorer_.raw_frontier_cells() > 0);
-        return;
-      }
-      // Failed mouths were already RecordAttempt'd. Wait for the next map
-      // tick instead of a busy reject/rebuild loop (that was the hesitation).
-      ClearDisplayedGoal();
-      ClearPublishedNavPaths();
-      PublishStatus("SELECTING",
-                    "frontiers locally blocked; waiting for map update");
-      // Tip / open aisle: do not sit through a long empty budget — peel and
-      // rescue distant mouths (kitchen) before PARTIAL.
-      const int wait_budget =
-          TipPinchedNow() ? 2
-                          : ((attempted > 0 &&
-              navigation2d::AxisSwingClear(ReadBodyRanges().front))
-                                 ? 3
-                                 : 6);
-      if (no_executable_frontier_cycles_ >= wait_budget) {
-        if (TipPinchedNow() &&
-            TryRescueDistantMouths("wait-budget tip; rescue distant"))
-          return;
-        if (completion_.CanProbe() && explorer_.ShouldCoverResiduals()) {
-          StartCompletingProbe();
-          return;
-        }
-        if (ShouldKeepWaitingForFrontiers()) return;
-        BeginReturnOrRescue(true);
-      }
-      return;
-    }
-    ++empty_frontier_cycles_;
-    no_executable_frontier_cycles_ = 0;
-    // A mapper can briefly publish a small, fully-known crop before the next
-    // scan expands it.  Never report a zero-goal mission as complete from
-    // that bootstrap artifact: wait for enough observed support unless an
-    // actual frontier visit has already occurred.
-    constexpr std::size_t kMinimumInitialCoverageCells = 25000;
-    const bool map_is_mature = KnownCells() >= kMinimumInitialCoverageCells ||
-        explorer_.completed_goals() > 0;
-    PublishStatus("SELECTING", map_is_mature ?
-        "no reachable frontier; confirming completion" :
-        "initial map still growing; waiting for frontiers");
-    if (map_is_mature && empty_frontier_cycles_ >= 12) BeginReturn();
+    selection_exhaustion_.Resolve(explorer_, completion_, tour_, {*TourRobot(), attempted}, *this);
+  }
+
+  void StopSelectionMotion() override {
+    command_publisher_->publish(geometry_msgs::msg::Twist{});
+  }
+  void DeferBlockedSelection(const char* message) override {
+    next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+    SelectionStatus(message);
+  }
+  void SelectionStatus(const char* message) override { PublishStatus("SELECTING", message); }
+  void ClearBlockedSelection() override {
+    ClearDisplayedGoal();
+    ClearPublishedNavPaths();
+  }
+  bool SelectionFrontSwingClear() const override {
+    return navigation2d::AxisSwingClear(ReadBodyRanges().front);
   }
 
   bool HandoffToNextTourGoal() {
@@ -1454,7 +1324,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     }
   }
 
-  void BeginReturn(bool force_return = false) {
+  void BeginReturn(bool force_return = false) override {
     if (!mission_.home()) return;
     if (mission_.phase() == MissionPhase::kReturning && navigation_.has_session()) return;
     if (TryVisitUnenteredSpace()) return;
@@ -1988,7 +1858,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       return_.ResetEscapes();
       escape_.ClearReturnIntent();
       const auto initial_known = KnownCells();
-      last_no_executable_known_cells_ = initial_known;
+      selection_exhaustion_.InitializeKnown(initial_known);
       last_progress_known_cells_ = initial_known;
       last_progress_time_ = now();
       const auto bootstrap_deadline = now() + rclcpp::Duration::from_seconds(8.0);
@@ -2754,9 +2624,7 @@ class AutonomousExplorer final : public rclcpp::Node,
 
   double goal_timeout_s_ = 55.;
   std::uint64_t map_revision_ = 0;
-  int empty_frontier_cycles_ = 0;
-  int no_executable_frontier_cycles_ = 0;
-  std::size_t last_no_executable_known_cells_ = 0;
+  navigation2d::exploration::SelectionExhaustion selection_exhaustion_;
   int latest_map_replans_ = 0;
   int cut_replans_ = 0;
   bool pending_region_finish_ = false;
@@ -2819,10 +2687,8 @@ class AutonomousExplorer final : public rclcpp::Node,
   navigation2d::exploration::TourExecution tour_;
   rclcpp::Time goal_started_{0, 0, RCL_ROS_TIME};
   rclcpp::Time next_selection_{0, 0, RCL_ROS_TIME};
-  rclcpp::Time frontier_probe_until_{0, 0, RCL_ROS_TIME};
   rclcpp::Time velocity_stamp_{0, 0, RCL_ROS_TIME};
   rclcpp::Time last_debug_publish_{0, 0, RCL_ROS_TIME};
-  int frontier_probe_count_ = 0;
   std::optional<nav_msgs::msg::OccupancyGrid> map_;
   std::optional<sensor_msgs::msg::LaserScan> scan_;
   navigation2d::exploration_ros::PoseFeedback pose_feedback_;
