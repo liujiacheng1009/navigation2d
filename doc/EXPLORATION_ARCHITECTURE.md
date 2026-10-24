@@ -9,7 +9,7 @@ state machine, navigation acceptance orchestration and command publication.
 - `navigation2d_core`: existing planners/controllers and `NavigationSystem`.
   `AlgorithmRegistry` assembles implementations without changing exploration.
 - `navigation2d_exploration_application`: ROS-free snapshot preparation, route
-  validation, navigation profiles, entry state, room-visit accounting, recovery
+  validation, navigation session lifecycle/profiles, debug overlays, entry state, room-visit accounting, recovery
   selection, return geometry and telemetry serialization. Links core only.
 - `navigation2d_exploration_io`: final artifact persistence, outside algorithms.
 - `sweepnav_autonomous_explorer`: ROS adaptation and remaining mission
@@ -32,6 +32,55 @@ priority while its orchestration is migrated in a later step.
 
 `NavigationTelemetry` only captures display data. The last route signature,
 planning rejection reason and path margin used by decisions remain separate.
+
+## Tentative and accepted navigation sessions
+
+`NavigationSession` owns the concrete `NavigationSystem` and algorithm registry.
+It exposes no mutable algorithm pointer and has no ROS, file-writing or clock
+ownership. The existing snapshot JSON remains its initialization input; in-memory
+map injection is still deferred. The node supplies local-frame pose/scan, measured
+velocity and the same simulation-time seconds as before.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Empty
+    Empty --> Preparing: Begin / construct algorithms and set goal
+    Preparing --> Ready: Probe / initial route available or within goal tolerance
+    Preparing --> Empty: Cancel / no route or initialization rejected
+    Ready --> Active: live map and clearance checks pass, then Accept
+    Ready --> Empty: Cancel / route rejected
+    Active --> Preparing: Begin / replace execution for replanning
+    Ready --> Preparing: Begin / replace tentative plan
+    Active --> Active: Step / existing navigation core and safety pipeline
+    Active --> Empty: Cancel / stop owning algorithms
+```
+
+`Probe` retains the full `NavigationState`, with an explicit initial failure kind
+(no route, start occupied, goal occupied) and the original diagnostic string.
+This classification currently interprets existing backend diagnostic text; it is
+not yet a structured error contract for every planner. A failed probe remains
+preparing until cancelled. `Step` is rejected before acceptance and after
+cancellation. Cancellation distinguishes no instance, discarded preparation and
+stopped active execution; publishing a physical stop remains the adapter's job.
+No asynchronous cancellation or live plugin replacement is introduced.
+
+The node still performs live obstacle/clearance rejection and bounded retries
+before `Accept`, and commits region/recovery bookkeeping afterwards. Continuous
+handoff temporarily moves the previous session aside, prepares the candidate in
+the moved-from object, and restores the old controller state on failure. Registry
+ownership deliberately remains usable in both objects during this transaction.
+No controller reconstruction, sensor integration, rejection priority or extra
+control cycle is added at acceptance. Plugin factories are injectable at this
+session boundary as well as at the core constructor.
+
+## Display-only overlays
+
+`debug_overlay` paints the planning-input and inflated grids into adapter-owned
+buffers, without allocation in those functions. ROS message construction, stamps
+and publication remain in the node. Unknown cells remain unknown under inflation;
+under-body display free space does not modify the observation or execution mask.
+Frontier debug JSON preserves its schema, decimal formatting, order and original
+4000-cell sampling stride. These outputs carry no navigation authority.
 
 ## Planning evidence and memory
 
@@ -89,6 +138,11 @@ New tests use runtime checks that remain active in Release:
 - `algorithm_registry_test`: built-in construction, 16 planner/controller smoke
   combinations on an empty map, independent custom implementations through a
   real session, invalid/duplicate/null registrations and input capabilities.
+- `exploration_navigation_session_test`: acceptance gate, core command equality,
+  occupied start/goal, no route, injected initialization failure, cancellation,
+  moved-from reuse and rollback of continuous handoff.
+- `exploration_debug_overlay_test`: unknown/occupied preservation, input immutability,
+  inflation support/decay, exact frontier JSON and sampling above the display cap.
 - `exploration_application_test`: profiles, safety evidence boundaries, route
   remapping, entry/retry ownership, recovery commands and return choices.
 - `exploration_snapshot_replay_test`: eight frozen original-node maps and a

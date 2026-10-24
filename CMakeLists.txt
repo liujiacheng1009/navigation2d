@@ -102,6 +102,8 @@ target_link_libraries(navigation_recovery_test PRIVATE navigation2d_core)
 add_test(NAME navigation_recovery_test COMMAND navigation_recovery_test)
 
 add_library(navigation2d_exploration_application STATIC
+  application/exploration/debug_overlay.cc
+  application/exploration/navigation_session.cc
   application/exploration/navigation_profile.cc
   application/exploration/planning_snapshot.cc
   application/exploration/route_validator.cc
@@ -143,3 +145,11 @@ target_compile_options(navigation2d_exploration_io PRIVATE -Wall -Wextra -Wpedan
 add_executable(exploration_artifacts_test test/exploration_artifacts_test.cc)
 target_link_libraries(exploration_artifacts_test PRIVATE navigation2d_exploration_io)
 add_test(NAME exploration_artifacts_test COMMAND exploration_artifacts_test)
+
+add_executable(exploration_navigation_session_test test/exploration_navigation_session_test.cc)
+target_link_libraries(exploration_navigation_session_test PRIVATE navigation2d_exploration_application)
+add_test(NAME exploration_navigation_session_test COMMAND exploration_navigation_session_test)
+
+add_executable(exploration_debug_overlay_test test/exploration_debug_overlay_test.cc)
+target_link_libraries(exploration_debug_overlay_test PRIVATE navigation2d_exploration_application)
+add_test(NAME exploration_debug_overlay_test COMMAND exploration_debug_overlay_test)
