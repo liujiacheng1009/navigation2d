@@ -1,3 +1,5 @@
+#include "navigation2d/application/navigation_configuration.h"
+#include "navigation2d/application/algorithm_registry.h"
 #include <chrono>
 #include <algorithm>
 #include <iomanip>
@@ -22,7 +24,7 @@ double Percentile(std::vector<double> samples, double quantile) {
 int main(int argc, char** argv) try {
   if (argc < 10) throw std::runtime_error("usage: navigation2d_benchmark CONFIG CASE WORLD SX SY SYAW GX GY GYAW [--obstacle APPEAR DISAPPEAR X Y] [--moving-obstacle APPEAR DISAPPEAR X Y VX VY]...");
   const auto started = std::chrono::steady_clock::now();
-  auto config = navigation2d::NavigationConfig::Load(argv[1]);
+  auto config = navigation2d::LoadNavigationConfig(argv[1], *navigation2d::AlgorithmRegistry::Builtins());
   std::vector<navigation2d::simulation::ObstacleEvent> obstacles;
   for (int i = 10; i < argc;) {
     const std::string option = argv[i];

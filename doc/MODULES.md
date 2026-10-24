@@ -139,5 +139,5 @@ flowchart TD
 The direct completion replay exercises empty/residual/blocked/finish paths with
 real navigation, captured outputs and an independent frozen source/header/core
 baseline. Each case owns its ROS context, including early mission shutdown.
-It uses the canonical 0.05 m map configuration and advances past bootstrap.
+It uses the controlled explorer fixture's 0.05 m map and advances past bootstrap.
 These controlled probes do not replace complete exploration or board validation.

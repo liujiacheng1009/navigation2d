@@ -32,7 +32,12 @@ target_link_libraries(navigation2d_geometry PUBLIC navigation2d_values)
 target_compile_options(navigation2d_geometry PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 add_library(navigation2d_core STATIC
-  application/algorithm_registry.cc application/navigation_config.cc costmap/grid_2d.cc costmap/layered_costmap.cc
+  application/algorithm_registry.cc application/builtin_algorithms.cc
+  application/navigation_config.cc application/navigation_configuration.cc
+  configuration/navigation_yaml.cc configuration/planning_yaml.cc
+  configuration/control_yaml.cc configuration/safety_yaml.cc
+  configuration/navigation_validation.cc
+  costmap/grid_2d.cc costmap/layered_costmap.cc
   planning/search_core.cc planning/incremental_search.cc planning/collision_checker.cc
   planning/obstacle_heuristic.cc planning/grid_search.cc
   planning/motion_primitives.cc planning/path_smoother.cc planning/dijkstra_planner.cc planning/astar_planner.cc

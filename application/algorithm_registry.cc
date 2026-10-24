@@ -3,15 +3,6 @@
 #include <stdexcept>
 #include <utility>
 
-#include "navigation2d/control/dwa_controller.h"
-#include "navigation2d/control/mpc_controller.h"
-#include "navigation2d/control/mppi_controller.h"
-#include "navigation2d/control/regulated_pure_pursuit.h"
-#include "navigation2d/planning/astar_planner.h"
-#include "navigation2d/planning/dijkstra_planner.h"
-#include "navigation2d/planning/state_lattice_planner.h"
-#include "navigation2d/planning/theta_star_planner.h"
-
 namespace navigation2d {
 
 void AlgorithmRegistry::RegisterPlanner(std::string id, PlannerFactory factory,
@@ -82,34 +73,6 @@ PlannerCapabilities AlgorithmRegistry::PlannerTraits(const std::string& id) cons
     throw std::runtime_error("unknown planner: " + id);
   }
   return found->second.capabilities;
-}
-
-std::shared_ptr<const AlgorithmRegistry> AlgorithmRegistry::Builtins() {
-  static const auto registry = [] {
-    auto result = std::make_shared<AlgorithmRegistry>();
-    result->RegisterPlanner("dijkstra", [](const auto& c) {
-      return std::make_unique<DijkstraPlanner>(c.robot_radius);
-    });
-    result->RegisterPlanner(
-        "astar", [](const auto& c) { return std::make_unique<AStarPlanner>(c.robot_radius); });
-    result->RegisterPlanner(
-        "theta_star",
-        [](const auto& c) { return std::make_unique<ThetaStarPlanner>(c.robot_radius); },
-        {false, false, true});
-    result->RegisterPlanner("state_lattice",
-                            [](const auto& c) { return std::make_unique<StateLatticePlanner>(c); },
-                            {true, true, true});
-    result->RegisterController(
-        "rpp", [](const auto& c) { return std::make_unique<RegulatedPurePursuit>(c); });
-    result->RegisterController("dwa",
-                               [](const auto& c) { return std::make_unique<DwaController>(c); });
-    result->RegisterController("mppi",
-                               [](const auto& c) { return std::make_unique<MppiController>(c); });
-    result->RegisterController(
-        "mpc", [](const auto& c) { return std::make_unique<MpcController>(c); }, {true, true});
-    return std::shared_ptr<const AlgorithmRegistry>(std::move(result));
-  }();
-  return registry;
 }
 
 }  // namespace navigation2d

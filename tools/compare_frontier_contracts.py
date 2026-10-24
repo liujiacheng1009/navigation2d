@@ -8,8 +8,8 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-import shlex
 import subprocess
+from frozen_core_probe import build_probe
 
 
 def digest(path):
@@ -34,51 +34,13 @@ def main():
         parser.error('baseline header tree is incomplete')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    header_hashes = {str(p.relative_to(headers)): digest(p)
-                     for p in (headers / 'navigation2d').rglob('*.h')}
-    project_build = next((p for p in [build, *build.parents]
-                          if (p / 'CMakeCache.txt').is_file()), None)
-    if project_build is None:
-        parser.error('build directory does not belong to a configured CMake tree')
-    subprocess.run(['cmake', '--build', str(project_build), '--target',
-                    'navigation2d_frontier_replay', '--parallel', '2'], check=True)
-    target = build / 'test/CMakeFiles/navigation2d_frontier_replay.dir'
-    flags = []
-    for line in (target / 'flags.make').read_text().splitlines():
-        if line.startswith(('CXX_DEFINES =', 'CXX_INCLUDES =', 'CXX_FLAGS =')):
-            flags.extend(shlex.split(line.split('=', 1)[1]))
-    link = shlex.split((target / 'link.txt').read_text())
     source = root / 'test/frontier_replay/contract_replay.cc'
-    obj = output / 'baseline.o'
-    binary = output / 'baseline'
-    subprocess.run([link[0], '-I' + str(headers), *flags, '-c', str(source), '-o', str(obj)],
-                   cwd=build / 'test', check=True)
-    rewritten = []
-    objects = cores = 0
-    for token in link:
-        if token.endswith('.o'):
-            rewritten.append(str(obj))
-            objects += 1
-        elif token.endswith('libnavigation2d_core.a'):
-            rewritten.append(str(baseline_core))
-            cores += 1
-        elif token.endswith('libnavigation2d_geometry.a'):
-            # The frozen pre-split core already owns its geometry implementation.
-            continue
-        else:
-            rewritten.append(token)
-    if objects != 1 or cores != 1:
-        raise ValueError('unsupported replay link: expected one object and one core')
-    rewritten[rewritten.index('-o') + 1] = str(binary)
-    subprocess.run(rewritten, cwd=build / 'test', check=True)
-    current_hashes = {str(p.relative_to(headers)): digest(p)
-                      for p in (headers / 'navigation2d').rglob('*.h')}
-    if header_hashes != current_hashes:
-        raise ValueError('baseline headers changed during build')
+    binary, candidate, provenance = build_probe(
+        build, 'navigation2d_frontier_replay', source, headers, baseline_core, output)
     results = {}
     captures = {}
     for label, executable in [('baseline', binary),
-                              ('candidate', build / 'test/navigation2d_frontier_replay')]:
+                              ('candidate', candidate)]:
         capture = subprocess.check_output([str(executable)], text=True)
         (output / (label + '.jsonl')).write_text(capture)
         captures[label] = capture
@@ -95,16 +57,9 @@ def main():
         raise ValueError('contract driver did not exercise its required scenarios')
     # Exact text also preserves signed zero in round-trip double formatting.
     equal = captures['baseline'] == captures['candidate']
-    report = {'equal': equal, 'coverage': coverage, 'records': {k: len(v) for k, v in results.items()},
-              'baseline_core_sha256': digest(baseline_core),
-              'candidate_core_sha256': digest(build / 'libnavigation2d_core.a'),
-              'source_sha256': digest(source),
-              'fixture_sha256': {p.name: digest(p) for p in source.parent.glob('*.h')},
-              'baseline_binary_sha256': digest(binary),
-              'candidate_binary_sha256': digest(build / 'test/navigation2d_frontier_replay'),
-              'baseline_headers': header_hashes,
-              'baseline_compile': [link[0], '-I' + str(headers), *flags],
-              'baseline_link': rewritten}
+    report = {'equal': equal, 'coverage': coverage,
+              'records': {k: len(v) for k, v in results.items()}, **provenance,
+              'fixture_sha256': {p.name: digest(p) for p in source.parent.glob('*.h')}}
     if not equal:
         report['first_difference'] = next((i for i, pair in enumerate(zip(
             captures['baseline'].splitlines(), captures['candidate'].splitlines()))

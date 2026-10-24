@@ -71,3 +71,11 @@ navigation2d_assert_test(completion_execution_test navigation2d_exploration_appl
 
 navigation2d_assert_test(entry_mouth_view_test navigation2d_exploration_application)
 target_compile_definitions(entry_mouth_view_test PRIVATE _GLIBCXX_ASSERTIONS=1)
+
+add_executable(navigation2d_config_replay navigation_config_contract.cc)
+target_link_libraries(navigation2d_config_replay PRIVATE navigation2d_core)
+
+navigation2d_assert_test(navigation_configuration_test navigation2d_core)
+target_link_libraries(navigation_configuration_test PRIVATE yaml-cpp)
+target_compile_definitions(navigation_configuration_test PRIVATE
+  NAVIGATION2D_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
