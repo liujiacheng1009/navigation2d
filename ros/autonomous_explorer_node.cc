@@ -46,6 +46,8 @@
 #include "navigation2d/application/algorithm_registry.h"
 #include "navigation2d/application/exploration/navigation_profile.h"
 #include "navigation2d/exploration/frontier_explorer.h"
+#include "navigation2d/application/exploration/completion_execution.h"
+#include "navigation2d/ros/exploration/completion_reporter.h"
 #include "navigation2d/geometry/robot_geometry.h"
 #include "navigation2d/configuration/vehicle_config.h"
 #include "rclcpp/rclcpp.hpp"
@@ -72,6 +74,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::EntryActions,
                                  private navigation2d::exploration::TourConstraints,
                                  private navigation2d::exploration::DispatchActions,
+                                 private navigation2d::exploration::CompletionActions,
                                  private navigation2d::exploration_ros::EntryStatusSink {
  public:
   AutonomousExplorer()
@@ -403,7 +406,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     return navigation2d::exploration::TourPose{
         Pose()->pose.position.x, Pose()->pose.position.y, Yaw(Pose()->pose.orientation)};
   }
-  void BuildTour() {
+  void BuildTour() override {
     tour_.Build(explorer_, *TourRobot());
     PublishFrontierDebug();
     RCLCPP_INFO(get_logger(),
@@ -426,14 +429,14 @@ class AutonomousExplorer final : public rclcpp::Node,
     frontier_debug_publisher_->publish(msg);
   }
 
-  void LockEntryMouth(const Goal& mouth) {
+  void LockEntryMouth(const Goal& mouth) override {
     const bool easy = explorer_.IsCorridorMouth(mouth.frontier_x, mouth.frontier_y) &&
         explorer_.MouthGapWidth(mouth.frontier_x, mouth.frontier_y) >= .50 &&
         explorer_.MouthGapWidth(mouth.frontier_x, mouth.frontier_y) <= 1.40;
     entry_.Lock(mouth, easy, {KnownCells(), map_revision_});
   }
 
-  void ClearEntryMouthLock() { entry_.Clear(); }
+  void ClearEntryMouthLock() override { entry_.Clear(); }
 
   // Entry budget exhausted or mouth unplannable: short demote so the tour
   // cannot immediately re-drive the same hall→threshold shuttle. Keep the
@@ -539,7 +542,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   void ReportEntry(const navigation2d::exploration::EntryNotice& notice) override {
     navigation2d::exploration_ros::ReportEntry(get_logger(), notice, last_planning_failure_, *this);
   }
-  bool StartEntryProbe() {
+  bool StartEntryProbe() override {
     if (!Pose()) { return false; }
     const auto result = navigation2d::exploration::ExecuteEntryProbe(
         entry_, explorer_, room_visits_, *this,
@@ -728,90 +731,21 @@ class AutonomousExplorer final : public rclcpp::Node,
     return true;
   }
 
-  void StartCompletingProbe() {
-    ++completing_probe_rounds_;
-    mission_.BeginCompleting();
-    tour_.Suspend();
-    // Failure cools hid unfinished alcove mouths from the exploring tour.
-    // Completing must see them again or PARTIAL leaves visible white tips.
-    explorer_.ClearFailedBlacklist();
-    cooled_signatures_.clear();
-    auto leftovers = explorer_.SelectLeftoverApproaches(
-        Pose()->pose.position.x, Pose()->pose.position.y, 3);
-    leftovers = explorer_.OrderByRegion(
-        std::move(leftovers), Pose()->pose.position.x, Pose()->pose.position.y,
-        Yaw(Pose()->pose.orientation));
-    if (leftovers.empty()) {
-      RCLCPP_WARN(get_logger(),
-                  "Completing probe found no leftover approach: raw_cells=%zu rounds=%d",
-                  explorer_.raw_frontier_cells(), completing_probe_rounds_);
-      mission_.ResumeExploring();
-      // Tip pocket + empty leftovers: leave immediately and hunt far mouths
-      // instead of burning completing rounds while wedged (下方卡住).
-      if (TipPinchedNow() &&
-          TryRescueDistantMouths("completing empty while tip-pinched"))
-        return;
-      if (ShouldKeepWaitingForFrontiers()) {
-        PublishStatus("SELECTING",
-                      "unresolved boundary; waiting for map before return");
-        return;
-      }
-      BeginReturnOrRescue(explorer_.raw_frontier_cells() > 0);
-      return;
-    }
-    for (const auto& leftover : leftovers) {
-      // Skip only the threshold cell itself. In-room leftovers near the robot
-      // (kitchen white pocket just past the door) must still be driven.
-      const double near = std::hypot(leftover.x - Pose()->pose.position.x,
-                                     leftover.y - Pose()->pose.position.y);
-      if (near < .60 && !explorer_.GoalInActiveRegion(leftover)) {
-        RCLCPP_WARN(get_logger(),
-                    "Completing leftover is on the current doorway cell (%.2f, %.2f); skipping",
-                    leftover.x, leftover.y);
-        continue;
-      }
-      if (StartNavigation(leftover, false)) return;
-      if (BreakMappedObstacleThrash()) return;
-      // Doorway leftovers often need a room-side entry pose; hallway standoffs
-      // fail StartNavigation while the mouth is still openable.
-      LockEntryMouth(leftover);
-      if (StartEntryProbe()) {
-        RCLCPP_WARN(get_logger(),
-                    "Completing leftover unplannable at (%.2f, %.2f); trying entry probe",
-                    leftover.x, leftover.y);
-        return;
-      }
-      RCLCPP_WARN(get_logger(),
-                  "Completing leftover approach is unplannable at (%.2f, %.2f)",
-                  leftover.x, leftover.y);
-      explorer_.RecordAttempt(leftover, false);
-      ClearEntryMouthLock();
-    }
-    // Keep exploring while raw frontiers remain — one failed leftover must
-    // not abandon unfinished alcoves/rooms.
-    mission_.ResumeExploring();
-    if (TipPinchedNow() &&
-        TryRescueDistantMouths("leftovers unplannable while tip-pinched"))
-      return;
-    if (ShouldKeepWaitingForFrontiers()) {
-      PublishStatus("SELECTING",
-                    "leftover blocked; waiting for map update before return");
-      return;
-    }
-    BeginReturnOrRescue(explorer_.raw_frontier_cells() > 0 ||
-                        explorer_.ReachableUnknownCells(
-                            Pose()->pose.position.x, Pose()->pose.position.y) > 0);
+  void ClearCompletionRouteCooling() override { cooled_signatures_.clear(); }
+  bool NavigateCompletionGoal(const Goal& goal) override { return StartNavigation(goal, false); }
+  void CompletionStatus(const char* message) override { PublishStatus("SELECTING", message); }
+  void ReportCompletion(const navigation2d::exploration::CompletionNotice& notice) override {
+    navigation2d::exploration_ros::ReportCompletion(get_logger(), notice);
+  }
+  void StartCompletingProbe() override {
+    completion_.Start(explorer_, mission_, tour_, *TourRobot(), *this);
   }
 
-  bool ShouldKeepWaitingForFrontiers() const {
-    if (!explorer_.HasExploringWork()) return false;
-    // Cap empty SELECTING loops. The old 36-cycle budget left the chassis
-    // wedged in a tip for tens of seconds before PARTIAL (UI: 下方卡住).
-    if (completing_probe_rounds_ < 3) return true;
-    return no_executable_frontier_cycles_ < 8;
+  bool ShouldKeepWaitingForFrontiers() const override {
+    return completion_.ShouldWait(explorer_.HasExploringWork(), no_executable_frontier_cycles_);
   }
 
-  bool TipPinchedNow() const {
+  bool TipPinchedNow() const override {
     if (!scan_ || !Pose()) return false;
     const BodyRanges body = ReadBodyRanges();
     if (navigation_.has_session())
@@ -825,7 +759,7 @@ class AutonomousExplorer final : public rclcpp::Node,
 
   // Leave a tip pocket and re-queue far corridor mouths (kitchen) instead of
   // PARTIAL while raw frontiers remain. One shot per mission.
-  bool TryRescueDistantMouths(const char* why) {
+  bool TryRescueDistantMouths(const char* why) override {
     if (tip_rescue_attempted_ || returning_ ||
         mission_.phase() == MissionPhase::kReturning || !Pose())
       return false;
@@ -838,7 +772,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     recently_demoted_until_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
     cooled_signatures_.clear();
     explorer_.ClearFailedBlacklist();
-    completing_probe_rounds_ = 0;
+    completion_.ResetBudget();
     no_executable_frontier_cycles_ = 0;
     reject_streak_ = 0;
     ClearEntryMouthLock();
@@ -863,32 +797,13 @@ class AutonomousExplorer final : public rclcpp::Node,
     return navigation_.has_session() || entry_.pending() || entry_.locked();
   }
 
-  void BeginReturnOrRescue(bool force_partial) {
+  void BeginReturnOrRescue(bool force_partial) override {
     if (force_partial && TryRescueDistantMouths("before PARTIAL return")) return;
     BeginReturn(force_partial);
   }
 
   void FinishCompleting() {
-    mission_.ResumeExploring();
-    tour_.Suspend();
-    BuildTour();
-    if (!tour_.goals().empty() || explorer_.candidate_frontier_goals() > 0) {
-      RCLCPP_INFO(get_logger(),
-                  "Completing probe finished; normal candidates=%zu tour=%zu",
-                  explorer_.candidate_frontier_goals(), tour_.goals().size());
-      SelectNextGoal();
-      return;
-    }
-    if (explorer_.raw_frontier_cells() > 0 && completing_probe_rounds_ < 3) {
-      StartCompletingProbe();
-      return;
-    }
-    if (ShouldKeepWaitingForFrontiers()) {
-      PublishStatus("SELECTING",
-                    "completing emptied tour; waiting for unresolved frontiers");
-      return;
-    }
-    BeginReturnOrRescue(explorer_.raw_frontier_cells() > 0);
+    completion_.Finish(explorer_, mission_, tour_, *this);
   }
 
   // True pinch peel. Never fall back to trail reverse while a mouth is locked:
@@ -1102,7 +1017,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     return false;
   }
 
-  void SelectNextGoal() {
+  void SelectNextGoal() override {
     if (mission_.phase() == MissionPhase::kReturning || returning_) {
       BeginReturn(return_.partial());
       return;
@@ -1191,7 +1106,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         frontier_probe_count_ = 0;
         reject_streak_ = 0;
         mission_.ResumeExploring();
-        completing_probe_rounds_ = 0;
+        completion_.ResetBudget();
         return;
       }
       tour_.Advance();
@@ -1302,7 +1217,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         last_no_executable_known_cells_ = known_now;
         frontier_probe_count_ = 0;
         // New map evidence may open a tip the previous leftover missed.
-        completing_probe_rounds_ = 0;
+        completion_.ResetBudget();
       }
       NoteKnownProgress(known_now);
       ++no_executable_frontier_cycles_;
@@ -1335,7 +1250,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         }
       }
       if (no_executable_mouths && explorer_.ShouldCoverResiduals()) {
-        if (completing_probe_rounds_ < 3) {
+        if (completion_.CanProbe()) {
           StartCompletingProbe();
           return;
         }
@@ -1372,7 +1287,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         if (TipPinchedNow() &&
             TryRescueDistantMouths("wait-budget tip; rescue distant"))
           return;
-        if (completing_probe_rounds_ < 3 && explorer_.ShouldCoverResiduals()) {
+        if (completion_.CanProbe() && explorer_.ShouldCoverResiduals()) {
           StartCompletingProbe();
           return;
         }
@@ -1932,7 +1847,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     explorer_.CoolRegion(goal.x, goal.y, 0.45, 600u);
   }
 
-  bool BreakMappedObstacleThrash() {
+  bool BreakMappedObstacleThrash() override {
     if (mapped_obstacle_rejects_ < 2) return false;
     mapped_obstacle_rejects_ = 0;
     navigation_.Cancel();
@@ -2856,7 +2771,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   rclcpp::Time last_progress_time_{0, 0, RCL_ROS_TIME};
   using MissionPhase = navigation2d::exploration::MissionPhase;
   navigation2d::exploration::MissionLifecycle mission_;
-  int completing_probe_rounds_ = 0;
+  navigation2d::exploration::CompletionExecution completion_;
   std::unordered_set<std::uint64_t> cooled_signatures_;
   int reject_streak_ = 0;
   int mapped_obstacle_rejects_ = 0;

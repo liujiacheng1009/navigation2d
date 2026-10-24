@@ -111,3 +111,33 @@ temporary/persistent spatial exclusions and known-cell growth expiry.
 checks body-swept route samples against occupied cells. Neither grants passage
 through occupied mapper evidence. FrontierExplorer still composes extraction,
 viewpoint generation and region scheduling; those stages remain to be separated.
+
+### Completion execution
+
+`CompletionExecution` owns residual-probe rounds and the ordering of start/finish
+actions. It borrows the explorer, mission lifecycle and tour only for a synchronous
+operation. `CompletionActions` supplies navigation/entry/recovery and output effects;
+no ROS node or mutable mission context is retained. `completion_reporter` formats
+ROS diagnostics separately. Tour interfaces expose value types and forward-declare
+the explorer; implementation files include its complete API.
+
+```mermaid
+flowchart TD
+  Start[Begin completing] --> Clear[Clear temporary failures and route cooling]
+  Clear --> Order[Find and region-order residual approaches]
+  Order --> Attempt[Try navigation, recovery, then entry]
+  Attempt -->|handled| Track[Continue completing execution]
+  Order -->|empty| Resume[Resume exploring]
+  Attempt -->|all unavailable| Resume
+  Resume --> Exit[Bounded rescue, wait, or return]
+  Finish[Completion goal finishes] --> Tour[Rebuild ordinary tour]
+  Tour -->|candidates| Select[Select next goal]
+  Tour -->|residuals and budget| Start
+  Tour -->|otherwise| Exit
+```
+
+The direct completion replay exercises empty/residual/blocked/finish paths with
+real navigation, captured outputs and an independent frozen source/header/core
+baseline. Each case owns its ROS context, including early mission shutdown.
+It uses the canonical 0.05 m map configuration and advances past bootstrap.
+These controlled probes do not replace complete exploration or board validation.

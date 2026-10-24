@@ -2,7 +2,10 @@
 #include <deque>
 #include <optional>
 
-#include "navigation2d/exploration/frontier_explorer.h"
+#include "navigation2d/exploration/frontier_types.h"
+namespace navigation2d {
+class FrontierExplorer;
+}
 namespace navigation2d::exploration {
 struct TourPose {
   double x, y, yaw;

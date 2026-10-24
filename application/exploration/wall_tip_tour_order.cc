@@ -1,3 +1,4 @@
+#include "navigation2d/exploration/frontier_explorer.h"
 #include <algorithm>
 #include <cmath>
 #include <utility>

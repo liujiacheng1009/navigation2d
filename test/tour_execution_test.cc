@@ -1,3 +1,4 @@
+#include "navigation2d/exploration/frontier_explorer.h"
 #include "navigation2d/application/exploration/tour_execution.h"
 
 #include <cstdint>

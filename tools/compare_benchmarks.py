@@ -24,7 +24,8 @@ METRICS = ('wall_seconds', 'control_cycle_p50_us', 'control_cycle_p95_us',
 # behavior until the output schema deliberately declares it a measurement.
 TIMING_FIELDS = {'wall_seconds', 'peak_rss_kb', 'global_plan_seconds',
                  'global_plan_first_solution_seconds', 'tick_us', 'approach_us',
-                 'unavailable_us', 'probe_us', 'inside_us', 'cooling_us'} | {
+                 'unavailable_us', 'probe_us', 'inside_us', 'cooling_us',
+                 'empty_us', 'residual_us', 'blocked_us', 'finish_us'} | {
     f'{family}_p{percentile}_us'
     for family in ('control_cycle', 'controller_solve', 'pure_solver', 'global_plan',
                    'global_plan_first_solution', 'tick')
