@@ -1,4 +1,5 @@
 #include "navigation2d/application/navigation_system.h"
+#include "navigation2d/application/algorithm_registry.h"
 
 #include <algorithm>
 #include <chrono>
@@ -10,11 +11,7 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-#include "navigation2d/control/regulated_pure_pursuit.h"
 #include "navigation2d/control/collision_monitor.h"
-#include "navigation2d/control/dwa_controller.h"
-#include "navigation2d/control/mppi_controller.h"
-#include "navigation2d/control/mpc_controller.h"
 #include "navigation2d/control/dynamic_safety.h"
 #include "navigation2d/costmap/grid_2d.h"
 #include "navigation2d/costmap/layered_costmap.h"
@@ -116,14 +113,6 @@ double EffectivePlanningRadius(const NavigationConfig& config,
   return config.robot_radius;
 }
 
-std::unique_ptr<GlobalPlanner> MakePlannerWithEffectiveRadius(
-    const NavigationConfig& config, const LayeredCostmap& costmap) {
-  // The state-lattice planner owns a richer NavigationConfig (including its
-  // primitive geometry), so keep its factory path intact. Grid planners accept
-  // the explicit clearance contract directly.
-  if (config.planner == "state_lattice") return MakeGlobalPlanner(config);
-  return MakeGlobalPlanner(config.planner, EffectivePlanningRadius(config, costmap));
-}
 // Project onto the *ordered* route, never onto an unconstrained cloud of
 // waypoints.  The returned coordinate is arc length from the path start.
 //
@@ -211,21 +200,18 @@ void AddPathMetrics(const Path& path, const LayeredCostmap& costmap, double robo
           2. * std::abs(first.x() * second.y() - first.y() * second.x()) / (a * b * chord));
   }
 }
-std::unique_ptr<LocalController> MakeController(const NavigationConfig& config) {
-  if (config.controller == "rpp") return std::make_unique<RegulatedPurePursuit>(config);
-  if (config.controller == "dwa") return std::make_unique<DwaController>(config);
-  if (config.controller == "mppi") return std::make_unique<MppiController>(config);
-  if (config.controller == "mpc") return std::make_unique<MpcController>(config);
-  throw std::runtime_error("unknown controller: " + config.controller);
-}
+
 }
 
 class NavigationSystem::Impl {
  public:
-  Impl(NavigationConfig value, const std::string& map_path)
-      : config(std::move(value)), costmap(Grid2d::Load(map_path), config),
-        planner(MakePlannerWithEffectiveRadius(config, costmap)),
-        controller(MakeController(config)),
+  Impl(NavigationConfig value, const std::string& map_path,
+       std::shared_ptr<const AlgorithmRegistry> registry)
+      : config(std::move(value)), algorithms(std::move(registry)),
+        costmap(Grid2d::Load(map_path), config),
+        planner(algorithms->CreatePlanner(config)),
+        controller(algorithms->CreateController(config)),
+        planner_traits(algorithms->PlannerTraits(config.planner)),
         collision_monitor(config) {
     if (std::abs(costmap.grid().resolution() - config.map_resolution) > 1e-9)
       throw std::runtime_error("map resolution does not match navigation configuration");
@@ -309,7 +295,7 @@ class NavigationSystem::Impl {
     ++state.replans;
     try {
       const auto planning_started = std::chrono::steady_clock::now();
-      const double planning_radius = config.planner == "state_lattice"
+      const double planning_radius = planner_traits.owns_smoothing
           ? config.robot_radius : EffectivePlanningRadius(config, costmap);
       const auto plan_or_grid_fallback = [&]() {
         try {
@@ -318,7 +304,7 @@ class NavigationSystem::Impl {
           // Lattice rejects a yaw-aware start/goal that the circular A*
           // contract still accepts.  Do not abandon a frontier or the home
           // pose because the polygon check and the execution footprint disagree.
-          if (config.planner != "state_lattice") throw;
+          if (!planner_traits.grid_fallback) throw;
           return DensifyPath(AStarPlanner(planning_radius).Plan(costmap, pose, *goal), .08);
         }
       };
@@ -331,7 +317,7 @@ class NavigationSystem::Impl {
         // Theta*'s long visibility chords can cut across the inside of a
         // maze corner after densification.  Lattice densify can do the same
         // at a shelf corner; retry once with the grid path.
-        if (config.planner == "theta_star" || config.planner == "state_lattice") {
+        if (planner_traits.corner_grid_retry) {
           AStarPlanner corner_safe_planner(planning_radius);
           path = DensifyPath(corner_safe_planner.Plan(costmap, pose, *goal), .08);
         }
@@ -366,7 +352,7 @@ class NavigationSystem::Impl {
       // smooths inside Plan(); grid planners push toward open space here when
       // the corridor is wider than the footprint (0.7 m kitchen doors still
       // clear with smoother_min_clearance ≈ 0.28).
-      if (config.planner != "state_lattice" && config.smoother_enabled) {
+      if (!planner_traits.owns_smoothing && config.smoother_enabled) {
         Path smoothed = planning_internal::ConstrainedPathSmoother(config).Smooth(
             path, costmap, config.robot_radius);
         // Densify after smooth and re-check: soft obstacle pull can bow a
@@ -383,7 +369,7 @@ class NavigationSystem::Impl {
       // centimetres of clearance (that made sawtooth GLOBAL).
       // A replan is a new ordered route contract. Reset the controller's
       // internal projection state even when the new path has similar endpoints.
-      controller = MakeController(config);
+      controller = algorithms->CreateController(config);
       state.global_planning = planner->Diagnostics();
       state.planning_failure_reason.clear();
       const double planning_elapsed = std::chrono::duration<double>(
@@ -422,9 +408,11 @@ class NavigationSystem::Impl {
   }
 
   NavigationConfig config;
+  std::shared_ptr<const AlgorithmRegistry> algorithms;
   LayeredCostmap costmap;
   std::unique_ptr<GlobalPlanner> planner;
   std::unique_ptr<LocalController> controller;
+  PlannerCapabilities planner_traits;
   CollisionMonitor collision_monitor;
   std::optional<Pose2d> goal;
   Path path;
@@ -472,12 +460,21 @@ class NavigationSystem::Impl {
 };
 
 NavigationSystem::NavigationSystem(NavigationConfig config, const std::string& map_path)
-    : impl_(std::make_unique<Impl>(std::move(config), map_path)) {}
+    : NavigationSystem(std::move(config), map_path, AlgorithmRegistry::Builtins()) {}
+
+NavigationSystem::NavigationSystem(NavigationConfig config, const std::string& map_path,
+                                   std::shared_ptr<const AlgorithmRegistry> algorithms) {
+  if (!algorithms) { throw std::invalid_argument("null algorithm registry"); }
+  algorithms->Validate(config);
+  impl_ = std::make_unique<Impl>(std::move(config), map_path, std::move(algorithms));
+}
 NavigationSystem::~NavigationSystem() = default;
 NavigationSystem::NavigationSystem(NavigationSystem&&) noexcept = default;
 NavigationSystem& NavigationSystem::operator=(NavigationSystem&&) noexcept = default;
 
 const Path& NavigationSystem::path() const { return impl_->path; }
+const std::string& NavigationSystem::planner_id() const { return impl_->config.planner; }
+const std::string& NavigationSystem::controller_id() const { return impl_->config.controller; }
 
 void NavigationSystem::SetGoal(Pose2d goal) {
   impl_->goal = goal; impl_->path.clear(); impl_->state.status = NavigationStatus::kNavigating;
@@ -578,7 +575,7 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
   // footprint-illegal, drop it immediately so we never keep publishing a
   // path that cuts through newly observed walls/specks.
   if (!impl_->path.empty()) {
-    const double planning_radius = impl_->config.planner == "state_lattice"
+    const double planning_radius = impl_->planner_traits.owns_smoothing
         ? impl_->config.robot_radius
         : EffectivePlanningRadius(impl_->config, impl_->costmap);
     if (!PathFootprintValid(impl_->path, impl_->costmap, planning_radius)) {

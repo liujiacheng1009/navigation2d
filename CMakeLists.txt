@@ -24,7 +24,7 @@ FetchContent_MakeAvailable(decomp_util)
 set(NAVIGATION2D_ACADOS_GENERATED_DIR "" CACHE PATH "Generated Navigation2D acados solver directory")
 set(NAVIGATION2D_ACADOS_ROOT "" CACHE PATH "acados installation prefix")
 add_library(navigation2d_core STATIC
-  application/navigation_config.cc costmap/grid_2d.cc costmap/layered_costmap.cc
+  application/algorithm_registry.cc application/navigation_config.cc costmap/grid_2d.cc costmap/layered_costmap.cc
   planning/search_core.cc planning/incremental_search.cc planning/collision_checker.cc
   planning/obstacle_heuristic.cc planning/grid_search.cc
   planning/motion_primitives.cc planning/path_smoother.cc planning/dijkstra_planner.cc planning/astar_planner.cc
@@ -100,3 +100,46 @@ add_test(NAME region_scheduler_test COMMAND region_scheduler_test)
 add_executable(navigation_recovery_test test/navigation_recovery_test.cc)
 target_link_libraries(navigation_recovery_test PRIVATE navigation2d_core)
 add_test(NAME navigation_recovery_test COMMAND navigation_recovery_test)
+
+add_library(navigation2d_exploration_application STATIC
+  application/exploration/navigation_profile.cc
+  application/exploration/planning_snapshot.cc
+  application/exploration/route_validator.cc
+  application/exploration/navigation_telemetry.cc
+  application/exploration/room_visit_ledger.cc
+  application/exploration/status_serializer.cc
+  application/exploration/entry_coordinator.cc
+  application/exploration/recovery_policy.cc
+  application/exploration/return_coordinator.cc)
+target_compile_features(navigation2d_exploration_application PUBLIC cxx_std_20)
+target_link_libraries(navigation2d_exploration_application PUBLIC navigation2d_core)
+target_compile_options(navigation2d_exploration_application PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+add_executable(algorithm_registry_test test/algorithm_registry_test.cc)
+target_link_libraries(algorithm_registry_test PRIVATE navigation2d_core)
+add_test(NAME algorithm_registry_test COMMAND algorithm_registry_test)
+add_executable(exploration_application_test test/exploration_application_test.cc)
+target_link_libraries(exploration_application_test PRIVATE navigation2d_exploration_application)
+add_test(NAME exploration_application_test COMMAND exploration_application_test)
+
+# These executables use assert for behavioral contracts. Release must not
+# compile their checks away while performance targets keep normal NDEBUG.
+get_property(navigation2d_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(target IN LISTS navigation2d_targets)
+  if(target MATCHES "_test$")
+    target_compile_options(${target} PRIVATE -UNDEBUG)
+  endif()
+endforeach()
+
+add_executable(exploration_snapshot_replay_test test/exploration_snapshot_replay_test.cc)
+target_link_libraries(exploration_snapshot_replay_test PRIVATE navigation2d_exploration_application)
+target_compile_definitions(exploration_snapshot_replay_test PRIVATE NAVIGATION2D_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+add_test(NAME exploration_snapshot_replay_test COMMAND exploration_snapshot_replay_test)
+
+add_library(navigation2d_exploration_io STATIC ros/exploration/artifact_writer.cc)
+target_compile_features(navigation2d_exploration_io PUBLIC cxx_std_20)
+target_link_libraries(navigation2d_exploration_io PUBLIC navigation2d_core)
+target_compile_options(navigation2d_exploration_io PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_executable(exploration_artifacts_test test/exploration_artifacts_test.cc)
+target_link_libraries(exploration_artifacts_test PRIVATE navigation2d_exploration_io)
+add_test(NAME exploration_artifacts_test COMMAND exploration_artifacts_test)

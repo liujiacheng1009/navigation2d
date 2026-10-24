@@ -13,6 +13,8 @@
 
 namespace navigation2d {
 
+class AlgorithmRegistry;
+
 enum class NavigationStatus { kIdle, kNavigating, kSucceeded, kBlocked };
 enum class NavigationPhase { kAlignToPath, kTrackPath, kDockToGoal };
 
@@ -62,6 +64,8 @@ struct NavigationState {
 class NavigationSystem {
  public:
   NavigationSystem(NavigationConfig config, const std::string& map_path);
+  NavigationSystem(NavigationConfig config, const std::string& map_path,
+                   std::shared_ptr<const AlgorithmRegistry> algorithms);
   ~NavigationSystem();
   NavigationSystem(NavigationSystem&&) noexcept;
   NavigationSystem& operator=(NavigationSystem&&) noexcept;
@@ -90,6 +94,8 @@ class NavigationSystem {
                                  double timestamp);
   // Active global route in the navigation/map frame (empty when idle).
   const Path& path() const;
+  const std::string& planner_id() const;
+  const std::string& controller_id() const;
 
  private:
   class Impl;

@@ -227,6 +227,7 @@ class FrontierExplorer {
       double seed_radius_m) const;
   std::size_t RegionFrontierCells(double anchor_x, double anchor_y,
                                   double radius_m) const;
+  const ExplorationGrid& observation_map() const { return observation_map_; }
   std::size_t KnownCells() const;
   int completed_goals() const { return completed_goals_; }
   int failed_goals() const { return failed_goals_; }

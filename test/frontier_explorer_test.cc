@@ -369,12 +369,15 @@ int main() {
   assert((entry_dx * entry_direction_x + entry_dy * entry_direction_y) /
              entry_direction_length >= .20);
   // Probe may sit on planning free past the frontier when the throat is open.
-  assert(!entry_explorer.RawFree(
-      static_cast<int>(std::floor(
-          (entry_probe->x - entry.origin_x) / entry.resolution)),
-      static_cast<int>(std::floor(
-          (entry_probe->y - entry.origin_y) / entry.resolution))) ||
-         entry_probe->x > hallway_standoff.frontier_x - 1e-6);
+  const int probe_col = static_cast<int>(std::floor(
+      (entry_probe->x - entry.origin_x) / entry.resolution));
+  const int probe_row = static_cast<int>(std::floor(
+      (entry_probe->y - entry.origin_y) / entry.resolution));
+  const auto& observed = entry_explorer.observation_map();
+  const bool probe_raw_free = probe_col >= 0 && probe_row >= 0 &&
+      probe_col < observed.width && probe_row < observed.height &&
+      observed.cells[static_cast<std::size_t>(probe_row) * observed.width + probe_col] == 0;
+  assert(!probe_raw_free || entry_probe->x > hallway_standoff.frontier_x - 1e-6);
 
   // Opening a partially observed passage is a planning-only transformation.
   // The mapper's unknown boundary must remain visible to completion logic and
