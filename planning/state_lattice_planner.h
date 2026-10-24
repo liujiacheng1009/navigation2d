@@ -3,7 +3,7 @@
 #include <optional>
 #include <memory>
 
-#include "navigation2d/application/navigation_config.h"
+#include "navigation2d/configuration/navigation_config.h"
 #include "navigation2d/planning/global_planner.h"
 #include "navigation2d/planning/obstacle_heuristic.h"
 #include "navigation2d/planning/collision_checker.h"

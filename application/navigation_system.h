@@ -4,7 +4,7 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include "navigation2d/application/navigation_config.h"
+#include "navigation2d/configuration/navigation_config.h"
 #include "navigation2d/control/local_controller.h"
 #include "navigation2d/control/collision_monitor.h"
 #include "navigation2d/geometry/pose_2d.h"

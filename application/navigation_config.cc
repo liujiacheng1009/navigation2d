@@ -1,4 +1,4 @@
-#include "navigation2d/application/navigation_config.h"
+#include "navigation2d/configuration/navigation_config.h"
 
 #include <cmath>
 #include <stdexcept>

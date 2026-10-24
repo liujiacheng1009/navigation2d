@@ -2,7 +2,7 @@
 
 #include <cstdint>
 #include <vector>
-#include "navigation2d/application/navigation_config.h"
+#include "navigation2d/configuration/navigation_config.h"
 #include "navigation2d/costmap/grid_2d.h"
 #include "navigation2d/geometry/pose_2d.h"
 #include "navigation2d/sensor/observations.h"

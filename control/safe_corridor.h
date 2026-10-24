@@ -4,9 +4,9 @@
 
 #include <Eigen/Core>
 
-#include "navigation2d/application/navigation_config.h"
+#include "navigation2d/configuration/navigation_config.h"
 #include "navigation2d/costmap/layered_costmap.h"
-#include "navigation2d/planning/global_planner.h"
+#include "navigation2d/geometry/path_2d.h"
 
 namespace navigation2d::control_internal {
 

@@ -4,7 +4,7 @@
 #include <string>
 
 #include "navigation2d/planning/global_planner.h"
-#include "navigation2d/application/navigation_config.h"
+#include "navigation2d/configuration/navigation_config.h"
 
 namespace navigation2d {
 

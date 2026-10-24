@@ -5,7 +5,7 @@
 #include <cmath>
 #include <limits>
 
-#include "navigation2d/planning/global_planner.h"
+#include "navigation2d/geometry/path_2d.h"
 
 namespace navigation2d::control_internal {
 

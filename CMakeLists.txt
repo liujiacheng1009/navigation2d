@@ -23,6 +23,14 @@ FetchContent_Declare(decomp_util
 FetchContent_MakeAvailable(decomp_util)
 set(NAVIGATION2D_ACADOS_GENERATED_DIR "" CACHE PATH "Generated Navigation2D acados solver directory")
 set(NAVIGATION2D_ACADOS_ROOT "" CACHE PATH "acados installation prefix")
+add_library(navigation2d_values INTERFACE)
+target_compile_features(navigation2d_values INTERFACE cxx_std_20)
+target_include_directories(navigation2d_values INTERFACE "${PROJECT_SOURCE_DIR}/..")
+target_link_libraries(navigation2d_values INTERFACE Eigen3::Eigen Sophus::Sophus)
+add_library(navigation2d_geometry STATIC geometry/robot_geometry.cc)
+target_link_libraries(navigation2d_geometry PUBLIC navigation2d_values)
+target_compile_options(navigation2d_geometry PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
 add_library(navigation2d_core STATIC
   application/algorithm_registry.cc application/navigation_config.cc costmap/grid_2d.cc costmap/layered_costmap.cc
   planning/search_core.cc planning/incremental_search.cc planning/collision_checker.cc
@@ -33,13 +41,13 @@ add_library(navigation2d_core STATIC
   control/regulated_pure_pursuit.cc control/dwa_controller.cc control/nav2_mppi_core.cc
   control/mppi_controller.cc control/dynamic_safety.cc
   control/safe_corridor.cc control/collision_monitor.cc control/mpc_controller.cc
-  geometry/vehicle_config.cc
+  configuration/vehicle_config.cc
   exploration/exploration_policy.cc
   exploration/frontier_explorer.cc exploration/region_scheduler.cc
   application/navigation_system.cc)
 target_include_directories(navigation2d_core PUBLIC "${PROJECT_SOURCE_DIR}/..")
 target_include_directories(navigation2d_core SYSTEM PRIVATE "${decomp_util_SOURCE_DIR}/include")
-target_link_libraries(navigation2d_core PUBLIC Eigen3::Eigen Sophus::Sophus yaml-cpp)
+target_link_libraries(navigation2d_core PUBLIC navigation2d_geometry PRIVATE yaml-cpp)
 if(NAVIGATION2D_ACADOS_GENERATED_DIR)
   if(NOT NAVIGATION2D_ACADOS_ROOT)
     message(FATAL_ERROR "NAVIGATION2D_ACADOS_ROOT is required with NAVIGATION2D_ACADOS_GENERATED_DIR")

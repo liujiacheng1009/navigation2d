@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
-#include "navigation2d/application/navigation_config.h"
+#include "navigation2d/configuration/navigation_config.h"
 #include "navigation2d/geometry/pose_2d.h"
 #include "navigation2d/planning/global_planner.h"
 

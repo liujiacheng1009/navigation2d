@@ -4,14 +4,10 @@
 
 #include "navigation2d/costmap/layered_costmap.h"
 #include "navigation2d/control/obstacle_prediction.h"
-#include "navigation2d/planning/global_planner.h"
+#include "navigation2d/geometry/path_2d.h"
+#include "navigation2d/geometry/twist_2d.h"
 
 namespace navigation2d {
-
-struct Twist2d {
-  double linear = 0.;
-  double angular = 0.;
-};
 
 enum class ControllerBackend { kNone, kAcados, kMppi, kRpp, kDwa };
 enum class ControllerSolveStatus { kNotRun, kSuccess, kUnavailable, kFailure, kDeadlineMiss, kUnsafe };

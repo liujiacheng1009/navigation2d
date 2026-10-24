@@ -3,7 +3,7 @@
 #include <memory>
 #include <vector>
 
-#include "navigation2d/application/navigation_config.h"
+#include "navigation2d/configuration/navigation_config.h"
 #include "navigation2d/control/local_controller.h"
 
 namespace navigation2d {

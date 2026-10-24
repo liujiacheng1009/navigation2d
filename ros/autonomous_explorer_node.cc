@@ -36,7 +36,7 @@
 #include "navigation2d/application/exploration/navigation_profile.h"
 #include "navigation2d/exploration/frontier_explorer.h"
 #include "navigation2d/geometry/robot_geometry.h"
-#include "navigation2d/geometry/vehicle_config.h"
+#include "navigation2d/configuration/vehicle_config.h"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_msgs/msg/string.hpp"
