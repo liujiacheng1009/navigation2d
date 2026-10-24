@@ -9,6 +9,9 @@ double Yaw(const geometry_msgs::msg::Quaternion& q) {
 }  // namespace
 void PoseFeedback::ObserveLocalization(const geometry_msgs::msg::PoseStamped& pose) {
   pose_ = pose;
+  observation_ = exploration::PoseObservation{
+      pose.pose.position.x, pose.pose.position.y, Yaw(pose.pose.orientation),
+      static_cast<std::int64_t>(pose.header.stamp.sec) * 1000000000LL + pose.header.stamp.nanosec};
   const auto point = std::pair<double, double>{pose.pose.position.x, pose.pose.position.y};
   if (trail_.empty() ||
       std::hypot(point.first - trail_.back().first, point.second - trail_.back().second) > .05) {

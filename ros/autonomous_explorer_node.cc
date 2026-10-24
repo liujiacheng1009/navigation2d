@@ -20,6 +20,7 @@
 #include "navigation2d/application/exploration/debug_overlay.h"
 #include "navigation2d/ros/exploration/debug_paths.h"
 #include "navigation2d/ros/exploration/pose_feedback.h"
+#include "navigation2d/application/exploration/pose_observation.h"
 #include "navigation2d/ros/exploration/explorer_parameters.h"
 #include "navigation2d/ros/exploration/map_observation.h"
 #include "navigation2d/ros/exploration/artifact_writer.h"
@@ -67,11 +68,6 @@
 namespace {
 
 constexpr double kExploreGoalTolerance = .18;
-
-double Yaw(const geometry_msgs::msg::Quaternion& q) {
-  return std::atan2(2. * (q.w * q.z + q.x * q.y),
-                    1. - 2. * (q.y * q.y + q.z * q.z));
-}
 
 double NormalizeAngle(double value) {
   return std::atan2(std::sin(value), std::cos(value));
@@ -173,8 +169,8 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
  private:
-  const std::optional<geometry_msgs::msg::PoseStamped>& Pose() const {
-    return pose_feedback_.pose();
+  const std::optional<navigation2d::exploration::PoseObservation>& Pose() const {
+    return pose_feedback_.observation();
   }
 
   const navigation2d::ExplorationGrid& ObservationGrid() const {
@@ -192,9 +188,9 @@ class AutonomousExplorer final : public rclcpp::Node,
     return explorer_.KnownCells();
   }
 
-  navigation2d::Pose2d LocalPose(const geometry_msgs::msg::Pose& pose) const {
-    return navigation2d::MakePose2d(pose.position.x - planning_map_.origin_x(),
-                                    pose.position.y - planning_map_.origin_y(), Yaw(pose.orientation));
+  navigation2d::Pose2d LocalPose(const navigation2d::exploration::PoseObservation& pose) const {
+    return navigation2d::MakePose2d(pose.x - planning_map_.origin_x(),
+                                    pose.y - planning_map_.origin_y(), pose.yaw);
   }
 
   navigation2d::Twist2d FreshVelocity(const rclcpp::Time& reference) const {
@@ -218,7 +214,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   void FeedScan() {
-    auto robot = LocalPose(Pose()->pose);
+    auto robot = LocalPose(*Pose());
     const double yaw = navigation2d::Yaw(robot);
     const double lidar_forward = navigation2d::kLidarForwardOffset();
     const auto sensor = navigation2d::MakePose2d(
@@ -290,8 +286,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     // Preserve the loader's existing diagnosis for stream failures.
     static_cast<void>(planning_map_.Prepare(
         ObservationGrid(),
-        {.robot = navigation2d::MakePose2d(Pose()->pose.position.x, Pose()->pose.position.y,
-                                          Yaw(Pose()->pose.orientation)),
+        {.robot = navigation2d::MakePose2d(Pose()->x, Pose()->y,
+                                          Pose()->yaw),
          .goal = goal,
          .entry = entry,
          .scan = ScanEvidence(),
@@ -331,7 +327,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       if (scan_) FeedScan();
       const auto initial_time = now();
       const auto probe = navigation_.Probe(
-          LocalPose(Pose()->pose), FreshVelocity(initial_time), initial_time.seconds());
+          LocalPose(*Pose()), FreshVelocity(initial_time), initial_time.seconds());
       const auto& initial_state = probe.state;
       const auto verdict = dispatch_.Evaluate(
           goal, {.entry = entry_drive,
@@ -378,7 +374,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       RCLCPP_INFO(get_logger(),
                   "Navigation2D goal: pose=(%.2f, %.2f) goal=(%.2f, %.2f) "
                   "frontier_cells=%d region=%llu path_signature=%llu %s",
-                  Pose()->pose.position.x, Pose()->pose.position.y, goal.x, goal.y,
+                  Pose()->x, Pose()->y, goal.x, goal.y,
                   goal.frontier_cells,
                   static_cast<unsigned long long>(goal.region_id),
                   static_cast<unsigned long long>(initial_state.path_signature),
@@ -411,7 +407,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     input.header.stamp = now();
     input.header.frame_id = "map";
     navigation2d::exploration::PaintPlanningDebugInput(
-        planning_grid, LocalPose(Pose()->pose), input.data);
+        planning_grid, LocalPose(*Pose()), input.data);
     planning_input_publisher_->publish(input);
 
     nav_msgs::msg::OccupancyGrid inflated = input;
@@ -422,7 +418,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   std::optional<navigation2d::exploration::TourPose> TourRobot() const {
     if (!Pose()) { return std::nullopt; }
     return navigation2d::exploration::TourPose{
-        Pose()->pose.position.x, Pose()->pose.position.y, Yaw(Pose()->pose.orientation)};
+        Pose()->x, Pose()->y, Pose()->yaw};
   }
   void BuildTour() override {
     tour_.Build(explorer_, *TourRobot());
@@ -532,7 +528,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   void MarkRegionFinishPending() override { viewpoint_arrival_.MarkRegionFinishPending(); }
   void AcknowledgeEntry(navigation2d::exploration::EntryArrival arrival) override {
     navigation2d::exploration::CompleteEntryArrival(entry_, explorer_, room_visits_, *this,
-        arrival, Pose()->pose.position.x, Pose()->pose.position.y);
+        arrival, Pose()->x, Pose()->y);
   }
   void SelectAfterEntry() override { next_selection_ = now(); }
   void EntryStatus(const char* phase, const char* reason) override { PublishStatus(phase, reason); }
@@ -543,21 +539,21 @@ class AutonomousExplorer final : public rclcpp::Node,
     if (!Pose()) { return false; }
     const auto result = navigation2d::exploration::ExecuteEntryProbe(
         entry_, explorer_, room_visits_, *this,
-        {Pose()->pose.position.x, Pose()->pose.position.y, map_revision_, kExploreGoalTolerance});
+        {Pose()->x, Pose()->y, map_revision_, kExploreGoalTolerance});
     return result == navigation2d::exploration::EntryProbeResult::kDriving;
   }
 
   bool EntryProbeSatisfied() const {
     if (!Pose()) { return false; }
-    return entry_.Satisfied(Pose()->pose.position.x, Pose()->pose.position.y, active_goal_, explorer_);
+    return entry_.Satisfied(Pose()->x, Pose()->y, active_goal_, explorer_);
   }
 
   // After crossing a mouth: queue in-room leftovers before any hallway tour so
   // the kitchen white pocket is observed before soft-unlock hops out.
   void QueueActiveRegionFinish() override {
     if (!Pose()) return;
-    const double rx = Pose()->pose.position.x;
-    const double ry = Pose()->pose.position.y;
+    const double rx = Pose()->x;
+    const double ry = Pose()->y;
     tour_.QueueActiveRoom(explorer_, *TourRobot(), *this);
     RCLCPP_INFO(get_logger(),
                 "active room finish queued: local_goals=%zu unknown=%zu %s",
@@ -568,8 +564,8 @@ class AutonomousExplorer final : public rclcpp::Node,
 
   std::pair<int, int> PoseCell() const {
     const double resolution = map_ ? map_->info.resolution : .05;
-    return {static_cast<int>(std::floor(Pose()->pose.position.x / resolution)),
-            static_cast<int>(std::floor(Pose()->pose.position.y / resolution))};
+    return {static_cast<int>(std::floor(Pose()->x / resolution)),
+            static_cast<int>(std::floor(Pose()->y / resolution))};
   }
 
   void RefreshStallContext() {
@@ -820,8 +816,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     RCLCPP_WARN(get_logger(),
                 "Pinch unstick: %s clearance=%.3f scrapes=%d pose=(%.2f,%.2f)",
                 reason, active_path_min_clearance_m_, recovery_.wall_scrapes,
-                Pose() ? Pose()->pose.position.x : 0.,
-                Pose() ? Pose()->pose.position.y : 0.);
+                Pose() ? Pose()->x : 0.,
+                Pose() ? Pose()->y : 0.);
     motion_output_->Send({});
     if (mission_.phase() != MissionPhase::kReturning && !returning_ &&
         std::isfinite(active_goal_.x) && std::isfinite(active_goal_.y)) {
@@ -941,7 +937,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     constexpr int kCandidatePlanBudget = 3;
     int attempted = 0;
     int rotated_reverse = 0;
-    const double yaw = Yaw(Pose()->pose.orientation);
+    const double yaw = Pose()->yaw;
     while (!tour_.goals().empty() && attempted < kCandidatePlanBudget) {
       const Goal goal = tour_.goals().front();
       if (!explorer_.GoalRegionStillFrontier(goal)) {
@@ -962,11 +958,11 @@ class AutonomousExplorer final : public rclcpp::Node,
       // Defer reverse goals only when they are far. A tip inside the local
       // pocket must be finished even if it sits behind the robot — otherwise
       // we flee the alcove with a red frontier arc still visible.
-      const double bearing = std::atan2(goal.y - Pose()->pose.position.y,
-                                        goal.x - Pose()->pose.position.x);
+      const double bearing = std::atan2(goal.y - Pose()->y,
+                                        goal.x - Pose()->x);
       const double turn = std::abs(NormalizeAngle(bearing - yaw));
-      const double goal_range = std::hypot(goal.x - Pose()->pose.position.x,
-                                           goal.y - Pose()->pose.position.y);
+      const double goal_range = std::hypot(goal.x - Pose()->x,
+                                           goal.y - Pose()->y);
       if (turn > 1.75 && goal_range > 2.5 &&
           rotated_reverse < static_cast<int>(tour_.goals().size())) {
         tour_.DeferCurrent(goal);
@@ -1055,8 +1051,8 @@ class AutonomousExplorer final : public rclcpp::Node,
   bool HandoffToNextTourGoal() {
     if (mission_.phase() != MissionPhase::kExploring || returning_ || !navigation_.has_session() ||
         tour_.goals().size() < 2) return false;
-    const double distance = std::hypot(active_goal_.x - Pose()->pose.position.x,
-                                       active_goal_.y - Pose()->pose.position.y);
+    const double distance = std::hypot(active_goal_.x - Pose()->x,
+                                       active_goal_.y - Pose()->y);
     // A frontier viewpoint is a 360-degree observation pose, not a docking
     // point. Once inside this small observation envelope, the lidar has the
     // intended view and the next already-ranked task can be adopted without
@@ -1074,15 +1070,15 @@ class AutonomousExplorer final : public rclcpp::Node,
         continue;
       }
       if (!explorer_.InSameReachableRegion(
-              Pose()->pose.position.x, Pose()->pose.position.y, next.x, next.y,
+              Pose()->x, Pose()->y, next.x, next.y,
               kHandoffPocketM) &&
           !explorer_.InSameReachableRegion(
               active_goal_.x, active_goal_.y, next.x, next.y, kHandoffPocketM))
         return false;
       const double next_bearing = std::atan2(
-          next.y - Pose()->pose.position.y, next.x - Pose()->pose.position.x);
+          next.y - Pose()->y, next.x - Pose()->x);
       const double direction_change = std::abs(NormalizeAngle(
-          next_bearing - Yaw(Pose()->pose.orientation)));
+          next_bearing - Pose()->yaw));
       // Continuous handoff is valid only when the next task continues the
       // current motion direction. Switching a moving differential drive to
       // a goal behind it creates an artificial emergency stop and lets
@@ -1120,8 +1116,8 @@ class AutonomousExplorer final : public rclcpp::Node,
   bool StartBreadcrumbTowardHome() override {
     if (!mission_.home() || !Pose() || pose_feedback_.trail().size() < 4) return false;
     const Goal home = MakeHomeGoal();
-    const double rx = Pose()->pose.position.x;
-    const double ry = Pose()->pose.position.y;
+    const double rx = Pose()->x;
+    const double ry = Pose()->y;
     const double home_dist = std::hypot(rx - home.x, ry - home.y);
     const auto next = return_.NextStep(pose_feedback_.trail(), home, rx, ry, active_goal_);
     using navigation2d::exploration::ReturnStepKind;
@@ -1157,8 +1153,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     if (!Pose() || returning_ || mission_.phase() == MissionPhase::kReturning) return false;
     if (room_visits_.empty()) return false;
     constexpr int kVisitAttempts = navigation2d::exploration::RoomVisitLedger::kVisitAttempts;
-    const double rx = Pose()->pose.position.x;
-    const double ry = Pose()->pose.position.y;
+    const double rx = Pose()->x;
+    const double ry = Pose()->y;
     const auto room_seeds = room_visits_.Seeds();
     auto goals = explorer_.UnvisitedSpaceGoals(
         pose_feedback_.trail(), navigation2d::kOpenRetreat(),
@@ -1384,7 +1380,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     if (!Pose()) {
       return;
     }
-    pose_motion_.Observe(Pose()->pose.position.x, Pose()->pose.position.y, now().nanoseconds());
+    pose_motion_.Observe(Pose()->x, Pose()->y, now().nanoseconds());
   }
 
   bool PoseImmobilityWatchdog(const navigation2d::NavigationState& state) {
@@ -1406,7 +1402,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     RCLCPP_WARN(get_logger(),
                 "Pose immobility watchdog: stuck=(%.2f,%.2f) recoveries=%d "
                 "returning=%s entry=%s progress=%.2f tip=%s front=%.2f",
-                Pose()->pose.position.x, Pose()->pose.position.y,
+                Pose()->x, Pose()->y,
                 immobility_recoveries_, returning_ ? "yes" : "no",
                 entry_.pending() ? "yes" : "no", state.path_progress_m,
                 tip_wedged ? "yes" : "no", body.front);
@@ -1424,8 +1420,8 @@ class AutonomousExplorer final : public rclcpp::Node,
       // progress=0 far from the mouth: one peel, then leave the mouth. Do not
       // trail-retreat — that drives back along the outbound path (折返).
       const double mouth_range = std::hypot(
-          Pose()->pose.position.x - entry_.pending()->frontier_x,
-          Pose()->pose.position.y - entry_.pending()->frontier_y);
+          Pose()->x - entry_.pending()->frontier_x,
+          Pose()->y - entry_.pending()->frontier_y);
       if (state.path_progress_m < .08 && mouth_range > 1.5) {
         evidence_budget_.RequestStartReplay();
         retreat_.AllowRetry();
@@ -1549,8 +1545,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     using navigation2d::exploration::MissionPosition;
     std::optional<MissionPosition> current, dock;
     if (Pose() && mission_.home()) {
-      current = MissionPosition{Pose()->pose.position.x,
-                                Pose()->pose.position.y};
+      current = MissionPosition{Pose()->x,
+                                Pose()->y};
       const Goal home = MakeHomeGoal();
       dock = MissionPosition{home.x, home.y};
     }
@@ -1632,8 +1628,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     recovery_.Clear();
     route_failures_.ClearSignatures();
     const std::size_t local_unknown =
-        Pose() ? explorer_.ReachableUnknownCells(Pose()->pose.position.x,
-                                                Pose()->pose.position.y)
+        Pose() ? explorer_.ReachableUnknownCells(Pose()->x,
+                                                Pose()->y)
               : 0;
     // Unfinished pockets: try room-side entry before cooling/fleeing.
     if (local_unknown > 80 && Pose()) {
@@ -1663,7 +1659,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       explorer_.CoolRegion(active_goal_.x, active_goal_.y, 1.80, 3000u);
       explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 1.80,
                            3000u);
-      explorer_.CoolRegion(Pose()->pose.position.x, Pose()->pose.position.y, 1.80,
+      explorer_.CoolRegion(Pose()->x, Pose()->y, 1.80,
                            3000u);
     }
     retreat_.AllowRetry();
@@ -1711,11 +1707,11 @@ class AutonomousExplorer final : public rclcpp::Node,
       path_xy.emplace_back(navigation2d::X(pose) + planning_map_.origin_x(),
                            navigation2d::Y(pose) + planning_map_.origin_y());
     }
-    const double robot_x = Pose() ? Pose()->pose.position.x : path_xy.front().first;
-    const double robot_y = Pose() ? Pose()->pose.position.y : path_xy.front().second;
+    const double robot_x = Pose() ? Pose()->x : path_xy.front().first;
+    const double robot_y = Pose() ? Pose()->y : path_xy.front().second;
     return navigation2d::exploration::RouteCutsMappedObstacle(
         std::move(live), std::move(path_xy), planning_map_.snapshot(), robot_x, robot_y,
-        Pose() ? Yaw(Pose()->pose.orientation) : 0., Pose() ? ScanEvidence() : std::nullopt,
+        Pose() ? Pose()->yaw : 0., Pose() ? ScanEvidence() : std::nullopt,
         execution_tick);
   }
 
@@ -1759,8 +1755,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     const auto carrot = debug_paths_.Carrot(global.header);
     carrot_publisher_->publish(carrot);
     const auto [tour, frontiers] = debug_paths_.Tour(
-        global.header, map_ ? &*map_ : nullptr, Pose()->pose.position.x,
-        Pose()->pose.position.y, active_goal_, tour_.goals());
+        global.header, map_ ? &*map_ : nullptr, Pose()->x,
+        Pose()->y, active_goal_, tour_.goals());
     tour_publisher_->publish(tour);
     frontiers_publisher_->publish(frontiers);
     PublishFrontierDebug();
@@ -1772,9 +1768,9 @@ class AutonomousExplorer final : public rclcpp::Node,
     }
     if (!map_ || !Pose() || !scan_ || KnownCells() < 100) return;
     if (!mission_.started()) {
-      const auto& pose = Pose()->pose;
+      const auto& pose = *Pose();
       const navigation2d::exploration::MissionHome home{
-          pose.position.x, pose.position.y, Yaw(pose.orientation)};
+          pose.x, pose.y, pose.yaw};
       const auto started = now();
       return_.ResetEscapes();
       escape_.ClearReturnIntent();
@@ -1836,7 +1832,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     // every new scan invalidated the target, stopped the robot, then selected
     // another frontier. Keep tracking this safe standoff pose until the
     // controller reports success or an actual navigation failure.
-    const auto local_pose = LocalPose(Pose()->pose);
+    const auto local_pose = LocalPose(*Pose());
     const auto tick_time = now();
     const auto measured_velocity = FreshVelocity(tick_time);
     const auto state = navigation_.Step(local_pose, measured_velocity,
@@ -1853,8 +1849,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     // CARROT/GOAL with zero command (junction hesitation).
     if (mission_.phase() == MissionPhase::kExploring && !returning_ && Pose() &&
         !retreat_.active()) {
-      const double goal_dist = std::hypot(active_goal_.x - Pose()->pose.position.x,
-                                          active_goal_.y - Pose()->pose.position.y);
+      const double goal_dist = std::hypot(active_goal_.x - Pose()->x,
+                                          active_goal_.y - Pose()->y);
       if (goal_dist < .28 && state.path_progress_m >= .05) {
         navigation_.Cancel();
         motion_output_->Send({});
@@ -1888,8 +1884,8 @@ class AutonomousExplorer final : public rclcpp::Node,
         !entry_.pending() && !entry_.locked() && Pose()) {
       const double path_clear =
           ActivePathMargin(state.global_planning.path_min_clearance_m);
-      const double goal_dist = std::hypot(active_goal_.x - Pose()->pose.position.x,
-                                          active_goal_.y - Pose()->pose.position.y);
+      const double goal_dist = std::hypot(active_goal_.x - Pose()->x,
+                                          active_goal_.y - Pose()->y);
       const BodyRanges body = ReadBodyRanges();
       if (goal_dist < 4. * navigation2d::kSwingClearance() &&
           state.path_progress_m >= navigation2d::kPlanningRadius() &&
@@ -1954,8 +1950,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     // terminal cell (lidar already saw the pocket), then turn/brief-reverse
     // out along the driven trail instead of kissing the wall until timeout.
     const double goal_distance_now = Pose()
-        ? std::hypot(active_goal_.x - Pose()->pose.position.x,
-                     active_goal_.y - Pose()->pose.position.y)
+        ? std::hypot(active_goal_.x - Pose()->x,
+                     active_goal_.y - Pose()->y)
         : std::numeric_limits<double>::infinity();
     const BodyRanges body = ReadBodyRanges();
     const double front_range = body.front;
@@ -1983,7 +1979,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       const bool local_frontier_open =
           !retreat_.active() && explorer_.GoalRegionStillFrontier(active_goal_);
       const std::size_t local_unknown = explorer_.ReachableUnknownCells(
-          Pose()->pose.position.x, Pose()->pose.position.y);
+          Pose()->x, Pose()->y);
       if (local_frontier_open || local_unknown > 80) {
         RCLCPP_WARN(get_logger(),
                     "Corner crawl stalled with local unknown=%zu frontier=%s; "
@@ -2017,7 +2013,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       // Cool only when the tip is truly done (no local unknown left).
       explorer_.CoolRegion(active_goal_.x, active_goal_.y, 1.80, 3000u);
       explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 1.80, 3000u);
-      explorer_.CoolRegion(Pose()->pose.position.x, Pose()->pose.position.y, 1.80, 3000u);
+      explorer_.CoolRegion(Pose()->x, Pose()->y, 1.80, 3000u);
       ClearEntryMouthLock();
       retreat_.Finish();
       retreat_.AllowRetry();  // allow a short trail exit from this cell
@@ -2035,7 +2031,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       if (mission_.phase() == MissionPhase::kReturning || returning_) {
         const Goal home = MakeHomeGoal();
         const double home_dist =
-            std::hypot(Pose()->pose.position.x - home.x, Pose()->pose.position.y - home.y);
+            std::hypot(Pose()->x - home.x, Pose()->y - home.y);
         if (return_.breadcrumbs() && home_dist > .40) {
           // A hop moved the robot past whatever blocked the direct route;
           // go straight home from here when the map allows, and only keep

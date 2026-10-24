@@ -402,3 +402,7 @@ and map-growth anchor. Cell changes reset failures and cooling; map growth or
 explicit cooling clears preserve the failure budget. Navigation gets an owned
 signature snapshot, without sharing a mutable container. The legacy write-only
 execution-stall total is removed; exported counters/messages remain unchanged.
+
+### 位姿输入边界
+
+`PoseFeedback` 在 ROS 回调中转换为 map-frame `PoseObservation`，探索逻辑只读取平面坐标、朝向和原始纳秒时间戳。缓存每次观测均更新，与累计轨迹的 5 cm 采样门槛独立；不增加时效或四元数归一化策略。
