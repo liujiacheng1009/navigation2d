@@ -50,6 +50,7 @@ add_library(navigation2d_core STATIC
   exploration/exploration_policy.cc
   exploration/frontier_explorer.cc exploration/live_route_safety.cc
   exploration/frontier_tracks.cc exploration/frontier_visit_memory.cc
+  exploration/frontier_travel_graph.cc exploration/bootstrap_frontier_travel.cc
   exploration/region_scheduler.cc
   application/execution_watchdog.cc
   application/navigation_failure.cc

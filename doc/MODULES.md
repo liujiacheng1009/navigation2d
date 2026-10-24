@@ -172,3 +172,19 @@ flowchart TD
   Room --> Probe[Bounded completion probe]
   Room --> Wait[Wait, rescue, or return]
 ```
+
+### Frontier travel graph
+
+`BuildFrontierTravelGraph` borrows planning and observation maps and returns an
+execution-safe viewpoint mask plus discovery travel distances. It owns no map
+or mission state. Safe and relaxed discovery searches keep their independent
+masks, row-major nearest-start ties and four-neighbour expansion order. Relaxed
+distances fill only cells unreachable in the safe graph. An absent safe start
+returns `nullopt` before bootstrap.
+
+`ApplyBootstrapFrontierTravel` handles the small-map fallback separately. It
+uses raw known-free planning cells only when no observed frontier is reachable
+and known coverage is below 10000 cells. It changes discovery distances, never
+the safe viewpoint mask. The explorer still checks that mask before nominating
+an executable goal; navigation still validates the live route. The stage moves
+its result buffers and does not copy either occupancy map.

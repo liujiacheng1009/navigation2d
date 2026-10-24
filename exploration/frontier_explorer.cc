@@ -1,4 +1,5 @@
 #include "navigation2d/exploration/frontier_explorer.h"
+#include "navigation2d/exploration/frontier_travel_graph.h"
 #include "navigation2d/exploration/doorway_geometry.h"
 
 #include <array>
@@ -191,151 +192,13 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
   if (map.width <= 2 || map.height <= 2 || map.resolution <= 0. ||
       map.cells.size() != static_cast<std::size_t>(map.width * map.height)) return {};
   std::vector<unsigned char> frontier(map.cells.size(), 0), visited(map.cells.size(), 0);
-  std::vector<unsigned char> safe(map.cells.size(), 0);
-  std::vector<unsigned char> discovery_safe(map.cells.size(), 0);
-  for (int row = 0; row < map.height; ++row) for (int col = 0; col < map.width; ++col)
-    safe[static_cast<std::size_t>(row) * map.width + col] = SafeViewpoint(col, row);
-  // Discovery graph only finds room boundaries. Executable viewpoints still
-  // require SafeViewpoint (== planning radius); nominating discovery-only
-  // poses produced candidates the planner rejected as goal-occupied.
-  const double discovery_clearance = std::clamp(
-      config_.footprint_clearance - .12, .14, kPlanningRadius());
-  for (int row = 0; row < map.height; ++row) for (int col = 0; col < map.width; ++col) {
-    const std::size_t index = static_cast<std::size_t>(row) * map.width + col;
-    discovery_safe[index] = Free(col, row) && ClearAt(col, row, discovery_clearance);
+  const auto graph = frontier_internal::BuildFrontierTravelGraph(
+      map, observation, config_.footprint_clearance, robot_x, robot_y);
+  if (!graph) {
+    return {};
   }
-  const int robot_col = static_cast<int>(std::floor((robot_x - map.origin_x) / map.resolution));
-  const int robot_row = static_cast<int>(std::floor((robot_y - map.origin_y) / map.resolution));
-  int start = -1;
-  double start_distance = std::numeric_limits<double>::infinity();
-  const int start_search = static_cast<int>(std::ceil(1.0 / map.resolution));
-  for (int row = std::max(0, robot_row - start_search);
-       row <= std::min(map.height - 1, robot_row + start_search); ++row)
-  for (int col = std::max(0, robot_col - start_search);
-       col <= std::min(map.width - 1, robot_col + start_search); ++col) {
-    const int index = row * map.width + col;
-    if (!safe[index]) continue;
-    const double distance = std::hypot(col - robot_col, row - robot_row);
-    if (distance < start_distance) { start_distance = distance; start = index; }
-  }
-  if (start < 0) return {};
-  std::vector<int> travel_cells(map.cells.size(), -1);
-  std::deque<int> reachable{start};
-  travel_cells[start] = 0;
-  constexpr int cardinal_x[] = {-1, 1, 0, 0};
-  constexpr int cardinal_y[] = {0, 0, -1, 1};
-  while (!reachable.empty()) {
-    const int current = reachable.front(); reachable.pop_front();
-    const int row = current / map.width, col = current % map.width;
-    for (int direction = 0; direction < 4; ++direction) {
-      const int x = col + cardinal_x[direction], y = row + cardinal_y[direction];
-      if (x < 0 || y < 0 || x >= map.width || y >= map.height) continue;
-      const int next = y * map.width + x;
-      if (!safe[next] || travel_cells[next] >= 0) continue;
-      travel_cells[next] = travel_cells[current] + 1;
-      reachable.push_back(next);
-    }
-  }
-  // Frontier discovery and goal execution use different contracts. The
-  // execution graph requires complete footprint clearance, while a physical
-  // doorway may be narrower than that graph and still be passable. Build a
-  // relaxed discovery graph for finding room boundaries only; StartNavigation
-  // continues to validate every dispatched goal against the real inflated map.
-  std::vector<int> discovery_travel_cells(map.cells.size(), -1);
-  int discovery_start = start;
-  if (!discovery_safe[static_cast<std::size_t>(discovery_start)]) {
-    double nearest_discovery = std::numeric_limits<double>::infinity();
-    for (int row = std::max(0, robot_row - start_search);
-         row <= std::min(map.height - 1, robot_row + start_search); ++row) {
-      for (int col = std::max(0, robot_col - start_search);
-           col <= std::min(map.width - 1, robot_col + start_search); ++col) {
-        const int index = row * map.width + col;
-        if (!discovery_safe[static_cast<std::size_t>(index)]) continue;
-        const double distance = std::hypot(col - robot_col, row - robot_row);
-        if (distance < nearest_discovery) {
-          nearest_discovery = distance;
-          discovery_start = index;
-        }
-      }
-    }
-  }
-  if (discovery_start >= 0 &&
-      discovery_safe[static_cast<std::size_t>(discovery_start)]) {
-    std::deque<int> discovery_queue{discovery_start};
-    discovery_travel_cells[static_cast<std::size_t>(discovery_start)] = 0;
-    while (!discovery_queue.empty()) {
-      const int current = discovery_queue.front();
-      discovery_queue.pop_front();
-      const int row = current / map.width;
-      const int col = current % map.width;
-      for (int direction = 0; direction < 4; ++direction) {
-        const int x = col + cardinal_x[direction], y = row + cardinal_y[direction];
-        if (x < 0 || y < 0 || x >= map.width || y >= map.height) continue;
-        const int next = y * map.width + x;
-        if (!discovery_safe[static_cast<std::size_t>(next)] ||
-            discovery_travel_cells[static_cast<std::size_t>(next)] >= 0) continue;
-        discovery_travel_cells[static_cast<std::size_t>(next)] =
-            discovery_travel_cells[static_cast<std::size_t>(current)] + 1;
-        discovery_queue.push_back(next);
-      }
-    }
-  }
-  // Retain exact safe-graph distances where available. Relaxed-only cells are
-  // discovery hints and will be rejected individually if the live planner
-  // cannot execute their path; they must not suppress the whole room.
-  for (std::size_t index = 0; index < travel_cells.size(); ++index) {
-    if (travel_cells[index] < 0) travel_cells[index] = discovery_travel_cells[index];
-  }
-  // During the first scan, costmap inflation can temporarily mark every
-  // viewpoint around the robot unsafe even though the raw map already has a
-  // connected free corridor and visible unknown boundary.  Without a first
-  // goal the robot cannot move far enough for the mapper to resolve that
-  // boundary.  Use the raw free-cell graph only for this small bootstrap
-  // window; mature maps continue to require the full footprint-safe graph.
-  const std::size_t raw_frontier_count = CountRawFrontierCells();
-  const bool bootstrap_map = KnownCells() < 10000 && raw_frontier_count > 0;
-  if (bootstrap_map) {
-    bool reachable_raw_frontier = false;
-    for (int index = 0; index < static_cast<int>(travel_cells.size()); ++index) {
-      if (travel_cells[index] < 0) continue;
-      const int row = index / map.width, col = index % map.width;
-      if (RawFrontier(col, row)) { reachable_raw_frontier = true; break; }
-    }
-    if (!reachable_raw_frontier) {
-      std::fill(travel_cells.begin(), travel_cells.end(), -1);
-      int raw_start = -1;
-      double raw_start_distance = std::numeric_limits<double>::infinity();
-      for (int row = std::max(0, robot_row - start_search);
-           row <= std::min(map.height - 1, robot_row + start_search); ++row) {
-        for (int col = std::max(0, robot_col - start_search);
-             col <= std::min(map.width - 1, robot_col + start_search); ++col) {
-          const int index = row * map.width + col;
-          if (!Free(col, row)) continue;
-          const double distance = std::hypot(col - robot_col, row - robot_row);
-          if (distance < raw_start_distance) {
-            raw_start_distance = distance;
-            raw_start = index;
-          }
-        }
-      }
-      if (raw_start >= 0) {
-        std::deque<int> raw_reachable{raw_start};
-        travel_cells[raw_start] = 0;
-        while (!raw_reachable.empty()) {
-          const int current = raw_reachable.front(); raw_reachable.pop_front();
-          const int row = current / map.width, col = current % map.width;
-          for (int direction = 0; direction < 4; ++direction) {
-            const int x = col + cardinal_x[direction], y = row + cardinal_y[direction];
-            if (x < 0 || y < 0 || x >= map.width || y >= map.height) continue;
-            const int next = y * map.width + x;
-            if (travel_cells[next] >= 0 || !Free(x, y)) continue;
-            travel_cells[next] = travel_cells[current] + 1;
-            raw_reachable.push_back(next);
-          }
-        }
-      }
-    }
-  }
+  const auto& safe = graph->safe;
+  const auto& travel_cells = graph->travel_cells;
   // Approximate the lidar field of view from a candidate and count unique
   // unknown cells before the first occupied cell on each ray. This is the
   // actual NBV gain, rather than the size of the frontier component alone.
