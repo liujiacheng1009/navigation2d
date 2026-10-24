@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <string>
 
-#include "navigation2d/exploration/frontier_explorer.h"
+#include "navigation2d/exploration/frontier_types.h"
 namespace navigation2d::exploration {
 enum class DispatchVerdict { kAcceptPrepared, kAcceptedRetry, kRejected };
 enum class DispatchRejection { kNoRoute, kMappedWall, kOpenScrape, kPinchScrape };

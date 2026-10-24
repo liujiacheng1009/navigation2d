@@ -4,7 +4,8 @@
 #include <span>
 #include <string>
 
-#include "navigation2d/exploration/frontier_explorer.h"
+#include "navigation2d/exploration/frontier_types.h"
+#include "navigation2d/exploration/frontier_debug_snapshot.h"
 #include "navigation2d/geometry/pose_2d.h"
 
 namespace navigation2d::exploration {

@@ -2,7 +2,7 @@
 #include <utility>
 #include <vector>
 
-#include "navigation2d/exploration/frontier_explorer.h"
+#include "navigation2d/exploration/frontier_types.h"
 namespace navigation2d::exploration {
 // One writer owns entrance evidence and per-spot retry counts for a mission.
 class RoomVisitLedger {

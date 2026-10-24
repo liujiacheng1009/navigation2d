@@ -95,3 +95,19 @@ navigation2d_geometry 边界，尚未把所有概念层拆成独立 target。
 - `application/exploration/planning_evidence_budget`：唯一拥有起点/已行轨迹重放意图及米制预算；地图分辨率和轨迹样本不足时保留请求，只在准备证据时消费一次。取消重放意图保留尚未消费的预算，保持原恢复语义。
 
 - `ros/exploration/explorer_parameters`：启动时收集 ROS 参数、环境约束及结果路径，按显式算法注册表验证三种用途的选择；节点持有 const 配置，不再交错声明参数和任务操作。保留原参数/环境解析顺序与默认值，读取不构造算法实例。
+
+### Frontier evidence and memory boundaries
+
+`frontier_types.h` defines mapper grid and goal values without an explorer dependency.
+`MapEvidence` owns observation/planning snapshots; borrowed `ObservationGridView` and
+`PlanningGridView` separate raw frontier identity from execution geometry. Validated
+callers supply matching grid storage and positive planning resolution. Update
+notification occurs after the observation copy and before the planning move.
+
+`FrontierTracks` owns observation epochs and representative association; duplicate
+candidates in one epoch do not increase persistence. `FrontierVisitMemory` owns
+temporary/persistent spatial exclusions and known-cell growth expiry.
+`doorway_geometry` calculates clearance and doorway evidence; `live_route_safety`
+checks body-swept route samples against occupied cells. Neither grants passage
+through occupied mapper evidence. FrontierExplorer still composes extraction,
+viewpoint generation and region scheduling; those stages remain to be separated.

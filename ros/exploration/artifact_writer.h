@@ -5,7 +5,7 @@
 #include <string>
 #include <utility>
 
-#include "navigation2d/exploration/frontier_explorer.h"
+#include "navigation2d/exploration/frontier_types.h"
 namespace navigation2d::exploration_io {
 struct ArtifactPaths {
   const std::string& result;

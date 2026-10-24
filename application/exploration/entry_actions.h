@@ -1,5 +1,5 @@
 #pragma once
-#include "navigation2d/exploration/frontier_explorer.h"
+#include "navigation2d/exploration/frontier_types.h"
 namespace navigation2d::exploration {
 enum class EntryArrival {
   kBeforeProbe,

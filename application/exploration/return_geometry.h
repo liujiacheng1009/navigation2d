@@ -2,7 +2,7 @@
 #include <span>
 #include <utility>
 
-#include "navigation2d/exploration/frontier_explorer.h"
+#include "navigation2d/exploration/frontier_types.h"
 namespace navigation2d::exploration {
 enum class ReturnStepKind { kDirect, kBreadcrumb, kRepeated };
 struct ReturnStep {

@@ -43,7 +43,9 @@ add_library(navigation2d_core STATIC
   control/safe_corridor.cc control/collision_monitor.cc control/mpc_controller.cc
   configuration/vehicle_config.cc
   exploration/exploration_policy.cc
-  exploration/frontier_explorer.cc exploration/region_scheduler.cc
+  exploration/frontier_explorer.cc exploration/live_route_safety.cc
+  exploration/frontier_tracks.cc exploration/frontier_visit_memory.cc
+  exploration/region_scheduler.cc
   application/execution_watchdog.cc
   application/navigation_failure.cc
   application/command_safety_pipeline.cc

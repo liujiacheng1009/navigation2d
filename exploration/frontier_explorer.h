@@ -1,6 +1,12 @@
 #pragma once
 
 #include "navigation2d/exploration/exploration_policy.h"
+#include "navigation2d/exploration/frontier_types.h"
+#include "navigation2d/exploration/frontier_debug_snapshot.h"
+#include "navigation2d/exploration/live_route_safety.h"
+#include "navigation2d/exploration/map_evidence.h"
+#include "navigation2d/exploration/frontier_tracks.h"
+#include "navigation2d/exploration/frontier_visit_memory.h"
 #include "navigation2d/exploration/exploration_config.h"
 #include "navigation2d/exploration/region_scheduler.h"
 #include "navigation2d/geometry/robot_geometry.h"
@@ -13,73 +19,6 @@
 #include <vector>
 
 namespace navigation2d {
-
-struct ExplorationGrid {
-  int width = 0;
-  int height = 0;
-  double resolution = 0.;
-  double origin_x = 0.;
-  double origin_y = 0.;
-  std::vector<std::int8_t> cells;
-};
-
-// True when a world-frame polyline puts the body on a live occupied cell.
-// Unknown is not lethal. SLAM occupied is never carved open for passage.
-bool PathCutsLiveOccupied(const ExplorationGrid& live,
-                          const std::vector<std::pair<double, double>>& path_xy,
-                          double robot_x, double robot_y,
-                          double body_radius = kPlanningRadius(),
-                          double under_robot_m = kPlanningRadius());
-
-// After repeated live-map path cuts (>=2), leave the tip pocket instead of
-// replan thrash. A single low-clearance graze near a passable door must not
-// abandon the room.
-bool PreferTipAbandonAfterPathCut(int mapped_obstacle_rejects,
-                                  double path_min_clearance_m);
-
-struct ExplorationGoal {
-  double x = 0.;
-  double y = 0.;
-  double yaw = 0.;
-  double frontier_x = 0.;
-  double frontier_y = 0.;
-  int frontier_cells = 0;
-  // Number of frontier cells represented by this observation task.  Kept
-  // separately from the raw component size so tour ordering can favour one
-  // informative viewpoint over several tiny fragments of the same boundary.
-  double information_gain = 0.;
-  double score = 0.;
-  // True when this goal was synthesized from leftover specks that failed
-  // the ordinary cluster/standoff tests.  Used only as one completing probe
-  // after the exploring tour is empty.
-  bool leftover_approach = false;
-  // Assigned by RegionScheduler after frontier extraction. Kept at the end
-  // so existing aggregate construction of goals remains source compatible.
-  std::uint64_t region_id = 0;
-};
-
-// Debug overlay for SelectGoals: approachable frontier cells, per-cluster
-// viewpoints, and final mouth-stable goals. World frame = map frame.
-struct FrontierDebugSnapshot {
-  struct Cell {
-    double x = 0.;
-    double y = 0.;
-    int cluster_id = -1;
-  };
-  struct Goal {
-    double x = 0.;
-    double y = 0.;
-    double frontier_x = 0.;
-    double frontier_y = 0.;
-    int cluster_id = -1;
-    double score = 0.;
-    double information_gain = 0.;
-    int frontier_cells = 0;
-  };
-  std::vector<Cell> cells;
-  std::vector<Goal> cluster_goals;
-  std::vector<Goal> goals;
-};
 
 // Navigation2D exploration policy. It converts a partial occupancy grid into
 // safe, scored frontier viewpoints and owns attempt/completion bookkeeping.
@@ -177,7 +116,7 @@ class FrontierExplorer {
   // Radii >= 1.5 m also suppress leftover approaches (wall-tip thrash).
   void CoolRegion(double x, double y, double radius_m,
                   std::size_t required_known_growth = 2500u);
-  void ClearBlacklist() { blacklist_.clear(); }
+  void ClearBlacklist() { visits_.Clear(); }
   bool CompletionEligible(std::size_t initial_known_cells) const;
   // Unknown cells that are reachable through the planner's safe graph on the
   // observed occupancy map (no door-seal carving). Distinguishes an unvisited
@@ -206,7 +145,7 @@ class FrontierExplorer {
       double seed_radius_m) const;
   std::size_t RegionFrontierCells(double anchor_x, double anchor_y,
                                   double radius_m) const;
-  const ExplorationGrid& observation_map() const { return observation_map_; }
+  const ExplorationGrid& observation_map() const { return maps_.observation(); }
   std::size_t KnownCells() const;
   int completed_goals() const { return completed_goals_; }
   int failed_goals() const { return failed_goals_; }
@@ -243,32 +182,9 @@ class FrontierExplorer {
   std::pair<double, double> CellCenter(int col, int row) const;
 
   FrontierExplorerConfig config_;
-  // observation_map_ is the exact occupancy grid received from the mapper.
-  // map_ is a planning copy in which only physically passable partial
-  // openings may be opened.  Completion and frontier identity always use the
-  // observation map; path safety continues to use the planning copy.
-  ExplorationGrid observation_map_;
-  ExplorationGrid map_;
-  struct BlacklistEntry {
-    double x = 0., y = 0.;
-    double radius = 0.;
-    std::size_t known_cells = 0;
-    // Successful observation viewpoints are cooled for a larger map-growth
-    // budget so the planner cannot immediately revisit the same room edge.
-    std::size_t required_growth = 600;
-    // A successful doorway is an observation already performed in this
-    // mission. It must not become eligible again merely because the map grew.
-    bool persistent = false;
-  };
-  std::vector<BlacklistEntry> blacklist_;
-  struct FrontierTrack {
-    double x = 0., y = 0.;
-    double goal_x = 0., goal_y = 0.;
-    int observations = 0;
-    std::uint64_t last_observation = 0;
-  };
-  std::vector<FrontierTrack> frontier_tracks_;
-  std::uint64_t stability_observation_ = 0;
+  frontier_internal::MapEvidence maps_;
+  frontier_internal::FrontierVisitMemory visits_;
+  frontier_internal::FrontierTracks tracks_;
   int completed_goals_ = 0;
   int failed_goals_ = 0;
   std::size_t raw_frontier_cells_ = 0;

@@ -6,7 +6,7 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav_msgs/msg/path.hpp"
-#include "navigation2d/exploration/frontier_explorer.h"
+#include "navigation2d/exploration/frontier_types.h"
 #include "navigation2d/geometry/path_2d.h"
 #include "rclcpp/time.hpp"
 #include "std_msgs/msg/header.hpp"

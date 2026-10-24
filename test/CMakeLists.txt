@@ -56,3 +56,13 @@ navigation2d_test(entry_completion_test navigation2d_exploration_application)
 navigation2d_test(navigation_dispatch_test navigation2d_exploration_application)
 
 navigation2d_test(planning_evidence_budget_test navigation2d_values)
+
+navigation2d_assert_test(map_evidence_test navigation2d_core)
+
+navigation2d_assert_test(frontier_tracks_test navigation2d_core)
+
+navigation2d_assert_test(frontier_visit_memory_test navigation2d_core)
+
+# Differential driver: compared against an independently compiled frozen core.
+add_executable(navigation2d_frontier_replay frontier_replay/contract_replay.cc)
+target_link_libraries(navigation2d_frontier_replay PRIVATE navigation2d_core)
