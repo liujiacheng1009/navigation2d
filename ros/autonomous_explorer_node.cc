@@ -13,7 +13,7 @@
 
 #include "geometry_msgs/msg/pose_array.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
-#include "geometry_msgs/msg/twist.hpp"
+#include "navigation2d/ros/exploration/motion_output.h"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "nav_msgs/msg/path.hpp"
@@ -99,7 +99,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         explorer_(navigation2d::exploration_ros::ReadExplorerConfig(*this)),
         parameters_(navigation2d::exploration_ros::ReadExplorerParameters(
             *this, *navigation2d::AlgorithmRegistry::Builtins())) {
-    command_publisher_ = create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
+    motion_output_ = navigation2d::exploration_ros::MakeRosMotionOutput(*this);
     status_publisher_ = create_publisher<std_msgs::msg::String>(
         "/exploration/status", rclcpp::QoS(1).transient_local().reliable());
     path_publisher_ = create_publisher<nav_msgs::msg::Path>(
@@ -644,15 +644,12 @@ class AutonomousExplorer final : public rclcpp::Node,
     const auto decision = navigation2d::exploration::SelectEscape(body, returning_);
     if (!decision) { return false; }
     const auto [velocity, hold_s] = *decision;
-    geometry_msgs::msg::Twist command;
-    command.linear.x = velocity.linear;
-    command.angular.z = velocity.angular;
     const double front = body.front, back = body.back, left = body.left, right = body.right;
     escape_.Begin(velocity, (now() + rclcpp::Duration::from_seconds(hold_s)).nanoseconds());
     RCLCPP_WARN(get_logger(),
                 "Starting body-frame escape: front=%.2f back=%.2f left=%.2f "
                 "right=%.2f v=%.2f w=%.2f hold=%.1f",
-                front, back, left, right, command.linear.x, command.angular.z,
+                front, back, left, right, velocity.linear, velocity.angular,
                 hold_s);
     return true;
   }
@@ -664,16 +661,12 @@ class AutonomousExplorer final : public rclcpp::Node,
       // yaw bias after localization has coasted on odom.
       const BodyRanges body = ReadBodyRanges();
       const auto adjusted = escape_.Command(body);
-      geometry_msgs::msg::Twist command;
-      command.linear.x = adjusted.linear;
-      command.angular.z = adjusted.angular;
-      command_publisher_->publish(command);
+      motion_output_->Send(adjusted);
       PublishStatus("RECOVERING", "body-frame tip escape (prefer reverse)");
       return true;
     }
     escape_.Unschedule();
-    geometry_msgs::msg::Twist stop;
-    command_publisher_->publish(stop);
+    motion_output_->Send({});
     const bool resume_return = escape_.ConsumeReturnIntent();
     if (resume_return) {
       BeginReturn(true);
@@ -850,8 +843,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                 reason, active_path_min_clearance_m_, recovery_.wall_scrapes,
                 Pose() ? Pose()->pose.position.x : 0.,
                 Pose() ? Pose()->pose.position.y : 0.);
-    geometry_msgs::msg::Twist stop;
-    command_publisher_->publish(stop);
+    motion_output_->Send({});
     if (mission_.phase() != MissionPhase::kReturning && !returning_ &&
         std::isfinite(active_goal_.x) && std::isfinite(active_goal_.y)) {
       explorer_.RecordAttempt(entry_.pending().value_or(active_goal_), false);
@@ -1066,7 +1058,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   void StopSelectionMotion() override {
-    command_publisher_->publish(geometry_msgs::msg::Twist{});
+    motion_output_->Send({});
   }
   void DeferBlockedSelection(const char* message) override {
     next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
@@ -1439,8 +1431,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                 immobility_recoveries_, returning_ ? "yes" : "no",
                 entry_.pending() ? "yes" : "no", state.path_progress_m,
                 tip_wedged ? "yes" : "no", body.front);
-    geometry_msgs::msg::Twist stop;
-    command_publisher_->publish(stop);
+    motion_output_->Send({});
     navigation_.Cancel();
     pose_motion_.Debounce(now().nanoseconds());
     if (mission_.phase() == MissionPhase::kReturning || returning_) {
@@ -1575,8 +1566,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     }
     ClearEntryMouthLock();
     return_.UseBreadcrumbs(false);
-    geometry_msgs::msg::Twist stop;
-    command_publisher_->publish(stop);
+    motion_output_->Send({});
     using navigation2d::exploration::MissionPosition;
     std::optional<MissionPosition> current, dock;
     if (Pose() && mission_.home()) {
@@ -1758,10 +1748,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     return TourSegmentCutsWall(x, y, target.x, target.y);
   }
   void PublishEntryCrawl(navigation2d::Twist2d velocity) override {
-    geometry_msgs::msg::Twist command;
-    command.linear.x = velocity.linear;
-    command.angular.z = velocity.angular;
-    command_publisher_->publish(command);
+    motion_output_->Send(velocity);
     PublishStatus("COMPLETING", "entry no-motion; open-loop crawl into mouth");
   }
 
@@ -1829,8 +1816,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     NotePoseMotion();
     if (TickEscape()) return;
     if (mission_.Bootstrapping(now().nanoseconds())) {
-      geometry_msgs::msg::Twist stop;
-      command_publisher_->publish(stop);
+      motion_output_->Send({});
       return;
     }
     if (mission_.phase() == MissionPhase::kReturning || returning_) {
@@ -1858,8 +1844,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       // running while the next goal is planned rolls the chassis from the
       // viewpoint into the planning circle (live: arrived, then
       // "start occupied, nearest obstacle 0.19 m").
-      geometry_msgs::msg::Twist stop;
-      command_publisher_->publish(stop);
+      motion_output_->Send({});
       if (now() >= next_selection_) {
         next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
         SelectNextGoal();
@@ -1893,8 +1878,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                                           active_goal_.y - Pose()->pose.position.y);
       if (goal_dist < .28 && state.path_progress_m >= .05) {
         navigation_.Cancel();
-        geometry_msgs::msg::Twist stop;
-        command_publisher_->publish(stop);
+        motion_output_->Send({});
         viewpoint_arrival_.Near(explorer_, entry_, tour_, active_goal_, *TourRobot(), *this);
         return;
       }
@@ -1903,8 +1887,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       RCLCPP_WARN(get_logger(),
                   "Dropping path that intersects mapped obstacles goal=(%.2f, %.2f)",
                   active_goal_.x, active_goal_.y);
-      geometry_msgs::msg::Twist stop;
-      command_publisher_->publish(stop);
+      motion_output_->Send({});
       ClearPublishedNavPaths();
       if (ReplanAfterRouteCut()) return;
       if (mission_.phase() == MissionPhase::kReturning || returning_) {
@@ -1932,8 +1915,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       if (goal_dist < 4. * navigation2d::kSwingClearance() &&
           state.path_progress_m >= navigation2d::kPlanningRadius() &&
           IsCornerTipStall(path_clear, body.front, body.side)) {
-        geometry_msgs::msg::Twist stop;
-        command_publisher_->publish(stop);
+        motion_output_->Send({});
         BreakWallScrapeThrash("driving scrape path into corner tip");
         return;
       }
@@ -1961,10 +1943,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     }
     const auto velocity = navigation2d::exploration::ExecutionCommand(
         state.command, safety_held, approach, *this);
-    geometry_msgs::msg::Twist command;
-    command.linear.x = velocity.linear;
-    command.angular.z = velocity.angular;
-    command_publisher_->publish(command);
+    motion_output_->Send(velocity);
     // Throttle debug topics; control still runs every tick.
     if ((now() - last_debug_publish_).seconds() >= 0.2) {
       last_debug_publish_ = now();
@@ -2418,7 +2397,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   navigation2d::FrontierExplorer explorer_;
   navigation2d::exploration::NavigationSession navigation_;
   const navigation2d::exploration_ros::ExplorerParameters parameters_;
-  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr command_publisher_;
+  std::unique_ptr<navigation2d::exploration::MotionOutput> motion_output_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_publisher_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr local_trajectory_publisher_;

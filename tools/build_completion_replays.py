@@ -63,7 +63,8 @@ def main():
     template = shlex.split((target / 'link.txt').read_text())
     fixture_paths = [root / 'test/completion_replay/scenario.h', *(root / 'test/replay').glob('*.h')]
     fixtures = {str(p.relative_to(root)): digest(p) for p in fixture_paths}
-    manifest = {'execution_mode': 'logic-only-completion', 'baseline_headers': headers[1],
+    manifest = {'motion_helper_sha256': digest(Path(__file__).with_name('replay_motion_output.py')),
+                'execution_mode': 'logic-only-completion', 'baseline_headers': headers[1],
                 'baseline_core': digest(core),
                 'candidate_core': digest(build / 'navigation2d_build/libnavigation2d_core.a'),
                 'fixtures': fixtures, 'builder': digest(Path(__file__)), 'artifacts': {}}

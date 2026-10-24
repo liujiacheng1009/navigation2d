@@ -64,11 +64,13 @@ def adapt(source, label):
   bool ReplayHasNavigation() const {{ return {navigation}; }}
 '''
     source = source[:start] + capture + source[start:]
+    from replay_motion_output import adapt_motion_output
+    source, planar_commands = adapt_motion_output(source)
     source, commands = re.subn(r'command_publisher_->publish\(([^;]+)\);',
                                r'replay_.ProbeCommand(\1);', source)
     source, publications = re.subn(r'\w+_publisher_->publish\(([^;]+)\);',
                                    r'replay_.ProbePublish(\1);', source)
-    if not commands or not publications or re.search(r'(?:->|\.)\s*publish\s*\(', source):
+    if not (commands + planar_commands) or not publications or re.search(r'(?:->|\.)\s*publish\s*\(', source):
         raise ValueError('publisher adaptation incomplete; refusing a replay with real outputs')
     source = source.replace('/tmp/sweepnav-navigation-map-', f'/tmp/replay-{label}-map-')
     source += '''
@@ -137,6 +139,7 @@ def main():
                 'bundle_helper_sha256': digest(Path(__file__).with_name('replay_baseline_bundle.py')),
                 'execution_mode': 'logic-only' if args.logic_only else 'captured-endpoints',
                 'startup_helper_sha256': digest(Path(__file__).with_name('replay_startup.py')),
+                'motion_helper_sha256': digest(Path(__file__).with_name('replay_motion_output.py')),
                 'header_helper_sha256': digest(Path(__file__).with_name('replay_baseline_headers.py')),
                 'baseline_ref': args.baseline_ref, 'baseline_core': digest(baseline_core),
                 'candidate_core': digest(current_core),

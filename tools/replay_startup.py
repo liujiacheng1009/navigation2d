@@ -5,7 +5,11 @@ def without_endpoints(source):
     constructor = 'Node("sweepnav_autonomous_explorer")'
     if source.count(constructor) != 1:
         raise ValueError('unsupported node constructor for logic replay')
-    begin = source.index('    command_publisher_ =')
+    markers = ['    command_publisher_ =', '    motion_output_ =']
+    found = [source.index(marker) for marker in markers if marker in source]
+    if len(found) != 1:
+        raise ValueError('unsupported motion setup for logic replay')
+    begin = found[0]
     end = source.index('    PublishStatus("WAITING"', begin)
     setup = source[begin:end]
     if not all(name in setup for name in ['create_publisher', 'create_subscription', 'create_wall_timer']):

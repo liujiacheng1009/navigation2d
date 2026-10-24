@@ -363,3 +363,21 @@ region connectivity and reachable carved-unknown counting. They retain their
 distinct clearance contracts. `SettleViewpoint` adjusts only x/y on original
 free evidence, preserving goal identity, metadata, strict distance ties and
 existing invalid-input guards; FrontierExplorer retains the public facade.
+
+### Motion transport boundary
+
+Every motion command from exploration, crawl, escape, route rejection and stop
+uses `MotionOutput::Send(Twist2d)`. Policies run before the transport call. The
+ROS adapter owns the publisher and maps linear/angular values to x/z without
+rewriting them; the default remains `/cmd_vel` with depth 10.
+
+The adapter round-trip test publishes only on a unique test topic. Generated
+replays translate Send into the same in-memory command receiver as the frozen
+node; logic-only startup also removes the publisher factory. Frozen fixture
+headers remain unchanged and uncaptured output calls still reject generation.
+
+The separate motion benchmark compares the former direct ROS conversion with
+the adapter, using a matched reader on a unique test topic. It warms 16 sends,
+measures 2048 sends, drains callbacks in fixed batches and reports per-send
+percentiles, send/drain loop time and process peak RSS. It does not measure
+robot execution, full mission scheduling or target-platform behavior.
