@@ -29,7 +29,8 @@ navigation2d_configure_mpc_backend(navigation2d_control)
 navigation2d_library(navigation2d_exploration
   exploration/exploration_policy.cc exploration/frontier_explorer.cc exploration/live_route_safety.cc
   exploration/frontier_tracks.cc exploration/frontier_visit_memory.cc exploration/region_scheduler.cc
-  exploration/frontier_travel_graph.cc exploration/bootstrap_frontier_travel.cc)
+  exploration/frontier_travel_graph.cc exploration/bootstrap_frontier_travel.cc
+  exploration/planning_grid_view.cc)
 target_link_libraries(navigation2d_exploration PUBLIC navigation2d_geometry)
 
 # Generic registry knows interfaces and metadata, without concrete backends.
