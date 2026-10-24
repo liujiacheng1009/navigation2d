@@ -44,6 +44,8 @@ add_library(navigation2d_core STATIC
   configuration/vehicle_config.cc
   exploration/exploration_policy.cc
   exploration/frontier_explorer.cc exploration/region_scheduler.cc
+  application/command_stall_watch.cc application/route_preparation.cc planning/path_geometry.cc
+  planning/route_identity.cc planning/path_metrics.cc
   application/navigation_system.cc)
 target_include_directories(navigation2d_core PUBLIC "${PROJECT_SOURCE_DIR}/..")
 target_include_directories(navigation2d_core SYSTEM PRIVATE "${decomp_util_SOURCE_DIR}/include")
@@ -161,3 +163,11 @@ add_test(NAME exploration_navigation_session_test COMMAND exploration_navigation
 add_executable(exploration_debug_overlay_test test/exploration_debug_overlay_test.cc)
 target_link_libraries(exploration_debug_overlay_test PRIVATE navigation2d_exploration_application)
 add_test(NAME exploration_debug_overlay_test COMMAND exploration_debug_overlay_test)
+
+add_executable(route_preparation_test test/route_preparation_test.cc)
+target_link_libraries(route_preparation_test PRIVATE navigation2d_core)
+add_test(NAME route_preparation_test COMMAND route_preparation_test)
+
+add_executable(command_stall_watch_test test/command_stall_watch_test.cc)
+target_link_libraries(command_stall_watch_test PRIVATE navigation2d_core)
+add_test(NAME command_stall_watch_test COMMAND command_stall_watch_test)
