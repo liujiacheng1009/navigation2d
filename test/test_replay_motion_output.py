@@ -29,6 +29,16 @@ class ReplayMotionOutput(unittest.TestCase):
             module.adapt_motion_output(
                 'class AutonomousExplorer { public: void Run(){motion_output_->SendStop();}};')
 
+    def test_prunes_only_unused_logic_motion_object(self):
+        command = ['c++', 'node.o', '/build/ros/motion_output.cc.o', 'application.a']
+        self.assertEqual(module.without_unused_motion_object(command, '', True),
+                         ['c++', 'node.o', 'application.a'])
+        self.assertEqual(module.without_unused_motion_object(command, '', False), command)
+        with self.assertRaisesRegex(ValueError, 'still constructs'):
+            module.without_unused_motion_object(command, 'MakeRosMotionOutput(node)', True)
+        with self.assertRaisesRegex(ValueError, 'ambiguous'):
+            module.without_unused_motion_object(command + ['/other/motion_output.cc.o'], '', True)
+
     def test_legacy_source_is_byte_identical(self):
         source = 'class AutonomousExplorer { public: void Run(){ command_publisher_->publish(stop); }};'
         self.assertEqual(module.adapt_motion_output(source), (source, 0))

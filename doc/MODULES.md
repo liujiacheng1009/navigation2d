@@ -381,3 +381,10 @@ the adapter, using a matched reader on a unique test topic. It warms 16 sends,
 measures 2048 sends, drains callbacks in fixed batches and reports per-send
 percentiles, send/drain loop time and process peak RSS. It does not measure
 robot execution, full mission scheduling or target-platform behavior.
+
+Logic-only replay startup removes the motion publisher factory, so its unused
+ROS object must also be omitted from that replay's link. Keeping it loaded an
+extra typesupport dependency and caused a measured RSS regression. Captured
+startup retains the object. Generation rejects a surviving factory call before
+pruning, and records/hashes all explicit objects, archives and DSOs before and
+after linking to detect concurrent changes. Frozen baseline bundles stay intact.

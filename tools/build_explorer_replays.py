@@ -140,6 +140,7 @@ def main():
                 'execution_mode': 'logic-only' if args.logic_only else 'captured-endpoints',
                 'startup_helper_sha256': digest(Path(__file__).with_name('replay_startup.py')),
                 'motion_helper_sha256': digest(Path(__file__).with_name('replay_motion_output.py')),
+                'link_helper_sha256': digest(Path(__file__).with_name('replay_link.py')),
                 'header_helper_sha256': digest(Path(__file__).with_name('replay_baseline_headers.py')),
                 'baseline_ref': args.baseline_ref, 'baseline_core': digest(baseline_core),
                 'candidate_core': digest(current_core),
@@ -165,9 +166,13 @@ def main():
         link[objects[0]] = str(obj)
         if label == 'baseline':
             link = baseline_link(link, obj, baseline_core)
-        subprocess.run(link, cwd=build, check=True)
+        from replay_motion_output import without_unused_motion_object
+        from replay_link import link_replay
+        if label == 'candidate':
+            link = without_unused_motion_object(link, cpp.read_text(), args.logic_only)
+        linkage = link_replay(link, build)
         manifest['artifacts'][label] = {'source': digest(cpp), 'binary': digest(executable),
-                                        'compilation': compilation}
+                                        'compilation': compilation, 'linkage': linkage}
     if fixtures != {str(p.relative_to(root)): digest(p) for p in (root / 'test/replay').glob('*.h')}:
         raise RuntimeError('fixture changed while compiling; discard and rebuild both replays')
     if headers and snapshot(headers[0]) != headers[1]:

@@ -20,3 +20,15 @@ def adapt_motion_output(source):
   }
 """
     return source[:begin] + capture + source[begin:], count
+
+
+def without_unused_motion_object(command, source, logic_only):
+    """Logic startup removes this factory; do not load its unused ROS types."""
+    if not logic_only:
+        return list(command)
+    if re.search(r'\bMakeRosMotionOutput\s*\(', source):
+        raise ValueError('logic replay still constructs a motion publisher')
+    unused = [arg for arg in command if arg.endswith('/motion_output.cc.o')]
+    if len(unused) > 1:
+        raise ValueError('ambiguous motion publisher link inputs')
+    return [arg for arg in command if arg not in unused]

@@ -65,6 +65,7 @@ def main():
     fixtures = {str(p.relative_to(root)): digest(p) for p in fixture_paths}
     manifest = {'motion_helper_sha256': digest(Path(__file__).with_name('replay_motion_output.py')),
                 'execution_mode': 'logic-only-completion', 'baseline_headers': headers[1],
+                'link_helper_sha256': digest(Path(__file__).with_name('replay_link.py')),
                 'baseline_core': digest(core),
                 'candidate_core': digest(build / 'navigation2d_build/libnavigation2d_core.a'),
                 'fixtures': fixtures, 'builder': digest(Path(__file__)), 'artifacts': {}}
@@ -83,9 +84,14 @@ def main():
         link[link.index('-o') + 1] = str(binary)
         if label == 'baseline':
             link = baseline_link(link, obj, core)
-        subprocess.run(link, cwd=build, check=True)
+        from replay_motion_output import without_unused_motion_object
+        from replay_link import link_replay
+        if label == 'candidate':
+            link = without_unused_motion_object(link, cpp.read_text(), True)
+        linkage = link_replay(link, build)
         manifest['artifacts'][label] = {'source': digest(cpp), 'binary': digest(binary),
-                                        'original_source': original_digest, 'compilation': compilation}
+                                        'original_source': original_digest, 'compilation': compilation,
+                                        'linkage': linkage}
         if digest(path) != original_digest:
             raise RuntimeError('node source changed while compiling')
     if snapshot(headers[0]) != headers[1] or fixtures != {str(p.relative_to(root)): digest(p) for p in fixture_paths}:
