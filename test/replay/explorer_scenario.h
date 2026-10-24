@@ -47,15 +47,7 @@ int RunExplorerReplay(int argc, char** argv) {
     const double x = world.x, y = world.y, yaw = world.yaw;
     geometry_msgs::msg::PoseStamped pose;
     pose.pose = ReplayPose(x, y, yaw);
-    node->pose_ = pose;
-    if (node->trajectory_.empty() ||
-        std::hypot(x - node->trajectory_.back().first, y - node->trajectory_.back().second) > .05) {
-      if (!node->trajectory_.empty()) {
-        node->total_distance_m_ +=
-            std::hypot(x - node->trajectory_.back().first, y - node->trajectory_.back().second);
-      }
-      node->trajectory_.emplace_back(x, y);
-    }
+    node->ReplayObservePose(pose);
     node->velocity_ = {applied.linear.x, applied.angular.z};
     node->velocity_stamp_ = node->replay_.probe_time_;
     const auto scan = world.Observe();

@@ -31,7 +31,22 @@ def adapt(source, label):
     entry = 'entry_probe_attempts_' if old else 'entry_.attempts()'
     escapes = 'return_escape_attempts_' if old else 'return_.escapes()'
     navigation = 'navigation_ != nullptr' if old else 'navigation_.has_session()'
+    if 'pose_feedback_' in source:
+        observe_pose = 'pose_feedback_.ObserveLocalization(pose);'
+    else:
+        observe_pose = """
+    pose_ = pose;
+    const double x = pose.pose.position.x, y = pose.pose.position.y;
+    if (trajectory_.empty() ||
+        std::hypot(x - trajectory_.back().first, y - trajectory_.back().second) > .05) {
+      if (!trajectory_.empty()) {
+        total_distance_m_ += std::hypot(x - trajectory_.back().first, y - trajectory_.back().second);
+      }
+      trajectory_.emplace_back(x, y);
+    }
+"""
     capture = f'''
+  void ReplayObservePose(const geometry_msgs::msg::PoseStamped& pose) {{ {observe_pose} }}
   navigation2d::test::ReplayOutputs replay_;
   rclcpp::Time now() const {{ return replay_.probe_time_; }}
   int ReplayEntryAttempts() const {{ return {entry}; }}

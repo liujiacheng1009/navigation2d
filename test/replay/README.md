@@ -100,3 +100,9 @@ is a regression check, not evidence of DDS delivery or full mission success.
 The parent ROS build also provides `exploration_ros_paths_test`; run that binary
 to verify offsets, window fallback, cursor clearing, tour duplicate handling and
 live-map wall thresholds. Core-only builds do not require ROS for these adapters.
+
+Pose observations enter the candidate through `PoseFeedback::ObserveLocalization`.
+The frozen node uses the equivalent historical accumulation in a generated test
+hook. The fixture cannot mutate the candidate's private pose/trail storage. The
+parent target `exploration_pose_feedback_test` separately covers the rotated
+truth frame, header preservation, strict 5 cm sampling and accumulated distance.

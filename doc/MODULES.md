@@ -30,6 +30,7 @@ navigation2d_geometry 边界，尚未把所有概念层拆成独立 target。
 - `pose_motion_watch.*`：独立累计位姿运动与停滞时间窗，保留慢速入室保护，不以编码器转动代替平移进展。
 - `dispatch_policy.*`：初始路线净空验收、目标超时与三类同步递归重试作用域；快照、目标提交和调度仍由节点编排。
 - `return_coordinator.*`：返航目标/轨迹点几何及直返→轨迹→有界脱困→最终重试顺序；通过 ReturnActions 窄端口执行，不依赖 ROS 或共享任务 Context。
+- `ros/exploration/pose_feedback.*`：定位/真值反馈转换、只读当前位姿、严格超过 0.05 m 的轨迹采样与累计里程；两个订阅路径共用单一状态所有者。
 - `ros/exploration/debug_paths.*`：全局/局部/tour 消息构造和显示光标状态，不发布消息、不提交目标。
 - `ros/exploration/map_observation.*`：世界坐标线段对实时占用图的查询，同时供显示和爬行判断使用；不归调试模块拥有。
 - `ros/autonomous_explorer_node.cc`：仍承担任务/tour 编排、ROS 输入和动作执行，尚未完成薄适配验收。
