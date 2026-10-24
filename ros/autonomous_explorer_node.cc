@@ -37,6 +37,7 @@
 #include "navigation2d/application/exploration/entry_selection.h"
 #include "navigation2d/application/exploration/entry_crawl_executor.h"
 #include "navigation2d/application/exploration/execution_command.h"
+#include "navigation2d/application/exploration/viewpoint_arrival.h"
 #include "navigation2d/application/exploration/selection_exhaustion.h"
 #include "navigation2d/application/exploration/viewpoint_rejection_executor.h"
 #include "navigation2d/application/exploration/viewpoint_rejections.h"
@@ -81,6 +82,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::EntrySelectionActions,
                                  private navigation2d::exploration::EntryCrawlActions,
                                  private navigation2d::exploration::ExecutionCommandEvidence,
+                                 private navigation2d::exploration::ViewpointArrivalActions,
                                  private navigation2d::exploration::SelectionExhaustionActions,
                                  private navigation2d::exploration::ViewpointRejectionActions,
                                  private navigation2d::exploration::TourConstraints,
@@ -521,7 +523,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   void CoolEnteredMouth(const Goal& mouth, double seconds) override {
     DemoteViewpointForSeconds(mouth, seconds);
   }
-  void MarkRegionFinishPending() override { pending_region_finish_ = true; }
+  void MarkRegionFinishPending() override { viewpoint_arrival_.MarkRegionFinishPending(); }
   void AcknowledgeEntry(navigation2d::exploration::EntryArrival arrival) override {
     navigation2d::exploration::CompleteEntryArrival(entry_, explorer_, room_visits_, *this,
         arrival, Pose()->pose.position.x, Pose()->pose.position.y);
@@ -537,11 +539,6 @@ class AutonomousExplorer final : public rclcpp::Node,
         entry_, explorer_, room_visits_, *this,
         {Pose()->pose.position.x, Pose()->pose.position.y, map_revision_, kExploreGoalTolerance});
     return result == navigation2d::exploration::EntryProbeResult::kDriving;
-  }
-
-  double EntryProbeDepth() const {
-    if (!Pose()) { return 0.; }
-    return entry_.Depth(Pose()->pose.position.x, Pose()->pose.position.y);
   }
 
   bool EntryProbeSatisfied() const {
@@ -1574,6 +1571,28 @@ class AutonomousExplorer final : public rclcpp::Node,
     return true;
   }
 
+  void DeferViewpointSelection(double seconds, const char* message) override {
+    next_selection_ = seconds == 0. ? now() : now() + rclcpp::Duration::from_seconds(seconds);
+    PublishStatus("SELECTING", message);
+  }
+  void ReportViewpointArrival(navigation2d::exploration::ViewpointArrivalNotice kind,
+                              const Goal& goal, int attempts, double depth) override {
+    using navigation2d::exploration::ViewpointArrivalNotice;
+    if (kind == ViewpointArrivalNotice::kEntryIncomplete) {
+      RCLCPP_WARN(get_logger(),
+                  "Frontier entry incomplete: frontier=(%.2f,%.2f) attempts=%d "
+                  "depth=%.2f; keeping unresolved", goal.frontier_x, goal.frontier_y, attempts, depth);
+    } else if (kind == ViewpointArrivalNotice::kNearRoomBeyond) {
+      RCLCPP_INFO(get_logger(),
+                  "At viewpoint with room still beyond frontier=(%.2f,%.2f); entering",
+                  goal.frontier_x, goal.frontier_y);
+    } else {
+      RCLCPP_INFO(get_logger(),
+                  "Goal reached with room still beyond frontier=(%.2f,%.2f); entering",
+                  goal.frontier_x, goal.frontier_y);
+    }
+  }
+
   bool RecentlyDemoted(const Goal& goal) override {
     // Preserve the missing-cooldown short circuit before reading the ROS clock.
     return viewpoint_rejections_.HasDemotion() &&
@@ -1931,43 +1950,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         navigation_.Cancel();
         geometry_msgs::msg::Twist stop;
         command_publisher_->publish(stop);
-        // A doorway peek moves the frontier past the 0.35 m association disk.
-        // The viewpoint is not done while a room of unknown is still beyond it.
-        const bool room_beyond = explorer_.UnenteredRoomBeyond(active_goal_);
-        if (entry_.pending() ||
-            explorer_.GoalRegionStillFrontier(active_goal_) || room_beyond) {
-          if (!entry_.pending()) {
-            if (room_beyond &&
-                !explorer_.GoalRegionStillFrontier(active_goal_)) {
-              RCLCPP_INFO(get_logger(),
-                          "At viewpoint with room still beyond "
-                          "frontier=(%.2f,%.2f); entering",
-                          active_goal_.frontier_x, active_goal_.frontier_y);
-            }
-            LockEntryMouth(active_goal_);
-          }
-          if (EntryProbeSatisfied()) {
-            AcknowledgeEntry(navigation2d::exploration::EntryArrival::kNearProbe);
-            return;
-          }
-          if (entry_.attempts() < EntryAttemptBudget() && StartEntryProbe()) return;
-          // One rejected probe is not the mouth. Abandoning here marked the
-          // doorway visited and left the room white.
-          if (entry_.attempts() < EntryAttemptBudget()) {
-            next_selection_ = now() + rclcpp::Duration::from_seconds(0.35);
-            PublishStatus("SELECTING",
-                          "at doorway; retrying centered entry probe");
-            return;
-          }
-          AbandonLockedEntryMouth(
-              "at doorway; entry incomplete, leaving mouth");
-          return;
-        }
-        explorer_.RecordAttempt(active_goal_, true);
-        ClearEntryMouthLock();
-        if (!tour_.goals().empty()) tour_.Advance();
-        next_selection_ = now();
-        PublishStatus("SELECTING", "arrived at viewpoint; continuing tour");
+        viewpoint_arrival_.Near(explorer_, entry_, tour_, active_goal_, *TourRobot(), *this);
         return;
       }
     }
@@ -2184,69 +2167,8 @@ class AutonomousExplorer final : public rclcpp::Node,
         // Keep the committed tour; retreat is not a license to rebuild reverse.
         next_selection_ = now();
         PublishStatus("SELECTING", "left the pinched corridor");
-      } else if (entry_.pending()) {
-        if (EntryProbeSatisfied()) {
-          AcknowledgeEntry(navigation2d::exploration::EntryArrival::kNavigationSucceeded);
-        } else if (entry_.attempts() < EntryAttemptBudget() && StartEntryProbe()) {
-          return;
-        } else {
-          RCLCPP_WARN(get_logger(),
-                      "Frontier entry incomplete: frontier=(%.2f,%.2f) attempts=%d "
-                      "depth=%.2f; keeping unresolved",
-                      entry_.pending()->frontier_x, entry_.pending()->frontier_y,
-                      entry_.attempts(), EntryProbeDepth());
-          AbandonLockedEntryMouth("frontier entry blocked; unresolved boundary retained");
-        }
-      } else if (explorer_.UnenteredRoomBeyond(active_goal_) ||
-                 (explorer_.GoalRegionStillFrontier(active_goal_) &&
-                  PassableMouthGoal(active_goal_))) {
-        // Real corridor mouth still open — cross into the room. The frontier
-        // may already have stepped past the association disk.
-        if (!explorer_.GoalRegionStillFrontier(active_goal_)) {
-          RCLCPP_INFO(get_logger(),
-                      "Goal reached with room still beyond frontier=(%.2f,%.2f); "
-                      "entering",
-                      active_goal_.frontier_x, active_goal_.frontier_y);
-        }
-        LockEntryMouth(active_goal_);
-        if (StartEntryProbe()) return;
-        if (entry_.attempts() < EntryAttemptBudget()) {
-          next_selection_ = now() + rclcpp::Duration::from_seconds(0.35);
-          PublishStatus("SELECTING",
-                        "at doorway; retrying centered entry probe");
-          return;
-        }
-        AbandonLockedEntryMouth(
-            "frontier reached but no safe entry probe; leaving mouth");
-      } else if (explorer_.GoalRegionStillFrontier(active_goal_)) {
-        // Open-wall frontier (no door throat): observe done, do not entry-lock.
-        explorer_.RecordAttempt(active_goal_, true);
-        if (!tour_.goals().empty()) tour_.Advance();
-        next_selection_ = now();
-        PublishStatus("SELECTING",
-                      "open-wall frontier observed; continuing tour");
       } else {
-        explorer_.RecordAttempt(active_goal_, true);
-        // Goal dispatch already CommitRegion'd; do not re-Enter the robot cell
-        // (often still the hallway parent) or the room stack collapses.
-        if (!tour_.goals().empty()) tour_.Advance();
-        // After a mid-drive mouth cross, or while white remains in the active
-        // room: cover local leftovers before soft-unlock hops out.
-        const bool need_finish =
-            pending_region_finish_ ||
-            (explorer_.GoalInActiveRegion(active_goal_) &&
-             explorer_.ReachableUnknownCells(Pose()->pose.position.x,
-                                             Pose()->pose.position.y) > 20);
-        pending_region_finish_ = false;
-        if (need_finish) {
-          QueueActiveRegionFinish();
-          next_selection_ = now();
-          PublishStatus("SELECTING",
-                        "active room unfinished; covering local leftovers");
-          return;
-        }
-        next_selection_ = now();
-        PublishStatus("SELECTING", "frontier reached; continuing active region tour");
+        viewpoint_arrival_.Succeeded(explorer_, entry_, tour_, active_goal_, *TourRobot(), *this);
       }
     } else if (state.status == navigation2d::NavigationStatus::kBlocked ||
                // Explore goals used to skip the wall-clock timeout while the
@@ -2548,7 +2470,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   navigation2d::exploration::SelectionExhaustion selection_exhaustion_;
   int latest_map_replans_ = 0;
   int cut_replans_ = 0;
-  bool pending_region_finish_ = false;
+  navigation2d::exploration::ViewpointArrival viewpoint_arrival_;
   int first_segment_failures_at_pose_ = 0;
   int execution_stall_cycles_ = 0;
   int stall_pose_cell_x_ = 0;

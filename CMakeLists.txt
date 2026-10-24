@@ -58,6 +58,7 @@ add_library(navigation2d_exploration_application STATIC
   application/exploration/entry_probe_executor.cc
   application/exploration/entry_crawl_executor.cc
   application/exploration/execution_command.cc
+  application/exploration/viewpoint_arrival.cc
   application/exploration/entry_selection.cc
   application/exploration/selection_exhaustion.cc
   application/exploration/viewpoint_rejections.cc

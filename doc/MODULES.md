@@ -304,3 +304,8 @@ flowchart TD
 
 These are execution boundaries, not a completed mission abstraction. The ROS
 node still owns substantial selection, navigation outcome and recovery flow.
+
+`ViewpointArrival` owns the pending active-region coverage obligation and the
+near/succeeded exploration arrival flows. It rechecks attempt budget after a
+probe callback, retains unresolved mouths and consumes the coverage obligation
+once. Return/completion/retreat navigation success remains outside this flow.
