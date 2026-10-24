@@ -84,3 +84,19 @@ The scenario headers separate input-world state from output capture and executio
 order. When production state ownership changes, update the explicit adapter and
 compare against frozen traces before using the new fixture as a baseline. Never
 change a fixture to conceal a production behavior difference.
+
+## Message coverage
+
+The historical per-cycle trace retains the original status/frontier/grid hash.
+`path_messages_hash` additionally fingerprints every Path, PoseStamped and
+PoseArray publication in order, including headers, simulated timestamps and all
+pose fields as exact floating-point bits. This checks the path-message adapter
+without changing the historical trace columns. The comparator treats this field
+as behavior, never as timing. Regenerate both executables and A/A calibration
+when the fixture changes; the builder rejects fixture edits during compilation.
+Other message types still contribute only publication counts. This fingerprint
+is a regression check, not evidence of DDS delivery or full mission success.
+
+The parent ROS build also provides `exploration_ros_paths_test`; run that binary
+to verify offsets, window fallback, cursor clearing, tour duplicate handling and
+live-map wall thresholds. Core-only builds do not require ROS for these adapters.

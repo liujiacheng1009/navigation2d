@@ -10,8 +10,21 @@ struct ReturnStep {
   ReturnStepKind kind;
   ExplorationGoal goal;
 };
+enum class ReturnPlanStage { kInitial, kAfterEscapes };
+enum class ReturnExecutionResult { kTracking, kEscaping, kUnavailable };
+// Synchronous mission capabilities. The adapter executes each request before
+// returning its acceptance result; the coordinator owns ordering and budgets.
+class ReturnActions {
+ public:
+  virtual ~ReturnActions() = default;
+  virtual bool PlanHome(ReturnPlanStage stage) = 0;
+  virtual void HomeAccepted(ReturnPlanStage stage) = 0;
+  virtual bool StartBreadcrumbTowardHome() = 0;
+  virtual bool TryStartEscape() = 0;
+};
 class ReturnCoordinator {
  public:
+  ReturnExecutionResult Execute(ReturnActions& actions);
   void MarkPartial() { partial_ = true; }
   bool partial() const { return partial_; }
   void UseBreadcrumbs(bool enabled) { breadcrumbs_ = enabled; }

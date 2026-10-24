@@ -6,10 +6,20 @@
 
 #include "navigation2d/exploration/frontier_explorer.h"
 #include "navigation2d/geometry/pose_2d.h"
+#include "navigation2d/geometry/twist_2d.h"
 namespace navigation2d::exploration {
 struct EntryEvidence {
   std::size_t known_cells;
   std::uint64_t map_revision;
+};
+struct EntryCrawlObservation {
+  double x, y, yaw;  // World frame, metres/radians.
+  bool segment_blocked;
+};
+struct EntryCrawlStep {
+  enum class State { kBlocked, kDriving, kLastCommand };
+  State state;
+  Twist2d command;
 };
 // Entry state has one owner. Callers provide map-derived facts; this class
 // neither queries ROS nor publishes commands or commits navigation goals.
@@ -23,7 +33,9 @@ class EntryCoordinator {
   void CancelAttempt() { --attempts_; }
   void NoteEvidence(EntryEvidence evidence) { evidence_ = evidence; }
   void StartCrawl() { crawl_ticks_ = 1; }
-  void TickCrawl() { ++crawl_ticks_; }
+  // Caller checks the live segment before requesting motion, then publishes
+  // this command before handling kLastCommand (legacy 41st tick semantics).
+  EntryCrawlStep AdvanceCrawl(EntryCrawlObservation robot, const ExplorationGoal& target);
   void StopCrawl() { crawl_ticks_ = 0; }
   const std::optional<ExplorationGoal>& pending() const { return pending_; }
   const std::optional<ExplorationGoal>& locked() const { return locked_; }

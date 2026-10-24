@@ -5,6 +5,31 @@
 
 #include "navigation2d/geometry/robot_geometry.h"
 namespace navigation2d::exploration {
+ReturnExecutionResult ReturnCoordinator::Execute(ReturnActions& actions) {
+  if (actions.PlanHome(ReturnPlanStage::kInitial)) {
+    ResetEscapes();
+    actions.HomeAccepted(ReturnPlanStage::kInitial);
+    return ReturnExecutionResult::kTracking;
+  }
+  if (actions.StartBreadcrumbTowardHome()) {
+    ResetEscapes();
+    return ReturnExecutionResult::kTracking;
+  }
+  constexpr int kMaximumEscapes = 5;
+  if (escapes_ < kMaximumEscapes && actions.TryStartEscape()) {
+    CountEscape();
+    return ReturnExecutionResult::kEscaping;
+  }
+  if (actions.PlanHome(ReturnPlanStage::kAfterEscapes)) {
+    ResetEscapes();
+    actions.HomeAccepted(ReturnPlanStage::kAfterEscapes);
+    return ReturnExecutionResult::kTracking;
+  }
+  // Preserve the original final-trail acceptance budget (no reset here).
+  return actions.StartBreadcrumbTowardHome() ? ReturnExecutionResult::kTracking
+                                             : ReturnExecutionResult::kUnavailable;
+}
+
 ExplorationGoal ReturnCoordinator::Home(const ExplorationGrid* map, ExplorationGoal home) const {
   if (!map || map->resolution <= 0.) {
     return home;

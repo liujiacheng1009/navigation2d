@@ -120,6 +120,9 @@ add_library(navigation2d_exploration_application STATIC
   application/exploration/navigation_telemetry.cc
   application/exploration/room_visit_ledger.cc
   application/exploration/status_serializer.cc
+  application/exploration/dispatch_policy.cc
+  application/exploration/pose_motion_watch.cc
+  application/exploration/entry_target.cc
   application/exploration/entry_coordinator.cc
   application/exploration/recovery_policy.cc
   application/exploration/return_coordinator.cc)
@@ -171,3 +174,27 @@ add_test(NAME route_preparation_test COMMAND route_preparation_test)
 add_executable(command_stall_watch_test test/command_stall_watch_test.cc)
 target_link_libraries(command_stall_watch_test PRIVATE navigation2d_core)
 add_test(NAME command_stall_watch_test COMMAND command_stall_watch_test)
+
+
+add_executable(exploration_escape_execution_test test/exploration_escape_execution_test.cc)
+target_link_libraries(exploration_escape_execution_test PRIVATE navigation2d_exploration_application)
+add_test(NAME exploration_escape_execution_test COMMAND exploration_escape_execution_test)
+
+add_executable(exploration_entry_target_test test/exploration_entry_target_test.cc)
+target_link_libraries(exploration_entry_target_test PRIVATE navigation2d_exploration_application)
+add_test(NAME exploration_entry_target_test COMMAND exploration_entry_target_test)
+
+add_executable(exploration_entry_crawl_test test/exploration_entry_crawl_test.cc)
+target_link_libraries(exploration_entry_crawl_test PRIVATE navigation2d_exploration_application)
+add_test(NAME exploration_entry_crawl_test COMMAND exploration_entry_crawl_test)
+
+add_executable(exploration_pose_motion_test test/exploration_pose_motion_test.cc)
+target_link_libraries(exploration_pose_motion_test PRIVATE navigation2d_exploration_application)
+add_test(NAME exploration_pose_motion_test COMMAND exploration_pose_motion_test)
+
+add_executable(exploration_dispatch_policy_test test/exploration_dispatch_policy_test.cc)
+target_link_libraries(exploration_dispatch_policy_test PRIVATE navigation2d_exploration_application)
+add_test(NAME exploration_dispatch_policy_test COMMAND exploration_dispatch_policy_test)
+add_executable(exploration_return_execution_test test/exploration_return_execution_test.cc)
+target_link_libraries(exploration_return_execution_test PRIVATE navigation2d_exploration_application)
+add_test(NAME exploration_return_execution_test COMMAND exploration_return_execution_test)

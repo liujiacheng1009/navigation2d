@@ -22,6 +22,18 @@ navigation2d_geometry 边界，尚未把所有概念层拆成独立 target。
 - `command_stall_watch.*`：累计位姿/路线/测量速度证据、时间窗与周期预算的唯一写入者。
 - `benchmark_runner.cc`：命令行适配器，仅链接 simulation，不进入产品库。
 
+## exploration application 与 ROS 适配
+
+- `application/exploration/entry_target.*`：按门宽、已知自由深度和尝试次数选择探入窗口，不消耗预算、不提交目标。
+- `entry_coordinator.*`：入口锁、证据、尝试/爬行预算和入室判断；爬行返回阻塞、行驶或最后一个命令，适配器保持先发布末命令再处理退出。
+- `escape_execution.h`：脱困命令、截止时间和返航意图的单一所有者；实时雷达修正仍复用 recovery_policy。
+- `pose_motion_watch.*`：独立累计位姿运动与停滞时间窗，保留慢速入室保护，不以编码器转动代替平移进展。
+- `dispatch_policy.*`：初始路线净空验收、目标超时与三类同步递归重试作用域；快照、目标提交和调度仍由节点编排。
+- `return_coordinator.*`：返航目标/轨迹点几何及直返→轨迹→有界脱困→最终重试顺序；通过 ReturnActions 窄端口执行，不依赖 ROS 或共享任务 Context。
+- `ros/exploration/debug_paths.*`：全局/局部/tour 消息构造和显示光标状态，不发布消息、不提交目标。
+- `ros/exploration/map_observation.*`：世界坐标线段对实时占用图的查询，同时供显示和爬行判断使用；不归调试模块拥有。
+- `ros/autonomous_explorer_node.cc`：仍承担任务/tour 编排、ROS 输入和动作执行，尚未完成薄适配验收。
+
 ## costmap
 
 - `grid_2d.*`：加载静态 occupancy grid，负责世界坐标与 cell 坐标转换。

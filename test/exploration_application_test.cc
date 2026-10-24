@@ -110,7 +110,8 @@ int main() {
   Require(entry_session.Satisfied(.95, 0., request.goal, .7));
   Require(!entry_session.Satisfied(.5, 0., request.goal, .7));
   entry_session.StartCrawl();
-  entry_session.TickCrawl();
+  Require(entry_session.AdvanceCrawl({0., 0., 0., false}, request.goal).state ==
+          EntryCrawlStep::State::kDriving);
   Require(entry_session.crawl_ticks() == 2);
   entry_session.ClearPending();
   Require(entry_session.locked().has_value() && !entry_session.pending());

@@ -22,11 +22,17 @@
 #include "nav_msgs/msg/path.hpp"
 #include "navigation2d/application/exploration/navigation_session.h"
 #include "navigation2d/application/exploration/debug_overlay.h"
+#include "navigation2d/ros/exploration/debug_paths.h"
+#include "navigation2d/ros/exploration/map_observation.h"
 #include "navigation2d/ros/exploration/artifact_writer.h"
 #include "navigation2d/application/exploration/return_coordinator.h"
 #include "navigation2d/application/exploration/recovery_policy.h"
+#include "navigation2d/application/exploration/escape_execution.h"
+#include "navigation2d/application/exploration/pose_motion_watch.h"
+#include "navigation2d/application/exploration/dispatch_policy.h"
 #include "navigation2d/application/exploration/recovery_session.h"
 #include "navigation2d/application/exploration/entry_coordinator.h"
+#include "navigation2d/application/exploration/entry_target.h"
 #include "navigation2d/application/exploration/status_serializer.h"
 #include "navigation2d/application/exploration/room_visit_ledger.h"
 #include "navigation2d/application/exploration/navigation_telemetry.h"
@@ -79,16 +85,8 @@ navigation2d::FrontierExplorerConfig ExplorerConfig(rclcpp::Node& node) {
   return config;
 }
 
-geometry_msgs::msg::Pose PoseFromXyYaw(double x, double y, double yaw) {
-  geometry_msgs::msg::Pose pose;
-  pose.position.x = x;
-  pose.position.y = y;
-  pose.orientation.z = std::sin(yaw / 2.);
-  pose.orientation.w = std::cos(yaw / 2.);
-  return pose;
-}
-
-class AutonomousExplorer final : public rclcpp::Node {
+class AutonomousExplorer final : public rclcpp::Node,
+                                 private navigation2d::exploration::ReturnActions {
  public:
   AutonomousExplorer() : Node("sweepnav_autonomous_explorer"), explorer_(ExplorerConfig(*this)) {
     pose_source_ = declare_parameter<std::string>("pose_source", "localization2d");
@@ -346,11 +344,14 @@ class AutonomousExplorer final : public rclcpp::Node {
     using navigation2d::exploration::NavigationPurpose;
     const auto purpose = entry_drive ? NavigationPurpose::kEntry :
         (returning ? NavigationPurpose::kReturn : NavigationPurpose::kExplore);
-    const bool pinch_plan = narrow_passage_retry_ && !entry_drive && !returning;
+    using navigation2d::exploration::DispatchPolicy;
+    using RetryKind = DispatchPolicy::RetryKind;
+    const bool pinch_retry = dispatch_.active(RetryKind::kPinch);
+    const bool pinch_plan = pinch_retry && !entry_drive && !returning;
     const auto config = navigation2d::exploration::BuildNavigationProfile(
         {.resolution = map_->info.resolution,
          .entry = entry_drive,
-         .pinch_retry = narrow_passage_retry_,
+         .pinch_retry = pinch_retry,
          .returning = returning,
          .home_goal = home_goal},
         navigation_profiles_.For(purpose));
@@ -379,25 +380,13 @@ class AutonomousExplorer final : public rclcpp::Node {
         // pinch-retry wall-scrape — that re-plans the whole map with looser
         // inflation and accepts wall-foot GLOBAL (static-map collisions).
         // Never pinch-retry "goal occupied" (corner-tip viewpoints).
-        const bool goal_in_obstacle =
-            last_planning_failure_.find("goal occupied") != std::string::npos;
-        const bool pinch_worthy =
-            !goal_in_obstacle &&
-            (last_planning_failure_.find("no route") != std::string::npos ||
-             last_planning_failure_.find("no path") != std::string::npos ||
-             (entry_drive &&
-              last_planning_failure_.find("first-segment") != std::string::npos));
-        if (!returning && !retreat_goal_ && !narrow_passage_retry_ &&
-            pinch_worthy) {
-          narrow_passage_retry_ = true;
-          RCLCPP_INFO(get_logger(),
-                      "%s no route (%s); retrying pinch clearance",
-                      entry_drive ? "Entry" : "Open",
-                      last_planning_failure_.c_str());
-          const bool ok = StartNavigation(goal, returning, latest_map_retry);
-          narrow_passage_retry_ = false;
-          if (ok) return true;
-        }
+        if (!returning && !retreat_goal_ &&
+            DispatchPolicy::PinchWorthy(last_planning_failure_, entry_drive) &&
+            dispatch_.Retry(RetryKind::kPinch, [&] {
+              RCLCPP_INFO(get_logger(), "%s no route (%s); retrying pinch clearance",
+                          entry_drive ? "Entry" : "Open", last_planning_failure_.c_str());
+              return StartNavigation(goal, returning, latest_map_retry);
+            })) return true;
         return false;
       }
       // Always reject through-wall chords on the live map (UI dashed purple
@@ -413,14 +402,10 @@ class AutonomousExplorer final : public rclcpp::Node {
         // replay" and left the mouth in the same second (gap=1.60).
         const auto cut_signature = initial_state.path_signature;
         navigation_.Cancel();
-        if (!mapped_obstacle_retry_) {
-          mapped_obstacle_retry_ = true;
-          if (!entry_drive && cut_signature != 0)
-            cooled_signatures_.insert(cut_signature);
-          const bool ok = StartNavigation(goal, returning, true);
-          mapped_obstacle_retry_ = false;
-          if (ok) return true;
-        }
+        if (dispatch_.Retry(RetryKind::kMappedWall, [&] {
+              if (!entry_drive && cut_signature != 0) cooled_signatures_.insert(cut_signature);
+              return StartNavigation(goal, returning, true);
+            })) return true;
         if (cut_signature != 0) cooled_signatures_.insert(cut_signature);
         if (!entry_drive) NoteMappedObstacleReject(goal);
         return false;
@@ -432,9 +417,9 @@ class AutonomousExplorer final : public rclcpp::Node {
       // occupied cells only. Any strictly positive margin is executable.
       // Margin == 0 is the circle itself. Pinch only for true mouths —
       // whole-map pinch on scrape produced the static-map wall collisions.
-      if (!entry_drive && !returning && !retreat_goal_ && !pinch_plan &&
-          std::isfinite(active_path_min_clearance_m_) &&
-          !navigation2d::PathClearsOpen(active_path_min_clearance_m_)) {
+      const auto acceptance = DispatchPolicy::CheckClearance(
+          {entry_drive, returning, retreat_goal_, pinch_plan}, active_path_min_clearance_m_);
+      if (acceptance == navigation2d::exploration::RouteAcceptance::kOpenScrape) {
         if (initial_state.path_signature != 0)
           cooled_signatures_.insert(initial_state.path_signature);
         last_planning_failure_ = "wall-scrape path in open clearance";
@@ -443,28 +428,20 @@ class AutonomousExplorer final : public rclcpp::Node {
                     "(margin=%.3f)",
                     last_planning_failure_.c_str(), active_path_min_clearance_m_);
         navigation_.Cancel();
-        if (!open_scrape_open_retry_) {
-          open_scrape_open_retry_ = true;
-          const bool ok = StartNavigation(goal, returning, latest_map_retry);
-          open_scrape_open_retry_ = false;
-          if (ok) return true;
-        }
-        // Door mouths: open inflation may only fit with thin margin — pinch.
-        if (!narrow_passage_retry_ && PassableMouthGoal(goal)) {
-          narrow_passage_retry_ = true;
-          RCLCPP_INFO(get_logger(),
-                      "Open scrape on corridor mouth (margin=%.3f); pinch",
-                      active_path_min_clearance_m_);
-          const bool ok = StartNavigation(goal, returning, latest_map_retry);
-          narrow_passage_retry_ = false;
-          if (ok) return true;
-        }
+        if (dispatch_.Retry(RetryKind::kOpenScrape, [&] {
+              return StartNavigation(goal, returning, latest_map_retry);
+            })) return true;
+        // Only a passable mouth may use pinch clearance after open scraping.
+        if (!dispatch_.active(RetryKind::kPinch) && PassableMouthGoal(goal) &&
+            dispatch_.Retry(RetryKind::kPinch, [&] {
+              RCLCPP_INFO(get_logger(), "Open scrape on corridor mouth (margin=%.3f); pinch",
+                          active_path_min_clearance_m_);
+              return StartNavigation(goal, returning, latest_map_retry);
+            })) return true;
         return false;
       }
       // Pinch may thread a door but must not accept a corner-tip scrape.
-      if (!entry_drive && !returning && !retreat_goal_ && pinch_plan &&
-          std::isfinite(active_path_min_clearance_m_) &&
-          !navigation2d::PathClearsPinch(active_path_min_clearance_m_)) {
+      if (acceptance == navigation2d::exploration::RouteAcceptance::kPinchScrape) {
         if (initial_state.path_signature != 0)
           cooled_signatures_.insert(initial_state.path_signature);
         last_planning_failure_ = "pinch path still wall-scrape";
@@ -484,12 +461,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       // RPP slows in curves and near occupied space. Exploration goals get a
       // tighter budget so a mid-doorway crawl cannot burn 2+ minutes; return
       // home keeps the longer travel allowance.
-      if (returning) {
-        goal_timeout_s_ = std::max(55., initial_state.global_path_length_m / .10 + 20.);
-      } else {
-        goal_timeout_s_ = std::min(
-            75., std::max(40., initial_state.global_path_length_m / .12 + 15.));
-      }
+      goal_timeout_s_ = DispatchPolicy::GoalTimeout(returning, initial_state.global_path_length_m);
       navigation_.Accept();
       active_goal_ = goal;
       selected_algorithms_ = navigation_profiles_.For(purpose);
@@ -783,53 +755,14 @@ class AutonomousExplorer final : public rclcpp::Node {
         }
       }
     }
-    // Adaptive entry depth: fixed 0.55 m rejected easy shallow rooms (UI:
-    // wide free doorway, SelectEntryProbe nullopt → abandon). Wide gaps use
-    // a mid-gap poke; pinch mouths keep deeper probes into the nose.
-    const double gap = explorer_.MouthGapWidth(entry_.pending()->frontier_x,
-                                               entry_.pending()->frontier_y);
-    const double free_depth = explorer_.MouthFreeDepth(
-        *entry_.pending(), pose_->pose.position.x, pose_->pose.position.y);
-    const bool easy_door =
-        explorer_.IsCorridorMouth(entry_.pending()->frontier_x,
-                                  entry_.pending()->frontier_y) &&
-        gap >= .50 && gap <= 1.40;
-    std::optional<Goal> probe;
-    double used_min_depth = 0.;
-    // Wide mouths with almost no mapped free beyond the jamb (live: gap=0.70
-    // free_depth=0.05) must try a shallow poke first — deep schedules only
-    // return nullopt and abandon an enterable door.
-    const double schedules[][2] = {
-        {easy_door ? .10 : (.42 + .10 * entry_.attempts()),
-         easy_door ? .30 : (entry_.attempts() == 0 ? 1.30 : 1.60)},
-        {easy_door ? (.22 + .08 * entry_.attempts())
-                   : (.42 + .10 * entry_.attempts()),
-         easy_door ? .85 : (entry_.attempts() == 0 ? 1.30 : 1.60)},
-        {.18, .55},
-        {.12, .35},
-    };
-    for (const auto& schedule : schedules) {
-      double minimum_depth = schedule[0];
-      double maximum_depth = schedule[1];
-      if (free_depth > .05) {
-        minimum_depth =
-            std::min(minimum_depth, std::max(.10, free_depth - .05));
-        maximum_depth = std::max(maximum_depth, minimum_depth + .10);
-        maximum_depth = std::min(maximum_depth, std::max(minimum_depth + .10,
-                                                         free_depth + .08));
-      } else if (easy_door) {
-        // Tiny free nose: keep the shallow window, do not demand 0.28 m depth.
-        maximum_depth = std::max(maximum_depth, minimum_depth + .10);
-      }
-      if (maximum_depth < minimum_depth) continue;
-      probe = explorer_.SelectEntryProbe(
-          *entry_.pending(), pose_->pose.position.x, pose_->pose.position.y,
-          minimum_depth, maximum_depth);
-      if (probe) {
-        used_min_depth = minimum_depth;
-        break;
-      }
-    }
+    const auto selection = navigation2d::exploration::SelectEntryTarget(
+        explorer_, *entry_.pending(), pose_->pose.position.x,
+        pose_->pose.position.y, entry_.attempts());
+    const auto& probe = selection.goal;
+    const double gap = selection.gap_m;
+    const double free_depth = selection.free_depth_m;
+    const double used_min_depth = selection.minimum_depth_m;
+    const bool easy_door = selection.easy;
     if (!probe) {
       entry_.CountAttempt();
       RCLCPP_WARN(get_logger(),
@@ -1020,8 +953,8 @@ class AutonomousExplorer final : public rclcpp::Node {
   // boxed in on both axes, or its latest plan failed because the start sits
   // in an obstacle. Anywhere else a plan is the safer way out; escaping in
   // open space drove the tail into walls it could not see.
-  bool TryStartEscape() {
-    if (!scan_ || !pose_ || now() < escape_until_) return false;
+  bool TryStartEscape() override {
+    if (!scan_ || !pose_ || escape_.Busy(now().nanoseconds())) return false;
     const BodyRanges body = ReadBodyRanges();
     const bool boxed_in = navigation2d::HitBlocksSwing(body.front) &&
                           navigation2d::HitBlocksSwing(body.side);
@@ -1038,8 +971,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     command.linear.x = velocity.linear;
     command.angular.z = velocity.angular;
     const double front = body.front, back = body.back, left = body.left, right = body.right;
-    escape_command_ = command;
-    escape_until_ = now() + rclcpp::Duration::from_seconds(hold_s);
+    escape_.Begin(velocity, (now() + rclcpp::Duration::from_seconds(hold_s)).nanoseconds());
     RCLCPP_WARN(get_logger(),
                 "Starting body-frame escape: front=%.2f back=%.2f left=%.2f "
                 "right=%.2f v=%.2f w=%.2f hold=%.1f",
@@ -1049,13 +981,12 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   bool TickEscape() {
-    if (escape_until_.nanoseconds() == 0) return false;
-    if (now() < escape_until_) {
+    if (!escape_.scheduled()) return false;
+    if (escape_.Busy(now().nanoseconds())) {
       // Re-read body-frame lidar every tick. Do not trust the frozen command's
       // yaw bias after localization has coasted on odom.
       const BodyRanges body = ReadBodyRanges();
-      const auto adjusted = navigation2d::exploration::AdjustEscape(
-          {escape_command_.linear.x, escape_command_.angular.z}, body);
+      const auto adjusted = escape_.Command(body);
       geometry_msgs::msg::Twist command;
       command.linear.x = adjusted.linear;
       command.angular.z = adjusted.angular;
@@ -1063,11 +994,10 @@ class AutonomousExplorer final : public rclcpp::Node {
       PublishStatus("RECOVERING", "body-frame tip escape (prefer reverse)");
       return true;
     }
-    escape_until_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    escape_.Unschedule();
     geometry_msgs::msg::Twist stop;
     command_publisher_->publish(stop);
-    const bool resume_return = escape_then_return_;
-    escape_then_return_ = false;
+    const bool resume_return = escape_.ConsumeReturnIntent();
     if (resume_return) {
       BeginReturn(true);
       return true;
@@ -1880,7 +1810,7 @@ class AutonomousExplorer final : public rclcpp::Node {
          Yaw(start_pose_->pose.orientation)});
   }
 
-  bool StartBreadcrumbTowardHome() {
+  bool StartBreadcrumbTowardHome() override {
     if (!start_pose_ || !pose_ || trajectory_.size() < 4) return false;
     const Goal home = MakeHomeGoal();
     const double rx = pose_->pose.position.x;
@@ -1966,45 +1896,28 @@ class AutonomousExplorer final : public rclcpp::Node {
     } else if (!explorer_.CompletionEligible(initial_known_cells_))
       RCLCPP_WARN(get_logger(),
                   "No frontier survived a stable completion window; returning with reachable map coverage");
-    // Return on the final online map, with the FULL driven trail painted free
-    // so SLAM door seals / speckles on the outbound path cannot block home.
-    const Goal home = MakeHomeGoal();
     cooled_signatures_.clear();
-    paint_driven_corridor_ = true;
-    paint_trail_budget_m_ = 80.0;
     return_.UseBreadcrumbs(false);
-    if (StartNavigation(home, true)) {
-      return_.ResetEscapes();
-      RCLCPP_INFO(get_logger(), "Final online-map return path accepted; tracking with RPP");
-      PublishStatus("RETURNING", "tracking shortest route home on final observed map");
-      return;
+    const auto result = return_.Execute(*this);
+    if (result == navigation2d::exploration::ReturnExecutionResult::kEscaping) {
+      escape_.ResumeReturn();
+    } else if (result == navigation2d::exploration::ReturnExecutionResult::kUnavailable) {
+      Finish(false, "return path unavailable; stopping to protect localization");
     }
-    // Direct home blocked: hop along the outbound trail. This recovers the
-    // ~3 m short docks where theta* accepted a chord the controller cannot run.
-    if (StartBreadcrumbTowardHome()) {
-      return_.ResetEscapes();
-      return;
-    }
-    // Cap escape→return retries. An uncapped loop (escape 1.8s → BeginReturn
-    // fails → escape again) thrashed for hundreds of cycles, disagreed scan
-    // vs odometry, and blew localization by >1 m / 180°.
-    constexpr int kMaxReturnEscapes = 5;
-    if (return_.escapes() < kMaxReturnEscapes && TryStartEscape()) {
-      return_.CountEscape();
-      escape_then_return_ = true;
-      return;
-    }
-    // Last attempt: trail paint again after escapes may have moved the pose.
+  }
+
+  bool PlanHome(navigation2d::exploration::ReturnPlanStage) override {
     paint_driven_corridor_ = true;
     paint_trail_budget_m_ = 80.0;
-    if (StartNavigation(MakeHomeGoal(), true)) {
-      return_.ResetEscapes();
-      RCLCPP_INFO(get_logger(), "Final online-map return path accepted after escape; tracking with RPP");
-      PublishStatus("RETURNING", "tracking shortest route home on final observed map");
-      return;
-    }
-    if (StartBreadcrumbTowardHome()) return;
-    Finish(false, "return path unavailable; stopping to protect localization");
+    return StartNavigation(MakeHomeGoal(), true);
+  }
+
+  void HomeAccepted(navigation2d::exploration::ReturnPlanStage stage) override {
+    RCLCPP_INFO(get_logger(), "%s",
+                stage == navigation2d::exploration::ReturnPlanStage::kInitial
+                    ? "Final online-map return path accepted; tracking with RPP"
+                    : "Final online-map return path accepted after escape; tracking with RPP");
+    PublishStatus("RETURNING", "tracking shortest route home on final observed map");
   }
 
   bool ReplanActiveGoalOnLatestMap(const char* reason) {
@@ -2195,19 +2108,12 @@ class AutonomousExplorer final : public rclcpp::Node {
 
   void NotePoseMotion() {
     if (!pose_) return;
-    if (!pose_motion_initialized_ ||
-        std::hypot(pose_->pose.position.x - last_motion_x_,
-                   pose_->pose.position.y - last_motion_y_) > .12) {
-      last_motion_x_ = pose_->pose.position.x;
-      last_motion_y_ = pose_->pose.position.y;
-      pose_motion_stamp_ = now();
-      pose_motion_initialized_ = true;
-    }
+    pose_motion_.Observe(pose_->pose.position.x, pose_->pose.position.y, now().nanoseconds());
   }
 
   bool PoseImmobilityWatchdog(const navigation2d::NavigationState& state) {
     NotePoseMotion();
-    if (!navigation_.has_session() || !pose_ || !pose_motion_initialized_) return false;
+    if (!navigation_.has_session() || !pose_) return false;
     const bool entry_drive = entry_.pending() || entry_.locked();
     const BodyRanges body = ReadBodyRanges();
     const double path_clear =
@@ -2215,27 +2121,10 @@ class AutonomousExplorer final : public rclcpp::Node {
     const bool tip_wedged =
         !entry_drive &&
         IsPinchGeometryStall(path_clear, body.front, body.side);
-    // Open-front slow crawl is not a tip. Longer stall, never peel.
-    const bool open_slow =
-        !entry_drive && !tip_wedged &&
-        navigation2d::AxisSwingClear(body.front);
-    const double min_goal_s =
-        entry_drive ? 14.0 : (open_slow ? 8.0 : 4.0);
-    if ((now() - goal_started_).seconds() < min_goal_s) return false;
-    const bool pose_stuck = (now() - pose_motion_stamp_).seconds() >=
-                            (entry_drive ? 10.0 : (open_slow ? 7.5 : 3.5));
-    const double path_stall_s =
-        entry_drive ? 12.0 : (open_slow ? 7.5 : 3.5);
-    const bool path_stuck =
-        state.path_progress_m < .05 ||
-        (last_goal_path_progress_time_.nanoseconds() > 0 &&
-         (now() - last_goal_path_progress_time_).seconds() > path_stall_s);
-    // Still creeping into a mouth — do not abort and hop to another tour goal.
-    if (entry_drive && state.path_progress_m >= .15 &&
-        last_goal_path_progress_time_.nanoseconds() > 0 &&
-        (now() - last_goal_path_progress_time_).seconds() < 10.0)
+    if (!pose_motion_.Stalled({now().nanoseconds(), goal_started_.nanoseconds(),
+                              last_goal_path_progress_time_.nanoseconds(), state.path_progress_m,
+                              entry_drive, tip_wedged, navigation2d::AxisSwingClear(body.front)}))
       return false;
-    if (!pose_stuck || !path_stuck) return false;
     ++immobility_recoveries_;
     RCLCPP_WARN(get_logger(),
                 "Pose immobility watchdog: stuck=(%.2f,%.2f) recoveries=%d "
@@ -2247,13 +2136,13 @@ class AutonomousExplorer final : public rclcpp::Node {
     geometry_msgs::msg::Twist stop;
     command_publisher_->publish(stop);
     navigation_.Cancel();
-    pose_motion_stamp_ = now();  // debounce
+    pose_motion_.Debounce(now().nanoseconds());
     if (phase_ == MissionPhase::kReturning || returning_) {
       cooled_signatures_.clear();
       if (StartBreadcrumbTowardHome()) return true;
       if (return_.escapes() < 5 && TryStartEscape()) {
         return_.CountEscape();
-        escape_then_return_ = true;
+        escape_.ResumeReturn();
         return true;
       }
       return_.MarkPartial();
@@ -2404,10 +2293,10 @@ class AutonomousExplorer final : public rclcpp::Node {
         .navigation = telemetry_.state(),
         .planning_failure = last_planning_failure_,
         .path_min_clearance_m = active_path_min_clearance_m_,
-        .carrot_x = last_carrot_x_,
-        .carrot_y = last_carrot_y_,
-        .carrot_yaw = last_carrot_yaw_,
-        .carrot_valid = last_carrot_valid_,
+        .carrot_x = debug_paths_.x(),
+        .carrot_y = debug_paths_.y(),
+        .carrot_yaw = debug_paths_.yaw(),
+        .carrot_valid = debug_paths_.valid(),
         .pose_source = pose_source_});
     status_publisher_->publish(status);
   }
@@ -2524,25 +2413,8 @@ class AutonomousExplorer final : public rclcpp::Node {
   }
 
   bool TourSegmentCutsWall(double x0, double y0, double x1, double y1) const {
-    if (!map_ || map_->info.resolution <= 0.) return false;
-    const double resolution = map_->info.resolution;
-    const double origin_x = map_->info.origin.position.x;
-    const double origin_y = map_->info.origin.position.y;
-    const int width = static_cast<int>(map_->info.width);
-    const int height = static_cast<int>(map_->info.height);
-    const double length = std::hypot(x1 - x0, y1 - y0);
-    const int samples = std::max(2, static_cast<int>(std::ceil(length / std::max(.02, .5 * resolution))));
-    for (int sample = 0; sample <= samples; ++sample) {
-      const double ratio = static_cast<double>(sample) / samples;
-      const double wx = x0 + ratio * (x1 - x0);
-      const double wy = y0 + ratio * (y1 - y0);
-      const int col = static_cast<int>(std::floor((wx - origin_x) / resolution));
-      const int row = static_cast<int>(std::floor((wy - origin_y) / resolution));
-      if (col < 0 || row < 0 || col >= width || row >= height) return true;
-      if (map_->data[static_cast<std::size_t>(row) * map_->info.width + col] >= 50)
-        return true;
-    }
-    return false;
+    return navigation2d::exploration_ros::SegmentCutsWall(
+        map_ ? &*map_ : nullptr, x0, y0, x1, y1);
   }
 
   void ClearPublishedNavPaths() {
@@ -2552,7 +2424,7 @@ class AutonomousExplorer final : public rclcpp::Node {
     path_publisher_->publish(empty);
     local_trajectory_publisher_->publish(empty);
     tour_publisher_->publish(empty);
-    last_carrot_valid_ = false;
+    debug_paths_.Clear();
   }
 
   void PublishDebugPaths(const navigation2d::NavigationState& state) {
@@ -2560,109 +2432,16 @@ class AutonomousExplorer final : public rclcpp::Node {
       ClearPublishedNavPaths();
       return;
     }
-    const auto& route = navigation_.path();
-    nav_msgs::msg::Path global;
-    global.header.stamp = now();
-    global.header.frame_id = "map";
-    global.poses.reserve(route.size());
-    for (const auto& pose : route) {
-      geometry_msgs::msg::PoseStamped stamped;
-      stamped.header = global.header;
-      stamped.pose = PoseFromXyYaw(
-          navigation2d::X(pose) + navigation_origin_x_,
-          navigation2d::Y(pose) + navigation_origin_y_,
-          navigation2d::Yaw(pose));
-      global.poses.push_back(stamped);
-    }
+    const auto global = debug_paths_.Global(navigation_.path(), navigation_origin_x_,
+                                            navigation_origin_y_, now());
     path_publisher_->publish(global);
-
-    nav_msgs::msg::Path local;
-    local.header = global.header;
-    // Lookahead band from current progress (Nav2-style local plan window).
-    double traveled = 0.;
-    bool started = false;
-    last_carrot_valid_ = false;
-    for (std::size_t i = 1; i < global.poses.size(); ++i) {
-      const auto& a = global.poses[i - 1].pose.position;
-      const auto& b = global.poses[i].pose.position;
-      const double seg = std::hypot(b.x - a.x, b.y - a.y);
-      const double prev = traveled;
-      traveled += seg;
-      if (!started && traveled + 1e-6 >= state.path_progress_m) {
-        started = true;
-        local.poses.push_back(global.poses[i - 1]);
-        const double remain = state.path_progress_m - prev;
-        const double t = seg > 1e-6 ? std::clamp(remain / seg, 0., 1.) : 0.;
-        last_carrot_x_ = a.x + t * (b.x - a.x);
-        last_carrot_y_ = a.y + t * (b.y - a.y);
-        last_carrot_yaw_ = Yaw(global.poses[i].pose.orientation);
-        last_carrot_valid_ = true;
-      }
-      if (started) {
-        local.poses.push_back(global.poses[i]);
-        if (traveled - state.path_progress_m > 2.5) break;
-      }
-    }
-    if (local.poses.empty() && !global.poses.empty()) {
-      local.poses.push_back(global.poses.front());
-      last_carrot_x_ = global.poses.front().pose.position.x;
-      last_carrot_y_ = global.poses.front().pose.position.y;
-      last_carrot_yaw_ = Yaw(global.poses.front().pose.orientation);
-      last_carrot_valid_ = true;
-    }
+    const auto local = debug_paths_.Local(global, state.path_progress_m);
     local_trajectory_publisher_->publish(local);
-
-    geometry_msgs::msg::PoseStamped carrot;
-    carrot.header = global.header;
-    if (last_carrot_valid_) {
-      carrot.pose = PoseFromXyYaw(last_carrot_x_, last_carrot_y_, last_carrot_yaw_);
-    }
+    const auto carrot = debug_paths_.Carrot(global.header);
     carrot_publisher_->publish(carrot);
-
-    nav_msgs::msg::Path tour;
-    tour.header = global.header;
-    geometry_msgs::msg::PoseArray frontiers;
-    frontiers.header = global.header;
-    // Tour is a Path message, so the UI draws straight edges between poses.
-    // Never chain goals that cut a live mapped wall — that looked like a
-    // through-wall global plan even when Navigation2D routed around.
-    bool published_active = false;
-    double prev_x = pose_->pose.position.x;
-    double prev_y = pose_->pose.position.y;
-    if (std::isfinite(active_goal_.x) && std::isfinite(active_goal_.y)) {
-      frontiers.poses.push_back(
-          PoseFromXyYaw(active_goal_.frontier_x, active_goal_.frontier_y,
-                        active_goal_.yaw));
-      // Skip the straight robot→goal chord when it pierces a mapped wall; the
-      // real route is on /navigation/path (GLOBAL). Publishing the chord made
-      // the UI look like 穿墙.
-      if (!TourSegmentCutsWall(prev_x, prev_y, active_goal_.x, active_goal_.y)) {
-        geometry_msgs::msg::PoseStamped stamped;
-        stamped.header = tour.header;
-        stamped.pose =
-            PoseFromXyYaw(active_goal_.x, active_goal_.y, active_goal_.yaw);
-        tour.poses.push_back(stamped);
-        prev_x = active_goal_.x;
-        prev_y = active_goal_.y;
-        published_active = true;
-      }
-    }
-    for (const Goal& goal : committed_tour_) {
-      if (published_active &&
-          std::hypot(goal.x - active_goal_.x, goal.y - active_goal_.y) < .05 &&
-          std::hypot(goal.frontier_x - active_goal_.frontier_x,
-                     goal.frontier_y - active_goal_.frontier_y) < .05) {
-        published_active = false;  // skip only the matching front entry once
-        continue;
-      }
-      if (TourSegmentCutsWall(prev_x, prev_y, goal.x, goal.y)) break;
-      geometry_msgs::msg::PoseStamped stamped;
-      stamped.header = tour.header;
-      stamped.pose = PoseFromXyYaw(goal.x, goal.y, goal.yaw);
-      tour.poses.push_back(stamped);
-      prev_x = goal.x;
-      prev_y = goal.y;
-    }
+    const auto [tour, frontiers] = debug_paths_.Tour(
+        global.header, map_ ? &*map_ : nullptr, pose_->pose.position.x,
+        pose_->pose.position.y, active_goal_, committed_tour_);
     tour_publisher_->publish(tour);
     frontiers_publisher_->publish(frontiers);
     PublishFrontierDebug();
@@ -2679,7 +2458,7 @@ class AutonomousExplorer final : public rclcpp::Node {
       started_ = now();
       mission_started_ = true;
       return_.ResetEscapes();
-      escape_then_return_ = false;
+      escape_.ClearReturnIntent();
       initial_known_cells_ = KnownCells();
       last_no_executable_known_cells_ = initial_known_cells_;
       last_progress_known_cells_ = initial_known_cells_;
@@ -2704,14 +2483,14 @@ class AutonomousExplorer final : public rclcpp::Node {
       if (!navigation_.has_session()) {
         // Do not re-enter BeginReturn every tick while an escape is queued —
         // that was the thrash. TickEscape already resumes return once.
-        if (escape_until_.nanoseconds() != 0 || escape_then_return_) return;
+        if (escape_.scheduled() || escape_.resume_return()) return;
         if (return_.breadcrumbs() && StartBreadcrumbTowardHome()) return;
         // Wall-tip return: allow more reverse peels before giving up 4 m from
         // home (result.json: return_error=4.1 with first-segment replay fails).
         constexpr int kMaxReturnEscapes = 5;
         if (return_.escapes() < kMaxReturnEscapes && TryStartEscape()) {
           return_.CountEscape();
-          escape_then_return_ = true;
+          escape_.ResumeReturn();
           clear_start_pinch_ = true;
           return;
         }
@@ -2747,37 +2526,25 @@ class AutonomousExplorer final : public rclcpp::Node {
                       pose_->pose.position.x, pose_->pose.position.y);
           return;
         }
-        entry_.TickCrawl();
         const double rx = pose_->pose.position.x;
         const double ry = pose_->pose.position.y;
-        geometry_msgs::msg::Twist crawl;
-        {
-          // Stop at the planned goal. A point 0.58 m past the frontier is
-          // beyond that contract, and the centerline test does not cover the
-          // planning circle, so the crawl walked into the wall.
-          const double tx = active_goal_.x;
-          const double ty = active_goal_.y;
-          if (std::hypot(tx - rx, ty - ry) <= navigation2d::kPlanningRadius() ||
-              TourSegmentCutsWall(rx, ry, tx, ty)) {
-            entry_.StopCrawl();
-            AbandonLockedEntryMouth(
-                "open-loop crawl blocked by wall; leaving mouth");
-            return;
-          }
-          const double bearing = std::atan2(ty - ry, tx - rx);
-          const double err =
-              NormalizeAngle(bearing - Yaw(pose_->pose.orientation));
-          if (std::abs(err) < .90) {
-            crawl.linear.x = .18;
-            crawl.angular.z = std::clamp(1.6 * err, -.70, .70);
-          } else {
-            crawl.angular.z = std::clamp(1.9 * err, -.90, .90);
-          }
+        // Preserve the body-radius short circuit before querying the live map.
+        const bool blocked =
+            std::hypot(active_goal_.x - rx, active_goal_.y - ry) <= navigation2d::kPlanningRadius() ||
+            TourSegmentCutsWall(rx, ry, active_goal_.x, active_goal_.y);
+        const auto step = entry_.AdvanceCrawl(
+            {rx, ry, Yaw(pose_->pose.orientation), blocked}, active_goal_);
+        if (step.state == navigation2d::exploration::EntryCrawlStep::State::kBlocked) {
+          AbandonLockedEntryMouth("open-loop crawl blocked by wall; leaving mouth");
+          return;
         }
+        geometry_msgs::msg::Twist crawl;
+        crawl.linear.x = step.command.linear;
+        crawl.angular.z = step.command.angular;
         command_publisher_->publish(crawl);
         PublishStatus("COMPLETING",
                       "entry no-motion; open-loop crawl into mouth");
-        if (entry_.crawl_ticks() > 40) {
+        if (step.state == navigation2d::exploration::EntryCrawlStep::State::kLastCommand) {
           entry_.StopCrawl();
           if (entry_.attempts() < EntryAttemptBudget() && StartEntryProbe()) return;
           AbandonLockedEntryMouth(
@@ -2902,7 +2669,7 @@ class AutonomousExplorer final : public rclcpp::Node {
         if (StartBreadcrumbTowardHome()) return;
         if (return_.escapes() < 5 && TryStartEscape()) {
           return_.CountEscape();
-          escape_then_return_ = true;
+          escape_.ResumeReturn();
           return;
         }
         paint_driven_corridor_ = true;
@@ -3418,7 +3185,7 @@ class AutonomousExplorer final : public rclcpp::Node {
           if (StartBreadcrumbTowardHome()) return;
           if (return_.escapes() < 5 && TryStartEscape()) {
             return_.CountEscape();
-            escape_then_return_ = true;
+            escape_.ResumeReturn();
             return;
           }
         } else {
@@ -3548,9 +3315,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   std::unordered_set<std::uint64_t> cooled_signatures_;
   int reject_streak_ = 0;
   int mapped_obstacle_rejects_ = 0;
-  bool mapped_obstacle_retry_ = false;
-  bool narrow_passage_retry_ = false;
-  bool open_scrape_open_retry_ = false;
+  navigation2d::exploration::DispatchPolicy dispatch_;
   bool reject_pose_valid_ = false;
   int reject_cell_x_ = 0;
   int reject_cell_y_ = 0;
@@ -3565,10 +3330,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   navigation2d::exploration::PlanningSnapshotBuilder snapshot_builder_;
   navigation2d::exploration::PlanningSnapshot planning_snapshot_;
   bool clear_start_pinch_ = false;
-  bool escape_then_return_ = false;
-  bool pose_motion_initialized_ = false;
-  double last_motion_x_ = 0., last_motion_y_ = 0.;
-  rclcpp::Time pose_motion_stamp_{0, 0, RCL_ROS_TIME};
+  navigation2d::exploration::PoseMotionWatch pose_motion_;
   int immobility_recoveries_ = 0;
   int immobility_open_replans_ = 0;
   // Soft wall-scrape rejects: rotate tour twice before RecordAttempt demote.
@@ -3576,8 +3338,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   int scrape_reject_count_ = 0;
   bool tip_rescue_attempted_ = false;
   navigation2d::exploration::RoomVisitLedger room_visits_;
-  geometry_msgs::msg::Twist escape_command_;
-  rclcpp::Time escape_until_{0, 0, RCL_ROS_TIME};
+  navigation2d::exploration::EscapeExecution escape_;
   int reported_recoveries_ = 0;
   std::uint64_t acados_commands_ = 0;
   std::uint64_t mppi_commands_ = 0, rpp_commands_ = 0;
@@ -3591,10 +3352,7 @@ class AutonomousExplorer final : public rclcpp::Node {
   bool start_occupied_ = false;
   std::uint64_t last_path_signature_ = 0;
   double active_path_min_clearance_m_ = 0.;
-  double last_carrot_x_ = 0.;
-  double last_carrot_y_ = 0.;
-  double last_carrot_yaw_ = 0.;
-  bool last_carrot_valid_ = false;
+  navigation2d::exploration_ros::DebugPaths debug_paths_;
   bool returning_ = false, finished_ = false, mission_started_ = false;
   bool truth_origin_ = false;
   std::string pose_source_;

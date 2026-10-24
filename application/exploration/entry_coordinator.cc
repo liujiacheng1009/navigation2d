@@ -1,6 +1,9 @@
 #include "navigation2d/application/exploration/entry_coordinator.h"
 
+#include <algorithm>
 #include <cmath>
+
+#include "navigation2d/geometry/robot_geometry.h"
 namespace navigation2d::exploration {
 void EntryCoordinator::Lock(const ExplorationGoal& mouth, bool easy, EntryEvidence evidence) {
   locked_ = mouth;
@@ -17,6 +20,28 @@ void EntryCoordinator::Clear() {
   crawl_ticks_ = 0;
   easy_ = false;
 }
+EntryCrawlStep EntryCoordinator::AdvanceCrawl(EntryCrawlObservation robot,
+                                              const ExplorationGoal& target) {
+  ++crawl_ticks_;
+  const double dx = target.x - robot.x, dy = target.y - robot.y;
+  if (std::hypot(dx, dy) <= kPlanningRadius() || robot.segment_blocked) {
+    StopCrawl();
+    return {EntryCrawlStep::State::kBlocked, {}};
+  }
+  const double bearing = std::atan2(dy, dx);
+  const double delta = bearing - robot.yaw;
+  const double error = std::atan2(std::sin(delta), std::cos(delta));
+  Twist2d command;
+  if (std::abs(error) < .90) {
+    command.linear = .18;
+    command.angular = std::clamp(1.6 * error, -.70, .70);
+  } else {
+    command.angular = std::clamp(1.9 * error, -.90, .90);
+  }
+  return {crawl_ticks_ > 40 ? EntryCrawlStep::State::kLastCommand : EntryCrawlStep::State::kDriving,
+          command};
+}
+
 double EntryCoordinator::Depth(double rx, double ry) const {
   if (!pending_) {
     return 0.;

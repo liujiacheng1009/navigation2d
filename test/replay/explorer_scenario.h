@@ -85,7 +85,8 @@ int RunExplorerReplay(int argc, char** argv) {
           << node->ReplayEntryAttempts() << ',' << node->ReplayReturnEscapes() << ','
           << node->replay_.probe_overlay_hash_ << ']';
   }
-  std::cout << "{\"trace\":[" << trace.str() << "],\"tick_us\":[";
+  std::cout << "{\"path_messages_hash\":" << node->replay_.path_messages.value() << ",\"trace\":["
+            << trace.str() << "],\"tick_us\":[";
   for (std::size_t i = 0; i < timings.size(); ++i) {
     if (i) {
       std::cout << ',';

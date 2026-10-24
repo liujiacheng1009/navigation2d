@@ -5,6 +5,7 @@
 
 #include "geometry_msgs/msg/twist.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
+#include "navigation2d/test/replay/message_fingerprint.h"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/string.hpp"
 
@@ -50,6 +51,19 @@ struct ReplayOutputs {
     ProbeHash(std::to_string(msg.info.origin.position.x));
     ProbeHash(std::to_string(msg.info.origin.position.y));
     ProbeHash(std::string(reinterpret_cast<const char*>(msg.data.data()), msg.data.size()));
+  }
+  MessageFingerprint path_messages;
+  void ProbePublish(const nav_msgs::msg::Path& message) {
+    ++probe_publishes_;
+    path_messages.Add(message);
+  }
+  void ProbePublish(const geometry_msgs::msg::PoseStamped& message) {
+    ++probe_publishes_;
+    path_messages.Add(message);
+  }
+  void ProbePublish(const geometry_msgs::msg::PoseArray& message) {
+    ++probe_publishes_;
+    path_messages.Add(message);
   }
   template <class T>
   void ProbePublish(const T&) {
