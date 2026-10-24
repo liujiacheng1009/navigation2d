@@ -131,3 +131,5 @@ navigation2d_assert_test(route_failure_history_test navigation2d_exploration_app
 navigation2d_assert_test(entry_probe_search_test navigation2d_exploration)
 
 navigation2d_assert_test(unvisited_space_test navigation2d_exploration)
+
+navigation2d_assert_test(mouth_goal_stages_test navigation2d_exploration)

@@ -36,6 +36,7 @@ navigation2d_library(navigation2d_exploration
   exploration/entry_probe_search.cc exploration/entry_probe_direction.cc
   exploration/entry_probe_grid.cc exploration/mouth_gap.cc
   exploration/free_space_distances.cc exploration/unvisited_space.cc
+  exploration/mouth_goal_grouping.cc exploration/mouth_goal_placement.cc
   exploration/frontier_components.cc
   exploration/frontier_approach_viewpoints.cc
   exploration/frontier_viewpoint_search.cc
