@@ -95,3 +95,11 @@ add_test(NAME configuration_boundary_test COMMAND configuration_boundary_test
   "${PROJECT_SOURCE_DIR}/config/navigation2d.yaml")
 
 navigation2d_assert_test(grid_file_boundary_test navigation2d_configuration)
+
+# Stateful command/diagnostic characterization, including empty route intervals.
+add_executable(navigation2d_pursuit_replay pursuit_replay/contract_replay.cc)
+target_link_libraries(navigation2d_pursuit_replay PRIVATE navigation2d_core)
+
+navigation2d_assert_test(pursuit_path_progress_test navigation2d_control)
+navigation2d_assert_test(pursuit_alignment_test navigation2d_control)
+target_link_libraries(pursuit_alignment_test PRIVATE navigation2d_configuration)

@@ -238,3 +238,37 @@ are unchanged. A controlled Tick regression was localized to mask generation;
 its failed samples and discarded lifetime experiment remain available. The
 isolated query implementation is validated before the original performance
 gate is repeated; diagnostic averages alone do not close performance acceptance.
+
+### Regulated pure pursuit ownership
+
+The controller facade keeps only pursuit tracking parameters and composes two
+state owners. `PathProgress` owns endpoint/size identity and the monotone segment
+cursor; it never retains a path reference. `Alignment` owns stop/rotate/resume
+hysteresis and the diagnostic maneuver. An optional command distinguishes an
+owned zero stop from delegation to ordinary tracking. Nominal clearance
+regulation and collision rollout are shared pure computations.
+
+`ParametersFrom` converts the legacy configuration into the fields actually
+used by pursuit. The existing public constructor remains available; YAML and
+algorithm selection stay outside the controller. Empty-path intervals preserve
+route state, while the original endpoint/size threshold resets it. The same
+collision model validates tracking, braking and constructive forward probes.
+
+```mermaid
+flowchart TD
+  Input[Path, pose, measured velocity, costmap] --> Identity[Observe route identity]
+  Identity --> Projection[Monotone bounded segment projection]
+  Projection --> Alignment[Continue stop / rotate state]
+  Alignment -->|command| Output[Return command and maneuver]
+  Alignment -->|tracking| Carrot[Sample path-relative carrot]
+  Carrot --> Regulation[Curvature and clearance regulation]
+  Regulation --> Check[Bounded feasibility and acceleration checks]
+  Check -->|safe| Output
+  Check -->|unsafe| Brake[Constructive heading, brake, then rotate]
+  Brake --> Output
+```
+
+The differential driver covers 960 frames across two radii, four maps and six
+route shapes, including empty intervals and sub/above-threshold goal changes.
+It compares commands, collision verdicts and all maneuver diagnostics against
+independently frozen headers/core; benchmark mode must preserve the same trace.

@@ -18,7 +18,9 @@ navigation2d_library(navigation2d_planning
 target_link_libraries(navigation2d_planning PUBLIC navigation2d_costmap)
 
 navigation2d_library(navigation2d_control
-  control/regulated_pure_pursuit.cc control/dwa_controller.cc control/nav2_mppi_core.cc
+  control/regulated_pure_pursuit.cc control/pursuit_alignment.cc control/pursuit_collision.cc
+  control/pursuit_parameters.cc control/pursuit_path_progress.cc control/pursuit_regulation.cc
+  control/dwa_controller.cc control/nav2_mppi_core.cc
   control/mppi_controller.cc control/dynamic_safety.cc control/safe_corridor.cc
   control/collision_monitor.cc control/mpc_controller.cc)
 target_link_libraries(navigation2d_control PUBLIC navigation2d_planning)

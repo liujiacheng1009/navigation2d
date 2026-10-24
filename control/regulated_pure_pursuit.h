@@ -1,54 +1,23 @@
 #pragma once
-
-#include <cstddef>
-
 #include "navigation2d/control/local_controller.h"
-#include "navigation2d/configuration/navigation_config.h"
-#include "navigation2d/control/local_controller.h"
-
+#include "navigation2d/control/pursuit_alignment.h"
+#include "navigation2d/control/pursuit_parameters.h"
+#include "navigation2d/control/pursuit_path_progress.h"
 namespace navigation2d {
-
+struct NavigationConfig;
 class RegulatedPurePursuit final : public LocalController {
  public:
-  explicit RegulatedPurePursuit(NavigationConfig config) : config_(config) {}
-  Twist2d Compute(const Path& path, const Pose2d& pose, Twist2d current,
-                  const LayeredCostmap& costmap,
+  explicit RegulatedPurePursuit(NavigationConfig config);
+  Twist2d Compute(const Path&, const Pose2d&, Twist2d current, const LayeredCostmap&,
                   const std::vector<PredictedObstacle>& dynamic_obstacles = {}) const override;
-  bool CollisionImminent(const Pose2d& pose, Twist2d command,
-                         const LayeredCostmap& costmap) const override;
-  ControllerDiagnostics Diagnostics() const override {
-    ControllerDiagnostics diagnostics;
-    diagnostics.backend = ControllerBackend::kRpp;
-    diagnostics.status = maneuver_ == ControllerManeuver::kRouteInfeasible ?
-        ControllerSolveStatus::kUnsafe : ControllerSolveStatus::kSuccess;
-    diagnostics.fallback_level = fallback_level_;
-    diagnostics.maneuver = maneuver_;
-    diagnostics.intentional_stop = intentional_stop_;
-    return diagnostics;
-  }
+  bool CollisionImminent(const Pose2d&, Twist2d, const LayeredCostmap&) const override;
+  ControllerDiagnostics Diagnostics() const override { return alignment_.Diagnostics(); }
 
  private:
-  enum class PursuitMode {
-    kTracking,
-    kStopping,
-    kRotateToPath,
-    kRouteInfeasible,
-  };
-
-  NavigationConfig config_;
-  // Path progress is a topological state, not an unconstrained nearest-point
-  // query. Retaining it prevents a self-near path from jumping backwards.
-  mutable std::size_t progress_index_ = 0;
-  mutable std::size_t path_size_ = 0;
-  mutable double path_start_x_ = 0., path_start_y_ = 0.;
-  mutable double path_goal_x_ = 0., path_goal_y_ = 0.;
-  mutable int fallback_level_ = 0;
-  mutable PursuitMode mode_ = PursuitMode::kTracking;
-  mutable ControllerManeuver maneuver_ = ControllerManeuver::kTracking;
-  mutable bool intentional_stop_ = false;
-  mutable double recovery_heading_ = 0.;
-  mutable int stopped_cycles_ = 0;
-  mutable int aligned_cycles_ = 0;
+  struct ParameterTag {};
+  explicit RegulatedPurePursuit(pursuit_internal::Parameters, ParameterTag);
+  pursuit_internal::TrackingParameters config_;
+  mutable pursuit_internal::PathProgress progress_;
+  mutable pursuit_internal::Alignment alignment_;
 };
-
 }  // namespace navigation2d
