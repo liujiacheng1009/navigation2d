@@ -406,3 +406,7 @@ execution-stall total is removed; exported counters/messages remain unchanged.
 ### 位姿输入边界
 
 `PoseFeedback` 在 ROS 回调中转换为 map-frame `PoseObservation`，探索逻辑只读取平面坐标、朝向和原始纳秒时间戳。缓存每次观测均更新，与累计轨迹的 5 cm 采样门槛独立；不增加时效或四元数归一化策略。
+
+### 观测适配
+
+`scan_observation` 显式区分同步借用的范围视图和导航独立持有的扫描副本。`map_observation::ObservedRouteCutsWall` 负责 ROS 占用值与 planning-local 路线的 map-frame 转换，再委托领域路线验证器；保持未知/49/50 阈值及无位姿回退语义。

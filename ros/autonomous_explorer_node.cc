@@ -23,6 +23,7 @@
 #include "navigation2d/application/exploration/pose_observation.h"
 #include "navigation2d/ros/exploration/explorer_parameters.h"
 #include "navigation2d/ros/exploration/map_observation.h"
+#include "navigation2d/ros/exploration/scan_observation.h"
 #include "navigation2d/ros/exploration/artifact_writer.h"
 #include "navigation2d/ros/exploration/planning_map_adapter.h"
 #include "navigation2d/application/exploration/return_coordinator.h"
@@ -178,10 +179,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   std::optional<navigation2d::exploration::ScanEvidenceView> ScanEvidence() const {
-    if (!scan_) { return std::nullopt; }
-    return navigation2d::exploration::ScanEvidenceView{
-        scan_->angle_min, scan_->angle_increment, scan_->range_min, scan_->range_max,
-        scan_->ranges};
+    return navigation2d::exploration_ros::ScanEvidence(scan_ ? &*scan_ : nullptr);
   }
 
   std::size_t KnownCells() const {
@@ -203,16 +201,6 @@ class AutonomousExplorer final : public rclcpp::Node,
     return velocity_;
   }
 
-  navigation2d::LaserScan ConvertScan() const {
-    navigation2d::LaserScan result;
-    result.angle_min = scan_->angle_min;
-    result.angle_increment = scan_->angle_increment;
-    result.range_min = scan_->range_min;
-    result.range_max = scan_->range_max;
-    result.ranges.assign(scan_->ranges.begin(), scan_->ranges.end());
-    return result;
-  }
-
   void FeedScan() {
     auto robot = LocalPose(*Pose());
     const double yaw = navigation2d::Yaw(robot);
@@ -223,7 +211,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     // The online mapper has already fused this scan into the static map.
     // Do not let instantaneous endpoint noise disconnect its global route;
     // retain the scan for near-field collision monitoring during execution.
-    navigation_.UpdateCollisionScan(sensor, ConvertScan());
+    navigation_.UpdateCollisionScan(sensor, navigation2d::exploration_ros::CopyScan(*scan_));
   }
 
   void RejectPreparation(navigation2d::exploration::DispatchFailure failure) override {
@@ -1681,38 +1669,10 @@ class AutonomousExplorer final : public rclcpp::Node,
   // 0.44 m hops). While driving, only the part ahead of the robot matters and
   // a cut needs a new cell touching the chassis, not the planning circle.
   bool PathCutsMappedObstacle(bool execution_tick = false) const {
-    if (!navigation_.has_session() || !map_ || map_->info.resolution <= 0.) return false;
-    const auto& route = navigation_.path();
-    if (route.size() < 2) return false;
-    navigation2d::ExplorationGrid live;
-    live.width = static_cast<int>(map_->info.width);
-    live.height = static_cast<int>(map_->info.height);
-    live.resolution = map_->info.resolution;
-    live.origin_x = map_->info.origin.position.x;
-    live.origin_y = map_->info.origin.position.y;
-    live.cells.resize(static_cast<std::size_t>(live.width) * live.height);
-    for (int row = 0; row < live.height; ++row) {
-      for (int col = 0; col < live.width; ++col) {
-        const auto cell =
-            map_->data[static_cast<std::size_t>(row) * map_->info.width + col];
-        std::int8_t value = 0;
-        if (cell < 0) value = -1;
-        else if (cell >= 50) value = 100;
-        live.cells[static_cast<std::size_t>(row) * live.width + col] = value;
-      }
-    }
-    std::vector<std::pair<double, double>> path_xy;
-    path_xy.reserve(route.size());
-    for (const auto& pose : route) {
-      path_xy.emplace_back(navigation2d::X(pose) + planning_map_.origin_x(),
-                           navigation2d::Y(pose) + planning_map_.origin_y());
-    }
-    const double robot_x = Pose() ? Pose()->x : path_xy.front().first;
-    const double robot_y = Pose() ? Pose()->y : path_xy.front().second;
-    return navigation2d::exploration::RouteCutsMappedObstacle(
-        std::move(live), std::move(path_xy), planning_map_.snapshot(), robot_x, robot_y,
-        Pose() ? Pose()->yaw : 0., Pose() ? ScanEvidence() : std::nullopt,
-        execution_tick);
+    if (!navigation_.has_session()) return false;
+    return navigation2d::exploration_ros::ObservedRouteCutsWall(
+        map_ ? &*map_ : nullptr, navigation_.path(), planning_map_.origin_x(), planning_map_.origin_y(),
+        planning_map_.snapshot(), Pose(), ScanEvidence(), execution_tick);
   }
 
   double CommandFrontRange() const override { return ReadBodyRanges().front; }

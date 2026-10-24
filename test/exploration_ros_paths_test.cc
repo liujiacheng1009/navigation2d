@@ -1,8 +1,10 @@
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 #include "navigation2d/ros/exploration/debug_paths.h"
 #include "navigation2d/ros/exploration/map_observation.h"
+#include "navigation2d/ros/exploration/scan_observation.h"
 namespace {
 void Require(bool value) {
   if (!value) {
@@ -55,4 +57,38 @@ int main() {
   Require(tour.poses.size() == 1 && frontiers.poses.size() == 1);
   Require(tour.poses.front().pose.position.x == active.x);
   Require(!SegmentCutsWall(nullptr, 0., 0., 1., 1.));
+  // Conversion retains borrowed evidence and independently owned navigation data.
+  Require(!ScanEvidence(nullptr));
+  sensor_msgs::msg::LaserScan scan;
+  scan.angle_min = -.4F;
+  scan.angle_increment = .2F;
+  scan.range_min = .1F;
+  scan.range_max = 3.F;
+  scan.ranges = {1.F, std::numeric_limits<float>::infinity(),
+                 std::numeric_limits<float>::quiet_NaN()};
+  const auto evidence = ScanEvidence(&scan);
+  const auto owned = CopyScan(scan);
+  Require(evidence && evidence->ranges.data() == scan.ranges.data());
+  Require(owned.angle_min == scan.angle_min && owned.angle_increment == scan.angle_increment &&
+          owned.range_min == scan.range_min && owned.range_max == scan.range_max);
+  Require(std::isinf(owned.ranges[1]) && std::isnan(owned.ranges[2]));
+  scan.ranges[0] = 2.F;
+  Require(evidence->ranges[0] == 2.F && owned.ranges[0] == 1.F);
+  // Map-frame translation and the observed occupancy threshold are independent
+  // of the planning-local route coordinates.
+  map.data.assign(100, -1);
+  exploration::PlanningSnapshot snapshot;
+  const Path shifted{MakePose2d(0., 0., 0.), MakePose2d(8., 0., 0.)};
+  const auto cuts = [&] {
+    return ObservedRouteCutsWall(&map, shifted, .5, .5, snapshot, std::nullopt, std::nullopt,
+                                 false);
+  };
+  Require(!cuts());
+  map.data[3] = 49;
+  Require(!cuts());
+  map.data[3] = 50;
+  Require(cuts());
+  Require(!ObservedRouteCutsWall(nullptr, shifted, 0., 0., snapshot, std::nullopt, std::nullopt,
+                                 false));
+  Require(!ObservedRouteCutsWall(&map, {}, 0., 0., snapshot, std::nullopt, std::nullopt, false));
 }

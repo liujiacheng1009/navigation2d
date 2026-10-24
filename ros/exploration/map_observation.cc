@@ -32,4 +32,43 @@ bool SegmentCutsWall(const nav_msgs::msg::OccupancyGrid* map, double x0, double 
   return false;
 }
 
+bool ObservedRouteCutsWall(const nav_msgs::msg::OccupancyGrid* map, const Path& route,
+                           double origin_x, double origin_y,
+                           const exploration::PlanningSnapshot& snapshot,
+                           const std::optional<exploration::PoseObservation>& robot,
+                           const std::optional<exploration::ScanEvidenceView>& scan,
+                           bool execution_tick) {
+  if (!map || map->info.resolution <= 0. || route.size() < 2) {
+    return false;
+  }
+  navigation2d::ExplorationGrid live;
+  live.width = static_cast<int>(map->info.width);
+  live.height = static_cast<int>(map->info.height);
+  live.resolution = map->info.resolution;
+  live.origin_x = map->info.origin.position.x;
+  live.origin_y = map->info.origin.position.y;
+  live.cells.resize(static_cast<std::size_t>(live.width) * live.height);
+  for (int row = 0; row < live.height; ++row) {
+    for (int col = 0; col < live.width; ++col) {
+      const auto cell = map->data[static_cast<std::size_t>(row) * map->info.width + col];
+      std::int8_t value = 0;
+      if (cell < 0) {
+        value = -1;
+      } else if (cell >= 50) {
+        value = 100;
+      }
+      live.cells[static_cast<std::size_t>(row) * live.width + col] = value;
+    }
+  }
+  std::vector<std::pair<double, double>> path_xy;
+  path_xy.reserve(route.size());
+  for (const auto& pose : route) {
+    path_xy.emplace_back(navigation2d::X(pose) + origin_x, navigation2d::Y(pose) + origin_y);
+  }
+  const double robot_x = robot ? robot->x : path_xy.front().first;
+  const double robot_y = robot ? robot->y : path_xy.front().second;
+  return navigation2d::exploration::RouteCutsMappedObstacle(
+      std::move(live), std::move(path_xy), snapshot, robot_x, robot_y, robot ? robot->yaw : 0.,
+      robot ? scan : std::nullopt, execution_tick);
+}
 }  // namespace navigation2d::exploration_ros
