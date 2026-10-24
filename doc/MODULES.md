@@ -322,3 +322,38 @@ anchor. It reads a borrowed clock only when the original short-circuit flow
 needs elapsed time. The failure predicate retains return docking exemption,
 first-segment recovery, tight-front, mid-path pinch and hard forward STOP gates.
 Nanosecond conversion uses division by 1e9, matching ROS Duration semantics.
+
+### Frontier discovery and viewpoint selection
+
+`FrontierComponents` owns only a single discovery run's boundary mask, visited
+marks and row-major cursor. It borrows raw observation and travel distances to
+mark approachable boundaries, then yields 8-connected components in BFS order.
+`LocateCluster` chooses a real member nearest the centroid, keeping strict ties.
+
+`FrontierViewpointProblem` is a synchronous read-only search input. Candidate
+filters retain observed-free authorization, travel reachability, cooling,
+standoff and clearance checks. Known-cell cooling evidence is queried at the
+same points as before; this split does not introduce a gain or blacklist cache.
+
+```mermaid
+flowchart TD
+  Observation[Original mapper observation] --> Boundaries[Approachable raw boundary mask]
+  Planning[Private planning grid] --> Travel[Safe mask and travel graph]
+  Travel --> Boundaries
+  Boundaries --> Components[8-connected components in seed/BFS order]
+  Components --> Anchor[Real member nearest centroid]
+  Anchor --> Direct[Representative LOS search]
+  Direct -->|none| Members[Any member LOS search]
+  Members -->|none| Narrow[Narrow corridor approach]
+  Narrow -->|none| Open[Bounded open approach]
+  Direct -->|found| Admission[Exploration admission and tip evidence]
+  Members -->|found| Admission
+  Narrow -->|found| Admission
+  Open -->|found| Admission
+  Admission --> Stable[Mouth normalization and temporal stability]
+```
+
+The four search passes have strict priority; later scores cannot replace an
+accepted earlier pass. Ray gain uses 144 rays with range steps from planning
+resolution and area from observation resolution. Region/tour state, admission,
+tracking and debug association remain in FrontierExplorer at this checkpoint.
