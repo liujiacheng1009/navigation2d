@@ -14,6 +14,7 @@ struct EntryProbeObservation {
 };
 // No retained services or duplicate mission state. EntryCoordinator and ledger
 // remain the sole state owners; map queries stay in FrontierExplorer.
-EntryProbeResult ExecuteEntryProbe(EntryCoordinator&, FrontierExplorer&, RoomVisitLedger&,
-                                   EntryActions&, EntryProbeObservation);
+[[nodiscard]] EntryProbeResult ExecuteEntryProbe(EntryCoordinator&, FrontierExplorer&,
+                                                 RoomVisitLedger&, EntryActions&,
+                                                 EntryProbeObservation);
 }  // namespace navigation2d::exploration

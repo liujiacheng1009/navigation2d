@@ -93,6 +93,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::ReturnActions,
                                  private navigation2d::exploration::EntryActions,
                                  private navigation2d::exploration::TourConstraints,
+                                 private navigation2d::exploration::DispatchActions,
                                  private navigation2d::exploration_ros::EntryStatusSink {
  public:
   AutonomousExplorer() : Node("sweepnav_autonomous_explorer"), explorer_(ExplorerConfig(*this)) {
@@ -253,6 +254,43 @@ class AutonomousExplorer final : public rclcpp::Node,
     navigation_.UpdateCollisionScan(sensor, ConvertScan());
   }
 
+  void RejectPreparation(navigation2d::exploration::DispatchFailure failure) override {
+    last_planning_failure_ = std::move(failure.reason);
+    start_occupied_ = failure.start_occupied;
+    using navigation2d::exploration::DispatchRejection;
+    if (failure.kind == DispatchRejection::kOpenScrape ||
+        failure.kind == DispatchRejection::kPinchScrape) {
+      RCLCPP_WARN(get_logger(), "Navigation2D rejected goal before execution: %s (margin=%.3f)",
+                  last_planning_failure_.c_str(), failure.margin_m);
+    } else {
+      RCLCPP_WARN(get_logger(), "Navigation2D rejected goal before execution: %s",
+                  last_planning_failure_.c_str());
+    }
+    navigation_.Cancel();
+  }
+  bool PreparedRouteCutsWall() const override { return PathCutsMappedObstacle(); }
+  void CoolRouteSignature(std::uint64_t signature) override { cooled_signatures_.insert(signature); }
+  void ObservePreparedRoute(std::uint64_t signature, double margin_m) override {
+    mapped_obstacle_rejects_ = 0;
+    last_path_signature_ = signature;
+    active_path_min_clearance_m_ = margin_m;
+  }
+  bool RetryNavigation(const Goal& goal,
+                       navigation2d::exploration::DispatchRetryRequest request) override {
+    return StartNavigation(goal, request.returning, request.latest_map);
+  }
+  void ReportDispatchRetry(navigation2d::exploration::DispatchRetryNotice notice) override {
+    using Kind = navigation2d::exploration::DispatchRetryNotice::Kind;
+    if (notice.kind == Kind::kNoRoutePinch) {
+      RCLCPP_INFO(get_logger(), "%s no route (%s); retrying pinch clearance",
+                  notice.entry ? "Entry" : "Open", last_planning_failure_.c_str());
+    } else {
+      // A nested open-scrape retry may replace the last observed margin.
+      RCLCPP_INFO(get_logger(), "Open scrape on corridor mouth (margin=%.3f); pinch",
+                  active_path_min_clearance_m_);
+    }
+  }
+
   bool StartNavigation(const Goal& requested_goal, bool returning,
                        bool latest_map_retry = false) {
     if (!latest_map_retry) {
@@ -327,97 +365,15 @@ class AutonomousExplorer final : public rclcpp::Node,
       const auto probe = navigation_.Probe(
           LocalPose(Pose()->pose), FreshVelocity(initial_time), initial_time.seconds());
       const auto& initial_state = probe.state;
-      if (!probe.has_route()) {
-        last_planning_failure_ = probe.failure_reason();
-        start_occupied_ = probe.failure ==
-            navigation2d::exploration::InitialPlanFailure::kStartOccupied;
-        RCLCPP_WARN(get_logger(),
-                    "Navigation2D rejected goal before execution: %s",
-                    last_planning_failure_.c_str());
-        navigation_.Cancel();
-        // Pinch only when open/entry finds NO route (sealed throat). Never
-        // pinch-retry wall-scrape — that re-plans the whole map with looser
-        // inflation and accepts wall-foot GLOBAL (static-map collisions).
-        // Never pinch-retry "goal occupied" (corner-tip viewpoints).
-        if (!returning && !retreat_goal_ &&
-            DispatchPolicy::PinchWorthy(last_planning_failure_, entry_drive) &&
-            dispatch_.Retry(RetryKind::kPinch, [&] {
-              RCLCPP_INFO(get_logger(), "%s no route (%s); retrying pinch clearance",
-                          entry_drive ? "Entry" : "Open", last_planning_failure_.c_str());
-              return StartNavigation(goal, returning, latest_map_retry);
-            })) {
-          return true;
-        }
-        return false;
-      }
-      // Always reject through-wall chords on the live map (UI dashed purple
-      // through solid black). SLAM occupied is never carved open for entry.
-      if (PathCutsMappedObstacle()) {
-        last_planning_failure_ = "path intersects mapped obstacle";
-        RCLCPP_WARN(get_logger(),
-                    "Navigation2D rejected goal before execution: %s",
-                    last_planning_failure_.c_str());
-        // Open explore bans the chord before its one retry so the replay is a
-        // different first segment. Entry shares that hallway prefix with every
-        // probe into the room; banning it made the retry "failed first-segment
-        // replay" and left the mouth in the same second (gap=1.60).
-        const auto cut_signature = initial_state.path_signature;
-        navigation_.Cancel();
-        if (dispatch_.Retry(RetryKind::kMappedWall, [&] {
-              if (!entry_drive && cut_signature != 0) cooled_signatures_.insert(cut_signature);
-              return StartNavigation(goal, returning, true);
-            })) {
-          return true;
-        }
-        if (cut_signature != 0) cooled_signatures_.insert(cut_signature);
-        if (!entry_drive) NoteMappedObstacleReject(goal);
-        return false;
-      }
-      mapped_obstacle_rejects_ = 0;
-      last_path_signature_ = initial_state.path_signature;
-      active_path_min_clearance_m_ = initial_state.global_planning.path_min_clearance_m;
-      // path_min_clearance_m is EXTRA margin past the planning circle, to
-      // occupied cells only. Any strictly positive margin is executable.
-      // Margin == 0 is the circle itself. Pinch only for true mouths —
-      // whole-map pinch on scrape produced the static-map wall collisions.
-      const auto acceptance = DispatchPolicy::CheckClearance(
-          {entry_drive, returning, retreat_goal_, pinch_plan}, active_path_min_clearance_m_);
-      if (acceptance == navigation2d::exploration::RouteAcceptance::kOpenScrape) {
-        if (initial_state.path_signature != 0)
-          cooled_signatures_.insert(initial_state.path_signature);
-        last_planning_failure_ = "wall-scrape path in open clearance";
-        RCLCPP_WARN(get_logger(),
-                    "Navigation2D rejected goal before execution: %s "
-                    "(margin=%.3f)",
-                    last_planning_failure_.c_str(), active_path_min_clearance_m_);
-        navigation_.Cancel();
-        if (dispatch_.Retry(RetryKind::kOpenScrape, [&] {
-              return StartNavigation(goal, returning, latest_map_retry);
-            })) {
-          return true;
-        }
-        // Only a passable mouth may use pinch clearance after open scraping.
-        if (!dispatch_.active(RetryKind::kPinch) && PassableMouthGoal(goal) &&
-            dispatch_.Retry(RetryKind::kPinch, [&] {
-              RCLCPP_INFO(get_logger(), "Open scrape on corridor mouth (margin=%.3f); pinch",
-                          active_path_min_clearance_m_);
-              return StartNavigation(goal, returning, latest_map_retry);
-            })) {
-          return true;
-        }
-        return false;
-      }
-      // Pinch may thread a door but must not accept a corner-tip scrape.
-      if (acceptance == navigation2d::exploration::RouteAcceptance::kPinchScrape) {
-        if (initial_state.path_signature != 0)
-          cooled_signatures_.insert(initial_state.path_signature);
-        last_planning_failure_ = "pinch path still wall-scrape";
-        RCLCPP_WARN(get_logger(),
-                    "Navigation2D rejected goal before execution: %s "
-                    "(margin=%.3f)",
-                    last_planning_failure_.c_str(), active_path_min_clearance_m_);
-        navigation_.Cancel();
-        return false;
+      const auto verdict = dispatch_.Evaluate(
+          goal, {.entry = entry_drive,
+                 .returning = returning,
+                 .retreat = retreat_goal_,
+                 .pinch = pinch_plan},
+          latest_map_retry, probe, *this);
+      using navigation2d::exploration::DispatchVerdict;
+      if (verdict != DispatchVerdict::kAcceptPrepared) {
+        return verdict == DispatchVerdict::kAcceptedRetry;
       }
       // Do not classify a frontier from the controller's first sample. At a
       // continuous goal handoff the measured velocity still belongs to the
@@ -575,7 +531,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     return gap >= .50 && gap <= 1.40;
   }
 
-  bool PassableMouthGoal(const Goal& goal) const {
+  bool PassableMouthGoal(const Goal& goal) const override {
     if (!std::isfinite(goal.frontier_x) || !std::isfinite(goal.frontier_y))
       return false;
     if (!explorer_.IsCorridorMouth(goal.frontier_x, goal.frontier_y))
@@ -954,8 +910,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       return true;
     }
     BuildTour();
-    tour_.PrioritizeDistant(explorer_, *TourRobot(), *this);
-    if (tour_.goals().empty()) {
+    if (!tour_.PrioritizeDistant(explorer_, *TourRobot(), *this)) {
       RCLCPP_WARN(get_logger(), "Tip rescue found no distant mouth to retry");
       return false;
     }
@@ -2029,7 +1984,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     if (state.path_signature != 0) { last_path_signature_ = state.path_signature; }
   }
 
-  void NoteMappedObstacleReject(const Goal& goal) {
+  void NoteMappedObstacleReject(const Goal& goal) override {
     ++mapped_obstacle_rejects_;
     // Cool only the failed viewpoint briefly. Cooling the whole mouth/room
     // (1.8 m / 4000 cells) hid kitchen and bedroom frontiers while the robot

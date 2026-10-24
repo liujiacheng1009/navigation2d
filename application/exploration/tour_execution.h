@@ -17,7 +17,7 @@ class TourExecution {
                          TourConstraints&);
   void AfterWallTip(FrontierExplorer&, const ExplorationGoal&, std::optional<TourPose>,
                     TourConstraints&);
-  bool PrioritizeDistant(FrontierExplorer&, TourPose, TourConstraints&);
+  [[nodiscard]] bool PrioritizeDistant(FrontierExplorer&, TourPose, TourConstraints&);
   void SkipResolved(FrontierExplorer&);
   // Advance/Defer require a current task, just as a tracked handoff does.
   void Advance() { goals_.pop_front(); }
