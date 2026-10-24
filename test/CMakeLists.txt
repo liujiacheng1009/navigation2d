@@ -54,3 +54,5 @@ navigation2d_test(tour_execution_test navigation2d_exploration_application)
 navigation2d_test(entry_completion_test navigation2d_exploration_application)
 
 navigation2d_test(navigation_dispatch_test navigation2d_exploration_application)
+
+navigation2d_test(planning_evidence_budget_test navigation2d_values)

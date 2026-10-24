@@ -18,6 +18,9 @@ def reuse_baseline(bundle, output, expected):
     for key in ['baseline_ref', 'baseline_core', 'baseline_source', 'fixture_sha256']:
         if manifest.get(key) != expected[key]:
             raise ValueError('frozen baseline input differs: ' + key)
+    if manifest.get('execution_mode', 'captured-endpoints') != expected.get(
+            'execution_mode', 'captured-endpoints'):
+        raise ValueError('frozen baseline input differs: execution_mode')
     artifact = manifest['artifacts']['baseline']
     for name, key in [('baseline', 'binary'), ('baseline.cc', 'source')]:
         if digest(bundle / name) != artifact[key]:

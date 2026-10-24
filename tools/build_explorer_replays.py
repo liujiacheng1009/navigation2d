@@ -88,11 +88,15 @@ int main(int argc, char** argv) {
 def main():
     from replay_object_cache import compile_cached
     from replay_baseline_bundle import reuse_baseline
+    from replay_startup import without_endpoints
+    from replay_baseline_headers import prepare, snapshot, baseline_link
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build', type=Path, required=True, help='parent online_mapping build')
     parser.add_argument('--baseline-core', type=Path, required=True,
                         help='frozen libnavigation2d_core.a, not the candidate library')
+    parser.add_argument('--baseline-include-root', type=Path,
+                        help='complete frozen header tree for a fresh baseline build')
     parser.add_argument('--baseline-bundle', type=Path,
                         help='verified frozen baseline/manifest/source bundle; do not relink it')
     parser.add_argument('--baseline-source', type=Path,
@@ -100,6 +104,8 @@ def main():
     parser.add_argument('--baseline-ref', default='a947deba48765ee4dc57168ebcf1be5e2c49e205')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--no-object-cache', action='store_true')
+    parser.add_argument('--logic-only', action='store_true',
+                        help='omit unused ROS endpoints; separate logic-only measurement scope')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     build = args.build.resolve()
@@ -124,13 +130,19 @@ def main():
                 text=True, stderr=subprocess.PIPE)
         except subprocess.CalledProcessError:
             parser.error('baseline Git source unavailable; provide --baseline-source from its frozen tree')
+    headers = None if args.baseline_bundle else prepare(args.baseline_source, args.baseline_include_root)
     fixtures = {str(p.relative_to(root)): digest(p) for p in (root / 'test/replay').glob('*.h')}
     manifest = {'fixture_sha256': fixtures, 'builder_sha256': digest(Path(__file__)),
                 'cache_helper_sha256': digest(Path(__file__).with_name('replay_object_cache.py')),
                 'bundle_helper_sha256': digest(Path(__file__).with_name('replay_baseline_bundle.py')),
+                'execution_mode': 'logic-only' if args.logic_only else 'captured-endpoints',
+                'startup_helper_sha256': digest(Path(__file__).with_name('replay_startup.py')),
+                'header_helper_sha256': digest(Path(__file__).with_name('replay_baseline_headers.py')),
                 'baseline_ref': args.baseline_ref, 'baseline_core': digest(baseline_core),
                 'candidate_core': digest(current_core),
                 'baseline_source': hashlib.sha256(baseline.encode()).hexdigest(), 'artifacts': {}}
+    if headers:
+        manifest['baseline_headers'] = {'root': str(headers[0]), 'sha256': headers[1]}
     for label, source in [('baseline', baseline),
                           ('candidate', (root / 'ros/autonomous_explorer_node.cc').read_text())]:
         if label == 'baseline' and args.baseline_bundle:
@@ -139,8 +151,9 @@ def main():
             manifest['baseline_bundle'] = provenance
             continue
         cpp, obj, executable = [output / f'{label}{suffix}' for suffix in ['.cc', '.o', '']]
-        cpp.write_text(adapt(source, label))
-        compilation = compile_cached(link_template[0], flags, cpp, obj, args.no_object_cache)
+        cpp.write_text(adapt(without_endpoints(source) if args.logic_only else source, label))
+        selected_flags = ['-I' + str(headers[0]), *flags] if label == 'baseline' else flags
+        compilation = compile_cached(link_template[0], selected_flags, cpp, obj, args.no_object_cache)
         link = link_template.copy()
         link[link.index('-o') + 1] = str(executable)
         objects = [i for i, value in enumerate(link) if value.endswith('autonomous_explorer_node.cc.o')]
@@ -148,14 +161,14 @@ def main():
             raise ValueError('unexpected explorer target object list')
         link[objects[0]] = str(obj)
         if label == 'baseline':
-            for i, value in enumerate(link):
-                if value.endswith('libnavigation2d_core.a'):
-                    link[i] = str(baseline_core)
+            link = baseline_link(link, obj, baseline_core)
         subprocess.run(link, cwd=build, check=True)
         manifest['artifacts'][label] = {'source': digest(cpp), 'binary': digest(executable),
                                         'compilation': compilation}
     if fixtures != {str(p.relative_to(root)): digest(p) for p in (root / 'test/replay').glob('*.h')}:
         raise RuntimeError('fixture changed while compiling; discard and rebuild both replays')
+    if headers and snapshot(headers[0]) != headers[1]:
+        raise RuntimeError('frozen baseline headers changed while compiling')
     (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
 
 

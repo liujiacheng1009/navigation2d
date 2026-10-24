@@ -37,6 +37,8 @@ class FrozenBaseline(unittest.TestCase):
                 changed = dict(expected, **{key: 'different'})
                 with self.assertRaisesRegex(ValueError, key):
                     module.reuse_baseline(bundle, output, changed)
+            with self.assertRaisesRegex(ValueError, 'execution_mode'):
+                module.reuse_baseline(bundle, output, dict(expected, execution_mode='logic-only'))
             for name in ['baseline', 'baseline.cc']:
                 original = (bundle / name).read_bytes()
                 (bundle / name).write_text('corrupted')

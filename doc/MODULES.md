@@ -91,3 +91,7 @@ navigation2d_geometry 边界，尚未把所有概念层拆成独立 target。
 - `application/exploration/entry_completion`：统一入口确认和房间收尾的顺序，显式区分探测前、爬行、行驶中、近目标及成功/选择入口；保留 12/14 秒冷却的前后顺序，不把过门口计为区域完成。`entry_actions` 是入口能力与通知协议，不保留服务或共享可写状态。
 
 - `application/exploration/dispatch_policy` / `navigation_dispatch`：拥有候选路线的实时占用/净空验收与有界重试顺序；显式区分接受当前准备、接受递归重试与拒绝。适配器负责记录诊断并取消准备、维护冷却签名和提交目标，失败候选不能提前提交任务状态。
+
+- `application/exploration/planning_evidence_budget`：唯一拥有起点/已行轨迹重放意图及米制预算；地图分辨率和轨迹样本不足时保留请求，只在准备证据时消费一次。取消重放意图保留尚未消费的预算，保持原恢复语义。
+
+- `ros/exploration/explorer_parameters`：启动时收集 ROS 参数、环境约束及结果路径，按显式算法注册表验证三种用途的选择；节点持有 const 配置，不再交错声明参数和任务操作。保留原参数/环境解析顺序与默认值，读取不构造算法实例。

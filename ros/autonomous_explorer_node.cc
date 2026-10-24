@@ -2,8 +2,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
-#include <filesystem>
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -22,6 +21,7 @@
 #include "navigation2d/application/exploration/debug_overlay.h"
 #include "navigation2d/ros/exploration/debug_paths.h"
 #include "navigation2d/ros/exploration/pose_feedback.h"
+#include "navigation2d/ros/exploration/explorer_parameters.h"
 #include "navigation2d/ros/exploration/map_observation.h"
 #include "navigation2d/ros/exploration/artifact_writer.h"
 #include "navigation2d/ros/exploration/planning_map_adapter.h"
@@ -42,6 +42,7 @@
 #include "navigation2d/application/exploration/navigation_telemetry.h"
 #include "navigation2d/application/exploration/route_validator.h"
 #include "navigation2d/application/exploration/planning_snapshot.h"
+#include "navigation2d/application/exploration/planning_evidence_budget.h"
 #include "navigation2d/application/algorithm_registry.h"
 #include "navigation2d/application/exploration/navigation_profile.h"
 #include "navigation2d/exploration/frontier_explorer.h"
@@ -64,30 +65,7 @@ double NormalizeAngle(double value) {
   return std::atan2(std::sin(value), std::cos(value));
 }
 
-double RequiredPositiveEnvironment(const char* name, double fallback) {
-  const char* value = std::getenv(name);
-  if (value == nullptr || *value == '\0') return fallback;
-  const double parsed = std::stod(value);
-  if (!std::isfinite(parsed) || parsed <= 0.)
-    throw std::runtime_error(std::string(name) + " must be positive");
-  return parsed;
-}
-
 using Goal = navigation2d::ExplorationGoal;
-
-navigation2d::FrontierExplorerConfig ExplorerConfig(rclcpp::Node& node) {
-  navigation2d::FrontierExplorerConfig config;
-  // Maze doorways often produce short but useful frontier components.  A
-  // larger threshold silently drops those branches before they reach the
-  // planner; noise is handled by the stability observer below.
-  config.minimum_frontier_cells = 6;
-  // Metre distances and the chassis outline come from config/navigation2d.yaml.
-  const std::string vehicle_config = node.declare_parameter<std::string>(
-      "vehicle_config", "/opt/sweepnav/navigation2d/config/navigation2d.yaml");
-  navigation2d::ApplyVehicleConfig(vehicle_config, config);
-  config.cover_residuals = true;
-  return config;
-}
 
 class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::ReturnActions,
@@ -96,35 +74,11 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::DispatchActions,
                                  private navigation2d::exploration_ros::EntryStatusSink {
  public:
-  AutonomousExplorer() : Node("sweepnav_autonomous_explorer"), explorer_(ExplorerConfig(*this)) {
-    pose_source_ = declare_parameter<std::string>("pose_source", "localization2d");
-    if (pose_source_ != "ground_truth" && pose_source_ != "localization2d") {
-      throw std::runtime_error(
-          "pose_source must be 'ground_truth' or 'localization2d'");
-    }
-    result_path_ = std::getenv("SWEEPNAV_EXPLORATION_RESULT") != nullptr
-        ? std::getenv("SWEEPNAV_EXPLORATION_RESULT") : "/tmp/exploration-result.json";
-    snapshot_path_ = (std::filesystem::path(result_path_).parent_path() /
-                      "exploration_snapshot.json").string();
-    max_duration_s_ = RequiredPositiveEnvironment("SWEEPNAV_EXPLORATION_TIMEOUT", 600.);
-    simulation_speed_ = RequiredPositiveEnvironment("SWEEPNAV_SIMULATION_SPEED", 1.);
-    // Resolve profiles once at startup. Invalid names fail before any motion.
-    for (auto purpose : {navigation2d::exploration::NavigationPurpose::kExplore,
-                         navigation2d::exploration::NavigationPurpose::kEntry,
-                         navigation2d::exploration::NavigationPurpose::kReturn}) {
-      const std::string prefix = purpose == navigation2d::exploration::NavigationPurpose::kEntry
-          ? "entry" : (purpose == navigation2d::exploration::NavigationPurpose::kReturn
-                          ? "return" : "explore");
-      auto& selection = purpose == navigation2d::exploration::NavigationPurpose::kEntry
-          ? navigation_profiles_.entry : (purpose == navigation2d::exploration::NavigationPurpose::kReturn
-                                             ? navigation_profiles_.returning : navigation_profiles_.explore);
-      selection.global = declare_parameter<std::string>(prefix + ".global_planner", selection.global);
-      selection.local = declare_parameter<std::string>(prefix + ".local_controller", selection.local);
-      navigation2d::NavigationConfig validation;
-      validation.planner = selection.global;
-      validation.controller = selection.local;
-      navigation2d::AlgorithmRegistry::Builtins()->Validate(validation);
-    }
+  AutonomousExplorer()
+      : Node("sweepnav_autonomous_explorer"),
+        explorer_(navigation2d::exploration_ros::ReadExplorerConfig(*this)),
+        parameters_(navigation2d::exploration_ros::ReadExplorerParameters(
+            *this, *navigation2d::AlgorithmRegistry::Builtins())) {
     command_publisher_ = create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
     status_publisher_ = create_publisher<std_msgs::msg::String>(
         "/exploration/status", rclcpp::QoS(1).transient_local().reliable());
@@ -158,7 +112,7 @@ class AutonomousExplorer final : public rclcpp::Node,
           explorer_.UpdateMap(std::move(grid));
           ++map_revision_;
         });
-    if (pose_source_ == "ground_truth") {
+    if (parameters_.pose_source == "ground_truth") {
       // Planning-only evaluation deliberately bypasses Localization2D's pose.
       // The online mapper still supplies its live occupancy grid, while the
       // controller and explorer receive the simulator's exact pose expressed in
@@ -192,8 +146,8 @@ class AutonomousExplorer final : public rclcpp::Node,
           if (navigation_.has_session() && Pose()) FeedScan();
         });
     timer_ = create_wall_timer(
-        std::chrono::duration<double>(.06 / simulation_speed_), [this]() { Tick(); });
-    PublishStatus("WAITING", "waiting for " + pose_source_ + " pose and online map");
+        std::chrono::duration<double>(.06 / parameters_.simulation_speed), [this]() { Tick(); });
+    PublishStatus("WAITING", "waiting for " + parameters_.pose_source + " pose and online map");
   }
 
  private:
@@ -308,16 +262,8 @@ class AutonomousExplorer final : public rclcpp::Node,
         goal = *settled;
       }
     }
-    if (clear_start_pinch_) {
-      paint_driven_corridor_ = true;
-      clear_start_pinch_ = false;
-    }
-    double trail_budget = 0.;
-    if (paint_driven_corridor_ && map_->info.resolution > 0. && pose_feedback_.trail().size() >= 2) {
-      paint_driven_corridor_ = false;
-      trail_budget = paint_trail_budget_m_ > 0. ? paint_trail_budget_m_ : 2.0;
-      paint_trail_budget_m_ = 0.;
-    }
+    const double trail_budget = evidence_budget_.Consume(
+        map_->info.resolution, pose_feedback_.trail().size());
     const auto entry = entry_.pending() ? entry_.pending() : entry_.locked();
     // Preserve the loader's existing diagnosis for stream failures.
     static_cast<void>(planning_map_.Prepare(
@@ -351,7 +297,7 @@ class AutonomousExplorer final : public rclcpp::Node,
          .pinch_retry = pinch_retry,
          .returning = returning,
          .home_goal = home_goal},
-        navigation_profiles_.For(purpose));
+        parameters_.navigation_profiles.For(purpose));
     try {
       navigation_.Begin(config, planning_map_.path(), navigation2d::MakePose2d(
           goal.x - planning_map_.origin_x(), goal.y - planning_map_.origin_y(), goal.yaw),
@@ -387,7 +333,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       goal_timeout_s_ = DispatchPolicy::GoalTimeout(returning, initial_state.global_path_length_m);
       navigation_.Accept();
       active_goal_ = goal;
-      selected_algorithms_ = navigation_profiles_.For(purpose);
+      selected_algorithms_ = parameters_.navigation_profiles.For(purpose);
       returning_ = returning;
       // Resume / latest-map replan of the same viewpoint must keep peel and
       // open-replan counters; only a materially new goal opens a session.
@@ -559,8 +505,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                 explorer_.MouthGapWidth(active_goal_.frontier_x,
                                         active_goal_.frontier_y));
     LockEntryMouth(active_goal_);
-    paint_driven_corridor_ = true;
-    paint_trail_budget_m_ = 8.0;
+    evidence_budget_.RequestTrailReplay(8.0);
     cooled_signatures_.clear();
     if (StartEntryProbe()) {
       PublishStatus("COMPLETING", reason);
@@ -576,8 +521,7 @@ class AutonomousExplorer final : public rclcpp::Node,
 
   bool EntryMouthCooling(const Goal& mouth) override { return RecentlyDemoted(mouth); }
   void PrepareEntryPlan(double trail_budget_m) override {
-    paint_driven_corridor_ = true;
-    paint_trail_budget_m_ = trail_budget_m;
+    evidence_budget_.RequestTrailReplay(trail_budget_m);
     cooled_signatures_.clear();
   }
   bool NavigateEntry(const Goal& goal) override { return StartNavigation(goal, false); }
@@ -1149,13 +1093,12 @@ class AutonomousExplorer final : public rclcpp::Node,
     retreat_attempted_ = true;
     retreat_cell_x_ = cell.first;
     retreat_cell_y_ = cell.second;
-    paint_driven_corridor_ = true;
-    paint_trail_budget_m_ = pinched ? 12.0 : 4.0;
-    clear_start_pinch_ = true;
+    evidence_budget_.RequestTrailReplay(pinched ? 12.0 : 4.0);
+    evidence_budget_.RequestStartReplay();
     retreat_goal_ = true;
     if (StartNavigation(retreat, false)) return true;
     retreat_goal_ = false;
-    paint_driven_corridor_ = false;
+    evidence_budget_.CancelTrailReplay();
     return false;
   }
 
@@ -1258,8 +1201,8 @@ class AutonomousExplorer final : public rclcpp::Node,
       const bool start_pinched = start_occupied_;
       if (start_pinched) {
         ++reject_streak_;
-        clear_start_pinch_ = true;
-        paint_driven_corridor_ = true;
+        evidence_budget_.RequestStartReplay();
+        evidence_budget_.ResumeTrailReplay();
         RCLCPP_WARN(get_logger(),
                     "Start pinched (%s); peel/short-retreat instead of reject-looping frontiers",
                     last_planning_failure_.c_str());
@@ -1529,9 +1472,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     if (next.kind == ReturnStepKind::kRepeated) { return false; }
     if (next.kind == ReturnStepKind::kDirect) {
       return_.UseBreadcrumbs(false);
-      paint_driven_corridor_ = true;
-      paint_trail_budget_m_ = 80.0;
-      clear_start_pinch_ = true;
+      evidence_budget_.RequestTrailReplay(80.0);
+      evidence_budget_.RequestStartReplay();
       return StartNavigation(home, true);
     }
     const Goal& step = next.goal;
@@ -1539,9 +1481,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     returning_ = true;
     return_.UseBreadcrumbs(true);
     cooled_signatures_.clear();
-    paint_driven_corridor_ = true;
-    paint_trail_budget_m_ = 80.0;
-    clear_start_pinch_ = true;
+    evidence_budget_.RequestTrailReplay(80.0);
+    evidence_budget_.RequestStartReplay();
     if (!StartNavigation(step, true)) return false;
     RCLCPP_INFO(get_logger(),
                 "Breadcrumb return hop: pose=(%.2f,%.2f) step=(%.2f,%.2f) home_dist=%.2f",
@@ -1625,10 +1566,9 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   bool PlanHome(navigation2d::exploration::ReturnPlanStage stage) override {
-    paint_driven_corridor_ = true;
-    paint_trail_budget_m_ = 80.0;
+    evidence_budget_.RequestTrailReplay(80.0);
     if (stage == navigation2d::exploration::ReturnPlanStage::kIdleFinal) {
-      clear_start_pinch_ = true;
+      evidence_budget_.RequestStartReplay();
     }
     return StartNavigation(MakeHomeGoal(), true);
   }
@@ -1668,7 +1608,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     ++cut_replans_;
     navigation_.Cancel();
     if (planning_map_.snapshot().trail_budget_m > 0.) {
-      paint_driven_corridor_ = true;
+      evidence_budget_.ResumeTrailReplay();
     }
     RCLCPP_WARN(get_logger(),
                 "Route cut by newly mapped obstacle; replanning same %s goal on latest map (%d/%d)",
@@ -1834,7 +1774,7 @@ class AutonomousExplorer final : public rclcpp::Node,
           Pose()->pose.position.x - entry_.pending()->frontier_x,
           Pose()->pose.position.y - entry_.pending()->frontier_y);
       if (state.path_progress_m < .08 && mouth_range > 1.5) {
-        clear_start_pinch_ = true;
+        evidence_budget_.RequestStartReplay();
         retreat_attempted_ = false;
         if (EscapeOrShortRetreat(
                 "immobility far from locked mouth; peel then retry",
@@ -1881,7 +1821,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                          1800u);
     ClearEntryMouthLock();
     retreat_attempted_ = false;
-    clear_start_pinch_ = true;
+    evidence_budget_.RequestStartReplay();
     next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
     if (EscapeOrShortRetreat(
             "immobility at wall tip; peel out of inflation",
@@ -1927,10 +1867,10 @@ class AutonomousExplorer final : public rclcpp::Node,
     const double return_error =
         completion.home_error_m.value_or(std::numeric_limits<double>::infinity());
     navigation2d::exploration_io::WriteArtifacts(
-        {result_path_, snapshot_path_},
+        {parameters_.result_path, parameters_.snapshot_path},
         {.status = !success ? "FAILED" : (return_.partial() ? "PARTIAL" : "COMPLETE"),
          .message = final_message,
-         .pose_source = pose_source_,
+         .pose_source = parameters_.pose_source,
          .backend = telemetry_.state().backend,
          .global_planner = selected_algorithms_.global,
          .local_controller = selected_algorithms_.local,
@@ -1972,7 +1912,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         .carrot_y = debug_paths_.y(),
         .carrot_yaw = debug_paths_.yaw(),
         .carrot_valid = debug_paths_.valid(),
-        .pose_source = pose_source_});
+        .pose_source = parameters_.pose_source});
     status_publisher_->publish(status);
   }
 
@@ -2009,8 +1949,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                   "trying entry before retreat",
                   local_unknown);
       LockEntryMouth(active_goal_);
-      paint_driven_corridor_ = true;
-      paint_trail_budget_m_ = 8.0;
+      evidence_budget_.RequestTrailReplay(8.0);
       if (StartEntryProbe()) return true;
       explorer_.RecordAttempt(active_goal_, false);
       ClearEntryMouthLock();
@@ -2141,9 +2080,9 @@ class AutonomousExplorer final : public rclcpp::Node,
       const auto bootstrap_deadline = now() + rclcpp::Duration::from_seconds(8.0);
       mission_.Start(home, initial_known, started.nanoseconds(), bootstrap_deadline.nanoseconds());
       next_selection_ = bootstrap_deadline;
-      PublishStatus("WAITING", pose_source_ + " pose ready; waiting for a stable online map");
+      PublishStatus("WAITING", parameters_.pose_source + " pose ready; waiting for a stable online map");
     }
-    if (mission_.TimedOut(now().nanoseconds(), max_duration_s_)) {
+    if (mission_.TimedOut(now().nanoseconds(), parameters_.max_duration_s)) {
       Finish(false, "exploration timed out");
       return;
     }
@@ -2161,7 +2100,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         const auto result = return_.ContinueIdle(escape_.scheduled() || escape_.resume_return(), *this);
         if (result == ReturnIdleResult::kEscaping) {
           escape_.ResumeReturn();
-          clear_start_pinch_ = true;
+          evidence_budget_.RequestStartReplay();
         } else if (result == ReturnIdleResult::kUnavailable) {
           Finish(true, "return path unavailable; stopping to protect localization");
         } else if (result == ReturnIdleResult::kRestart) {
@@ -2296,7 +2235,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       if (mission_.phase() == MissionPhase::kReturning || returning_) {
         navigation_.Cancel();
         cooled_signatures_.clear();
-        clear_start_pinch_ = true;
+        evidence_budget_.RequestStartReplay();
         HandleReturnRecovery(navigation2d::exploration::ReturnRecoveryMode::kPathFailure,
                              "return path intersected mapped obstacles");
         return;
@@ -2463,8 +2402,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         cooled_signatures_.clear();
         if (local_frontier_open && PassableMouthGoal(active_goal_)) {
           LockEntryMouth(active_goal_);
-          paint_driven_corridor_ = true;
-          paint_trail_budget_m_ = 8.0;
+          evidence_budget_.RequestTrailReplay(8.0);
           if (StartEntryProbe()) return;
         }
         // Drop only this viewpoint; keep the pocket nominatable.
@@ -2511,8 +2449,7 @@ class AutonomousExplorer final : public rclcpp::Node,
           // A hop moved the robot past whatever blocked the direct route;
           // go straight home from here when the map allows, and only keep
           // retracing the trail when it still does not.
-          paint_driven_corridor_ = true;
-          paint_trail_budget_m_ = 80.0;
+          evidence_budget_.RequestTrailReplay(80.0);
           if (StartNavigation(home, true)) {
             return_.UseBreadcrumbs(false);
             PublishStatus("RETURNING", "direct route home available after breadcrumb hop");
@@ -2688,8 +2625,7 @@ class AutonomousExplorer final : public rclcpp::Node,
             navigation_.Cancel();
             // Keep cooled_signatures_: clearing re-enabled the banned chord
             // and restarted the probe↔retreat shuttle.
-            paint_driven_corridor_ = true;
-            paint_trail_budget_m_ = 8.0;
+            evidence_budget_.RequestTrailReplay(8.0);
             if (entry_.attempts() < EntryAttemptBudget() && StartEntryProbe()) {
               PublishStatus("COMPLETING",
                             "doorjamb STOP; retrying locked mouth entry");
@@ -2902,11 +2838,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     }
   }
 
-  std::string result_path_;
-  std::string snapshot_path_;
-  double max_duration_s_ = 600.;
   double goal_timeout_s_ = 55.;
-  double simulation_speed_ = 1.;
   std::uint64_t map_revision_ = 0;
   int empty_frontier_cycles_ = 0;
   int no_executable_frontier_cycles_ = 0;
@@ -2936,12 +2868,10 @@ class AutonomousExplorer final : public rclcpp::Node,
   bool retreat_attempted_ = false;
   int retreat_cell_x_ = 0;
   int retreat_cell_y_ = 0;
-  bool paint_driven_corridor_ = false;
-  double paint_trail_budget_m_ = 0.;
+  navigation2d::exploration::PlanningEvidenceBudget evidence_budget_;
   // Trail budget the active plan was painted with (0 = not painted).
   // Per cell of the active plan's snapshot: 1 where the planner was told free.
   navigation2d::exploration_io::PlanningMapAdapter planning_map_{"/tmp/sweepnav-navigation-map-"};
-  bool clear_start_pinch_ = false;
   navigation2d::exploration::PoseMotionWatch pose_motion_;
   int immobility_recoveries_ = 0;
   int immobility_open_replans_ = 0;
@@ -2964,7 +2894,6 @@ class AutonomousExplorer final : public rclcpp::Node,
   double active_path_min_clearance_m_ = 0.;
   navigation2d::exploration_ros::DebugPaths debug_paths_;
   bool returning_ = false;
-  std::string pose_source_;
   Goal active_goal_;
   navigation2d::exploration::ReturnCoordinator return_;
   navigation2d::exploration::EntryCoordinator entry_;
@@ -2984,10 +2913,10 @@ class AutonomousExplorer final : public rclcpp::Node,
   std::optional<sensor_msgs::msg::LaserScan> scan_;
   navigation2d::exploration_ros::PoseFeedback pose_feedback_;
   navigation2d::Twist2d velocity_;
-  navigation2d::exploration::NavigationProfiles navigation_profiles_;
   navigation2d::exploration::AlgorithmSelection selected_algorithms_;
   navigation2d::FrontierExplorer explorer_;
   navigation2d::exploration::NavigationSession navigation_;
+  const navigation2d::exploration_ros::ExplorerParameters parameters_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr command_publisher_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_publisher_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;
