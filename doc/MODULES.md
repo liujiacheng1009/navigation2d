@@ -388,3 +388,17 @@ extra typesupport dependency and caused a measured RSS regression. Captured
 startup retains the object. Generation rejects a surviving factory call before
 pruning, and records/hashes all explicit objects, archives and DSOs before and
 after linking to detect concurrent changes. Frozen baseline bundles stay intact.
+
+### Entry recovery and route-failure state
+
+Entry recovery continuations distinguish peel, doorjamb STOP, retreat success
+and entry stall. They borrow EntryCoordinator and retain each source's probe,
+crawl, abandonment and selection order. Open-forward STOP restores a pending
+mouth before its lazy clock test, excludes open-space geometry for locked
+entries, and permits only one accepted open-space replan before selection.
+
+`RouteFailureHistory` owns route cooling, the current pose-cell failure count
+and map-growth anchor. Cell changes reset failures and cooling; map growth or
+explicit cooling clears preserve the failure budget. Navigation gets an owned
+signature snapshot, without sharing a mutable container. The legacy write-only
+execution-stall total is removed; exported counters/messages remain unchanged.
