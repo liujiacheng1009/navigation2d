@@ -8,6 +8,8 @@ namespace navigation2d {
 
 class Grid2d {
  public:
+  // File compatibility API; link navigation2d_configuration (or the core target).
+  // Pure occupancy/geometry queries are implemented by navigation2d_costmap.
   static Grid2d Load(const std::string& path);
   int width() const { return width_; }
   int height() const { return height_; }

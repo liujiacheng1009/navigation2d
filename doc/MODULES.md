@@ -204,6 +204,7 @@ flowchart TD
   Core --> Builtins[builtin algorithm assembly]
   Core --> Explore[exploration]
   Config --> Registry[generic registry]
+  Config --> Map
   Builtins --> Registry
   Builtins --> Control[control]
   Control --> Plan[planning]
@@ -222,3 +223,18 @@ baseline (or its verified executable bundle); do not replace that baseline with
 one archive from the new split. Contract manifests capture all candidate archive
 digests and link order, rather than treating the facade archive as the whole
 implementation.
+
+
+The legacy `Grid2d::Load` definition belongs to configuration, while grid
+occupancy and geometry queries stay in costmap. Standalone file consumers link
+`navigation2d_configuration`; the compatibility core continues to provide it.
+The loader preserves cells/rectangle parsing, override order and failures.
+YAML-consuming tests declare their direct YAML dependency explicitly.
+
+Larger `PlanningGridView` cell queries are implemented once in the exploration
+library. This keeps the query code independent of mask-loop inlining after
+reachability extraction. Query formulae, scan order and numerical comparisons
+are unchanged. A controlled Tick regression was localized to mask generation;
+its failed samples and discarded lifetime experiment remain available. The
+isolated query implementation is validated before the original performance
+gate is repeated; diagnostic averages alone do not close performance acceptance.

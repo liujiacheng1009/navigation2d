@@ -1,41 +1,13 @@
 #pragma once
-#include <unistd.h>
 #include <yaml-cpp/yaml.h>
 
-#include <cstdlib>
-#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <stdexcept>
 #include <string>
-namespace navigation2d::test {
-class ConfigurationDirectory {
- public:
-  ConfigurationDirectory() {
-    char pattern[] = "/tmp/navigation-config-XXXXXX";
-    const auto* created = mkdtemp(pattern);
-    if (!created) {
-      throw std::runtime_error("cannot create configuration fixture");
-    }
-    try {
-      path_ = created;
-    } catch (...) {
-      rmdir(created);
-      throw;
-    }
-  }
-  ConfigurationDirectory(const ConfigurationDirectory&) = delete;
-  ConfigurationDirectory& operator=(const ConfigurationDirectory&) = delete;
-  ~ConfigurationDirectory() {
-    std::error_code ignored;
-    std::filesystem::remove_all(path_, ignored);
-  }
-  const std::filesystem::path& path() const& { return path_; }
-  const std::filesystem::path& path() const&& = delete;
 
- private:
-  std::filesystem::path path_;
-};
+#include "navigation2d/test/temporary_directory.h"
+namespace navigation2d::test {
 class NavigationConfigurationFixture {
  public:
   NavigationConfigurationFixture()
@@ -67,7 +39,7 @@ class NavigationConfigurationFixture {
   std::string map() const { return (directory_.path() / "map.json").string(); }
 
  private:
-  ConfigurationDirectory directory_;
+  TemporaryDirectory directory_;
   YAML::Node original_;
 };
 }  // namespace navigation2d::test
