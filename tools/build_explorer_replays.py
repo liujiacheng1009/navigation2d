@@ -45,8 +45,12 @@ def adapt(source, label):
       trajectory_.emplace_back(x, y);
     }
 """
+    phase = 'mission_.phase()' if 'mission_.phase()' in source else 'phase_'
+    finished = 'mission_.finished()' if 'mission_.finished()' in source else 'finished_'
     capture = f'''
   void ReplayObservePose(const geometry_msgs::msg::PoseStamped& pose) {{ {observe_pose} }}
+  int ReplayPhase() const {{ return static_cast<int>({phase}); }}
+  bool ReplayFinished() const {{ return {finished}; }}
   navigation2d::test::ReplayOutputs replay_;
   rclcpp::Time now() const {{ return replay_.probe_time_; }}
   int ReplayEntryAttempts() const {{ return {entry}; }}

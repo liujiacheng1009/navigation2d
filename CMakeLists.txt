@@ -77,39 +77,6 @@ target_link_libraries(navigation2d_simulation PUBLIC navigation2d_core)
 add_executable(navigation2d_benchmark application/benchmark_runner.cc)
 target_link_libraries(navigation2d_benchmark PRIVATE navigation2d_simulation)
 enable_testing()
-add_executable(layered_costmap_test test/layered_costmap_test.cc)
-target_link_libraries(layered_costmap_test PRIVATE navigation2d_core)
-add_test(NAME layered_costmap_test COMMAND layered_costmap_test)
-add_executable(mppi_controller_test test/mppi_controller_test.cc)
-target_link_libraries(mppi_controller_test PRIVATE navigation2d_core)
-add_test(NAME mppi_controller_test COMMAND mppi_controller_test)
-add_executable(mpc_controller_test test/mpc_controller_test.cc)
-target_link_libraries(mpc_controller_test PRIVATE navigation2d_core)
-if(NAVIGATION2D_ACADOS_GENERATED_DIR)
-  target_compile_definitions(mpc_controller_test PRIVATE NAVIGATION2D_TEST_ACADOS=1)
-endif()
-add_test(NAME mpc_controller_test COMMAND mpc_controller_test)
-add_executable(dynamic_safety_test test/dynamic_safety_test.cc)
-target_link_libraries(dynamic_safety_test PRIVATE navigation2d_core)
-add_test(NAME dynamic_safety_test COMMAND dynamic_safety_test)
-add_executable(control_safety_test test/control_safety_test.cc)
-target_link_libraries(control_safety_test PRIVATE navigation2d_core)
-add_test(NAME control_safety_test COMMAND control_safety_test)
-add_executable(global_planner_test test/global_planner_test.cc)
-target_link_libraries(global_planner_test PRIVATE navigation2d_core)
-add_test(NAME global_planner_test COMMAND global_planner_test)
-add_executable(frontier_explorer_test test/frontier_explorer_test.cc)
-target_link_libraries(frontier_explorer_test PRIVATE navigation2d_core)
-add_test(NAME frontier_explorer_test COMMAND frontier_explorer_test)
-add_executable(exploration_policy_test test/exploration_policy_test.cc)
-target_link_libraries(exploration_policy_test PRIVATE navigation2d_core)
-add_test(NAME exploration_policy_test COMMAND exploration_policy_test)
-add_executable(region_scheduler_test test/region_scheduler_test.cc)
-target_link_libraries(region_scheduler_test PRIVATE navigation2d_core)
-add_test(NAME region_scheduler_test COMMAND region_scheduler_test)
-add_executable(navigation_recovery_test test/navigation_recovery_test.cc)
-target_link_libraries(navigation_recovery_test PRIVATE navigation2d_core)
-add_test(NAME navigation_recovery_test COMMAND navigation_recovery_test)
 
 add_library(navigation2d_exploration_application STATIC
   application/exploration/debug_overlay.cc
@@ -120,81 +87,21 @@ add_library(navigation2d_exploration_application STATIC
   application/exploration/navigation_telemetry.cc
   application/exploration/room_visit_ledger.cc
   application/exploration/status_serializer.cc
+  application/exploration/mission_lifecycle.cc
   application/exploration/dispatch_policy.cc
   application/exploration/pose_motion_watch.cc
   application/exploration/entry_target.cc
   application/exploration/entry_coordinator.cc
   application/exploration/recovery_policy.cc
+  application/exploration/return_geometry.cc
   application/exploration/return_coordinator.cc)
 target_compile_features(navigation2d_exploration_application PUBLIC cxx_std_20)
 target_link_libraries(navigation2d_exploration_application PUBLIC navigation2d_core)
 target_compile_options(navigation2d_exploration_application PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
-add_executable(algorithm_registry_test test/algorithm_registry_test.cc)
-target_link_libraries(algorithm_registry_test PRIVATE navigation2d_core)
-add_test(NAME algorithm_registry_test COMMAND algorithm_registry_test)
-add_executable(exploration_application_test test/exploration_application_test.cc)
-target_link_libraries(exploration_application_test PRIVATE navigation2d_exploration_application)
-add_test(NAME exploration_application_test COMMAND exploration_application_test)
-
-# These executables use assert for behavioral contracts. Release must not
-# compile their checks away while performance targets keep normal NDEBUG.
-get_property(navigation2d_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
-foreach(target IN LISTS navigation2d_targets)
-  if(target MATCHES "_test$")
-    target_compile_options(${target} PRIVATE -UNDEBUG)
-  endif()
-endforeach()
-
-add_executable(exploration_snapshot_replay_test test/exploration_snapshot_replay_test.cc)
-target_link_libraries(exploration_snapshot_replay_test PRIVATE navigation2d_exploration_application)
-target_compile_definitions(exploration_snapshot_replay_test PRIVATE NAVIGATION2D_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
-add_test(NAME exploration_snapshot_replay_test COMMAND exploration_snapshot_replay_test)
-
 add_library(navigation2d_exploration_io STATIC ros/exploration/artifact_writer.cc)
 target_compile_features(navigation2d_exploration_io PUBLIC cxx_std_20)
 target_link_libraries(navigation2d_exploration_io PUBLIC navigation2d_core)
 target_compile_options(navigation2d_exploration_io PRIVATE -Wall -Wextra -Wpedantic -Werror)
-add_executable(exploration_artifacts_test test/exploration_artifacts_test.cc)
-target_link_libraries(exploration_artifacts_test PRIVATE navigation2d_exploration_io)
-add_test(NAME exploration_artifacts_test COMMAND exploration_artifacts_test)
 
-add_executable(exploration_navigation_session_test test/exploration_navigation_session_test.cc)
-target_link_libraries(exploration_navigation_session_test PRIVATE navigation2d_exploration_application)
-add_test(NAME exploration_navigation_session_test COMMAND exploration_navigation_session_test)
-
-add_executable(exploration_debug_overlay_test test/exploration_debug_overlay_test.cc)
-target_link_libraries(exploration_debug_overlay_test PRIVATE navigation2d_exploration_application)
-add_test(NAME exploration_debug_overlay_test COMMAND exploration_debug_overlay_test)
-
-add_executable(route_preparation_test test/route_preparation_test.cc)
-target_link_libraries(route_preparation_test PRIVATE navigation2d_core)
-add_test(NAME route_preparation_test COMMAND route_preparation_test)
-
-add_executable(command_stall_watch_test test/command_stall_watch_test.cc)
-target_link_libraries(command_stall_watch_test PRIVATE navigation2d_core)
-add_test(NAME command_stall_watch_test COMMAND command_stall_watch_test)
-
-
-add_executable(exploration_escape_execution_test test/exploration_escape_execution_test.cc)
-target_link_libraries(exploration_escape_execution_test PRIVATE navigation2d_exploration_application)
-add_test(NAME exploration_escape_execution_test COMMAND exploration_escape_execution_test)
-
-add_executable(exploration_entry_target_test test/exploration_entry_target_test.cc)
-target_link_libraries(exploration_entry_target_test PRIVATE navigation2d_exploration_application)
-add_test(NAME exploration_entry_target_test COMMAND exploration_entry_target_test)
-
-add_executable(exploration_entry_crawl_test test/exploration_entry_crawl_test.cc)
-target_link_libraries(exploration_entry_crawl_test PRIVATE navigation2d_exploration_application)
-add_test(NAME exploration_entry_crawl_test COMMAND exploration_entry_crawl_test)
-
-add_executable(exploration_pose_motion_test test/exploration_pose_motion_test.cc)
-target_link_libraries(exploration_pose_motion_test PRIVATE navigation2d_exploration_application)
-add_test(NAME exploration_pose_motion_test COMMAND exploration_pose_motion_test)
-
-add_executable(exploration_dispatch_policy_test test/exploration_dispatch_policy_test.cc)
-target_link_libraries(exploration_dispatch_policy_test PRIVATE navigation2d_exploration_application)
-add_test(NAME exploration_dispatch_policy_test COMMAND exploration_dispatch_policy_test)
-add_executable(exploration_return_execution_test test/exploration_return_execution_test.cc)
-target_link_libraries(exploration_return_execution_test PRIVATE navigation2d_exploration_application)
-add_test(NAME exploration_return_execution_test COMMAND exploration_return_execution_test)
+add_subdirectory(test)

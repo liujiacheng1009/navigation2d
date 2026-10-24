@@ -19,7 +19,9 @@ class Actions : public navigation2d::exploration::ReturnActions {
   Actions(navigation2d::exploration::ReturnCoordinator& owner, std::vector<bool> accepted)
       : coordinator(owner), results(std::move(accepted)) {}
   bool PlanHome(Stage stage) override {
-    calls.push_back(stage == Stage::kInitial ? "home" : "final_home");
+    calls.push_back(stage == Stage::kInitial
+                        ? "home"
+                        : (stage == Stage::kIdleFinal ? "idle_home" : "final_home"));
     return results.at(next++);
   }
   void HomeAccepted(Stage stage) override {
@@ -64,4 +66,55 @@ int main() {
   Require(coordinator.escapes() == 2);
   Actions unavailable(coordinator, {false, false, false, false, false});
   Require(coordinator.Execute(unavailable) == ReturnExecutionResult::kUnavailable);
+
+  ReturnCoordinator idle;
+  Actions waiting(idle, {});
+  Require(idle.ContinueIdle(true, waiting) == ReturnIdleResult::kWaiting);
+  Require(waiting.calls.empty());
+  idle.UseBreadcrumbs(true);
+  Actions following(idle, {true});
+  Require(idle.ContinueIdle(false, following) == ReturnIdleResult::kTracking);
+  Require(following.calls == std::vector<std::string>{"trail"});
+  idle.UseBreadcrumbs(false);
+  Actions idle_escape(idle, {true});
+  Require(idle.ContinueIdle(false, idle_escape) == ReturnIdleResult::kEscaping);
+  Require(idle_escape.calls == std::vector<std::string>{"escape"});
+  Require(idle.escapes() == 1);
+  Actions after_failed_escape(idle, {false, true});
+  Require(idle.ContinueIdle(false, after_failed_escape) == ReturnIdleResult::kTracking);
+  Require(after_failed_escape.calls == std::vector<std::string>{"escape", "trail"});
+  Require(idle.escapes() == 1);  // Idle trail acceptance does not reset the cap.
+  Actions restart(idle, {false, false});
+  Require(idle.ContinueIdle(false, restart) == ReturnIdleResult::kRestart);
+  Require(!idle.partial());
+  while (idle.escapes() < 5) {
+    idle.CountEscape();
+  }
+  Actions idle_final(idle, {false, true});
+  Require(idle.ContinueIdle(false, idle_final) == ReturnIdleResult::kTracking);
+  Require(idle_final.calls == std::vector<std::string>{"trail", "idle_home"});
+  Require(idle.escapes() == 5);
+  Actions idle_stop(idle, {false, false});
+  Require(idle.ContinueIdle(false, idle_stop) == ReturnIdleResult::kUnavailable);
+  Require(!idle.partial());  // This exit preserves its original success verdict.
+  Actions exhausted_trial(idle, {false});
+  Require(idle.TryTrailOrEscape(exhausted_trial) == ReturnExecutionResult::kUnavailable);
+  Require(exhausted_trial.calls == std::vector<std::string>{"trail"} && !idle.partial());
+  ReturnCoordinator immobile;
+  Actions immobile_actions(immobile, {false, false});
+  Require(immobile.Recover(ReturnRecoveryMode::kImmobility, immobile_actions) ==
+          ReturnExecutionResult::kUnavailable);
+  Require(immobile.partial());
+  Require(immobile_actions.calls == std::vector<std::string>{"trail", "escape"});
+  ReturnCoordinator cut;
+  cut.CountEscape();
+  Actions cut_actions(cut, {false, false, true});
+  Require(cut.Recover(ReturnRecoveryMode::kPathFailure, cut_actions) ==
+          ReturnExecutionResult::kTracking);
+  Require(cut_actions.calls == std::vector<std::string>{"trail", "escape", "final_home"});
+  Require(cut.escapes() == 1 && !cut.partial());
+  Actions cut_unavailable(cut, {false, false, false});
+  Require(cut.Recover(ReturnRecoveryMode::kPathFailure, cut_unavailable) ==
+          ReturnExecutionResult::kUnavailable);
+  Require(cut.partial());
 }

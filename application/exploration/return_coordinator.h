@@ -3,14 +3,11 @@
 #include <span>
 #include <utility>
 
-#include "navigation2d/exploration/frontier_explorer.h"
+#include "navigation2d/application/exploration/return_geometry.h"
 namespace navigation2d::exploration {
-enum class ReturnStepKind { kDirect, kBreadcrumb, kRepeated };
-struct ReturnStep {
-  ReturnStepKind kind;
-  ExplorationGoal goal;
-};
-enum class ReturnPlanStage { kInitial, kAfterEscapes };
+enum class ReturnPlanStage { kInitial, kAfterEscapes, kIdleFinal };
+enum class ReturnRecoveryMode { kPathFailure, kImmobility };
+enum class ReturnIdleResult { kWaiting, kTracking, kEscaping, kRestart, kUnavailable };
 enum class ReturnExecutionResult { kTracking, kEscaping, kUnavailable };
 // Synchronous mission capabilities. The adapter executes each request before
 // returning its acceptance result; the coordinator owns ordering and budgets.
@@ -25,6 +22,9 @@ class ReturnActions {
 class ReturnCoordinator {
  public:
   ReturnExecutionResult Execute(ReturnActions& actions);
+  ReturnExecutionResult TryTrailOrEscape(ReturnActions& actions);
+  ReturnExecutionResult Recover(ReturnRecoveryMode mode, ReturnActions& actions);
+  ReturnIdleResult ContinueIdle(bool escape_pending, ReturnActions& actions);
   void MarkPartial() { partial_ = true; }
   bool partial() const { return partial_; }
   void UseBreadcrumbs(bool enabled) { breadcrumbs_ = enabled; }
@@ -37,6 +37,7 @@ class ReturnCoordinator {
                       double rx, double ry, const ExplorationGoal& active_goal) const;
 
  private:
+  bool StartBoundedEscape(ReturnActions& actions);
   bool partial_ = false;
   bool breadcrumbs_ = false;
   int escapes_ = 0;

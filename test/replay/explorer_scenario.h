@@ -41,7 +41,7 @@ int RunExplorerReplay(int argc, char** argv) {
   std::ostringstream trace;
   trace.precision(17);
   bool first = true;
-  for (int step = 0; step < 600 && !node->finished_; ++step) {
+  for (int step = 0; step < 600 && !node->ReplayFinished(); ++step) {
     node->replay_.probe_time_ = rclcpp::Time(1000000000LL + 60000000LL * step, RCL_ROS_TIME);
     applied = world.Advance(node->replay_.probe_command_, stuck, step);
     const double x = world.x, y = world.y, yaw = world.yaw;
@@ -69,7 +69,7 @@ int RunExplorerReplay(int argc, char** argv) {
       trace << ',';
     }
     first = false;
-    trace << '[' << step << ',' << static_cast<int>(node->phase_) << ',' << x << ',' << y << ','
+    trace << '[' << step << ',' << node->ReplayPhase() << ',' << x << ',' << y << ','
           << yaw << ',' << node->replay_.probe_command_.linear.x << ','
           << node->replay_.probe_command_.angular.z << ',' << node->explorer_.KnownCells() << ','
           << node->explorer_.completed_goals() << ',' << node->explorer_.failed_goals() << ','
