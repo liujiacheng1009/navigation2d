@@ -15,6 +15,18 @@ void Require(bool value) {
 int main() {
   using namespace navigation2d;
   using namespace navigation2d::exploration_ros;
+  nav_msgs::msg::OccupancyGrid raw;
+  raw.info.width = 2;
+  raw.info.height = 2;
+  raw.info.resolution = .05f;
+  raw.info.origin.position.x = -1.;
+  raw.info.origin.position.y = 2.;
+  raw.data = {-1, 49, 50, 100};
+  const auto copied = ConvertOccupancyGrid(raw);
+  Require(copied.width == 2 && copied.height == 2 && copied.resolution == raw.info.resolution &&
+          copied.origin_x == -1. && copied.origin_y == 2. && copied.cells == raw.data);
+  raw.data[0] = 100;
+  Require(copied.cells[0] == -1);
   DebugPaths display;
   const Path route{MakePose2d(0., 0., 0.), MakePose2d(1., 0., .2), MakePose2d(2., 0., .4)};
   const auto global = display.Global(route, -2., 3., rclcpp::Time(42, 0, RCL_ROS_TIME));

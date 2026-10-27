@@ -12,8 +12,10 @@ def without_endpoints(source):
     begin = found[0]
     end = source.index('    PublishStatus("WAITING"', begin)
     setup = source[begin:end]
-    if not all(name in setup for name in ['create_publisher', 'create_subscription', 'create_wall_timer']):
+    if not all(name in setup for name in ['create_publisher', 'create_wall_timer']):
         raise ValueError('unsupported communication setup for logic replay')
+    if 'create_subscription' not in setup and 'MakeExplorerSubscriptions(' not in setup:
+        raise ValueError('unsupported subscription setup for logic replay')
     source = source[:begin] + source[end:]
     options = ('rclcpp::NodeOptions().enable_rosout(false).start_parameter_services(false)'
                '.start_parameter_event_publisher(false)')

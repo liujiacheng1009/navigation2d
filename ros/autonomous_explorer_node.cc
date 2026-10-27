@@ -19,7 +19,7 @@
 #include "navigation2d/application/exploration/navigation_session.h"
 #include "navigation2d/application/exploration/debug_overlay.h"
 #include "navigation2d/ros/exploration/debug_paths.h"
-#include "navigation2d/ros/exploration/pose_feedback.h"
+#include "navigation2d/ros/exploration/explorer_subscriptions.h"
 #include "navigation2d/application/exploration/pose_observation.h"
 #include "navigation2d/ros/exploration/explorer_parameters.h"
 #include "navigation2d/ros/exploration/map_observation.h"
@@ -125,61 +125,27 @@ class AutonomousExplorer final : public rclcpp::Node,
         "/exploration/global_planning_input", rclcpp::QoS(1).transient_local().reliable());
     inflated_costmap_publisher_ = create_publisher<nav_msgs::msg::OccupancyGrid>(
         "/exploration/global_costmap_inflated", rclcpp::QoS(1).transient_local().reliable());
-    map_subscription_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
-        "/localization2d/map", rclcpp::QoS(1).transient_local().reliable(),
-        [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr value) {
-          map_ = *value;
-          navigation2d::ExplorationGrid grid;
-          grid.width = static_cast<int>(value->info.width);
-          grid.height = static_cast<int>(value->info.height);
-          grid.resolution = value->info.resolution;
-          grid.origin_x = value->info.origin.position.x;
-          grid.origin_y = value->info.origin.position.y;
-          grid.cells = value->data;
-          explorer_.UpdateMap(std::move(grid));
+    subscriptions_ = navigation2d::exploration_ros::MakeExplorerSubscriptions(
+        *this, parameters_.pose_source, observations_,
+        [this](const nav_msgs::msg::OccupancyGrid& value) {
+          explorer_.UpdateMap(navigation2d::exploration_ros::ConvertOccupancyGrid(value));
           ++map_revision_;
-        });
-    if (parameters_.pose_source == "ground_truth") {
-      // Planning-only evaluation deliberately bypasses Localization2D's pose.
-      // The online mapper still supplies its live occupancy grid, while the
-      // controller and explorer receive the simulator's exact pose expressed in
-      // the same initial-odometry/map coordinate system used by that grid.
-      truth_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
-          "/ground_truth", rclcpp::SensorDataQoS(),
-          [this](nav_msgs::msg::Odometry::ConstSharedPtr value) {
-            pose_feedback_.ObserveGroundTruth(*value);
-          });
-    } else {
-      // In the joint localization/navigation evaluation the map and every
-      // planning/control decision use Localization2D's scan-matched map pose.
-      // Do not subscribe to /ground_truth here: it remains an offline oracle.
-      localization_pose_subscription_ =
-          create_subscription<geometry_msgs::msg::PoseStamped>(
-              "/localization2d/pose", rclcpp::SensorDataQoS(),
-              [this](geometry_msgs::msg::PoseStamped::ConstSharedPtr value) {
-                pose_feedback_.ObserveLocalization(*value);
-              });
-    }
-    odom_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
-        "/odom", rclcpp::SensorDataQoS(),
-        [this](nav_msgs::msg::Odometry::ConstSharedPtr value) {
-          velocity_ = {value->twist.twist.linear.x, value->twist.twist.angular.z};
-          velocity_stamp_ = rclcpp::Time(value->header.stamp);
-        });
-    scan_subscription_ = create_subscription<sensor_msgs::msg::LaserScan>(
-        "/scan", rclcpp::SensorDataQoS(),
-        [this](sensor_msgs::msg::LaserScan::ConstSharedPtr value) {
-          scan_ = *value;
-          if (navigation_.has_session() && Pose()) FeedScan();
-        });
+        },
+        [this] { if (navigation_.has_session() && Pose()) FeedScan(); });
     timer_ = create_wall_timer(
         std::chrono::duration<double>(.06 / parameters_.simulation_speed), [this]() { Tick(); });
     PublishStatus("WAITING", "waiting for " + parameters_.pose_source + " pose and online map");
   }
 
  private:
+  const std::optional<nav_msgs::msg::OccupancyGrid>& Map() const {
+    return observations_.map();
+  }
+  const std::optional<sensor_msgs::msg::LaserScan>& Scan() const {
+    return observations_.scan();
+  }
   const std::optional<navigation2d::exploration::PoseObservation>& Pose() const {
-    return pose_feedback_.observation();
+    return observations_.pose();
   }
 
   const navigation2d::ExplorationGrid& ObservationGrid() const {
@@ -187,7 +153,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   std::optional<navigation2d::exploration::ScanEvidenceView> ScanEvidence() const {
-    return navigation2d::exploration_ros::ScanEvidence(scan_ ? &*scan_ : nullptr);
+    return navigation2d::exploration_ros::ScanEvidence(Scan() ? &*Scan() : nullptr);
   }
 
   std::size_t KnownCells() const {
@@ -200,13 +166,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   navigation2d::Twist2d FreshVelocity(const rclcpp::Time& reference) const {
-    if (velocity_stamp_.nanoseconds() == 0) return {};
-    const double age = (reference - velocity_stamp_).seconds();
-    // Do not feed a stale encoder sample into acceleration limiting or stall
-    // diagnosis. Pose feedback remains the authoritative accumulated-motion
-    // signal when the odometry publisher is delayed by simulation scheduling.
-    if (!std::isfinite(age) || age < -.20 || age > .20) return {};
-    return velocity_;
+    return observations_.FreshVelocity(reference);
   }
 
   void FeedScan() {
@@ -219,7 +179,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     // The online mapper has already fused this scan into the static map.
     // Do not let instantaneous endpoint noise disconnect its global route;
     // retain the scan for near-field collision monitoring during execution.
-    navigation_.UpdateCollisionScan(sensor, navigation2d::exploration_ros::CopyScan(*scan_));
+    navigation_.UpdateCollisionScan(sensor, navigation2d::exploration_ros::CopyScan(*Scan()));
   }
 
   void RejectPreparation(navigation2d::exploration::DispatchFailure failure) override {
@@ -277,7 +237,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       }
     }
     const double trail_budget = evidence_budget_.Consume(
-        map_->info.resolution, pose_feedback_.trail().size());
+        Map()->info.resolution, observations_.trail().size());
     const auto entry = entry_.pending() ? entry_.pending() : entry_.locked();
     // Preserve the loader's existing diagnosis for stream failures.
     static_cast<void>(planning_map_.Prepare(
@@ -287,7 +247,7 @@ class AutonomousExplorer final : public rclcpp::Node,
          .goal = goal,
          .entry = entry,
          .scan = ScanEvidence(),
-         .trail = pose_feedback_.trail(),
+         .trail = observations_.trail(),
          .trail_budget_m = trail_budget,
          .returning = returning,
          .map_revision = map_revision_}));
@@ -295,7 +255,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     bool home_goal = false;
     if (returning && mission_.home()) {
       const Goal home = MakeHomeGoal();
-      home_goal = std::hypot(goal.x - home.x, goal.y - home.y) <= map_->info.resolution;
+      home_goal = std::hypot(goal.x - home.x, goal.y - home.y) <= Map()->info.resolution;
     }
     const bool entry_drive = entry_.pending() || entry_.locked();
     using navigation2d::exploration::NavigationPurpose;
@@ -306,7 +266,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     const bool pinch_retry = dispatch_.active(RetryKind::kPinch);
     const bool pinch_plan = pinch_retry && !entry_drive && !returning;
     const auto config = navigation2d::exploration::BuildNavigationProfile(
-        {.resolution = map_->info.resolution,
+        {.resolution = Map()->info.resolution,
          .entry = entry_drive,
          .pinch_retry = pinch_retry,
          .returning = returning,
@@ -320,7 +280,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       // Do not commit active_goal_/returning_/recovery_ until the plan is
       // accepted. Early assign left ghost GOALs outside painted free and kept
       // recovery sessions alive after open-area plan rejects (stuck mid-room).
-      if (scan_) FeedScan();
+      if (Scan()) FeedScan();
       const auto initial_time = now();
       const auto probe = navigation_.Probe(
           LocalPose(*Pose()), FreshVelocity(initial_time), initial_time.seconds());
@@ -385,21 +345,21 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   void PublishPlanningDebugMap(bool returning) {
-    if (!map_ || !Pose()) return;
+    if (!Map() || !Pose()) return;
     (void)returning;
     // Mirror LayeredCostmap::Reinflate for the UI: unknown is not a wall and
     // must not be painted by inflation (max keeps 255 over inscribed). Only
     // free cells receive inscribed/soft cost. The previous debug path dilated
     // into unknown and sealed passable doors in the overlay.
     navigation2d::ExplorationGrid planning_grid;
-    planning_grid.width = static_cast<int>(map_->info.width);
-    planning_grid.height = static_cast<int>(map_->info.height);
-    planning_grid.resolution = map_->info.resolution;
-    planning_grid.origin_x = map_->info.origin.position.x;
-    planning_grid.origin_y = map_->info.origin.position.y;
-    planning_grid.cells.assign(map_->data.begin(), map_->data.end());
+    planning_grid.width = static_cast<int>(Map()->info.width);
+    planning_grid.height = static_cast<int>(Map()->info.height);
+    planning_grid.resolution = Map()->info.resolution;
+    planning_grid.origin_x = Map()->info.origin.position.x;
+    planning_grid.origin_y = Map()->info.origin.position.y;
+    planning_grid.cells.assign(Map()->data.begin(), Map()->data.end());
 
-    nav_msgs::msg::OccupancyGrid input = *map_;
+    nav_msgs::msg::OccupancyGrid input = *Map();
     input.header.stamp = now();
     input.header.frame_id = "map";
     navigation2d::exploration::PaintPlanningDebugInput(
@@ -559,7 +519,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   std::pair<int, int> PoseCell() const {
-    const double resolution = map_ ? map_->info.resolution : .05;
+    const double resolution = Map() ? Map()->info.resolution : .05;
     return {static_cast<int>(std::floor(Pose()->x / resolution)),
             static_cast<int>(std::floor(Pose()->y / resolution))};
   }
@@ -627,7 +587,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   bool TryStartEscape() override {
-    if (!scan_ || !Pose() || escape_.Busy(now().nanoseconds())) return false;
+    if (!Scan() || !Pose() || escape_.Busy(now().nanoseconds())) return false;
     const BodyRanges body = ReadBodyRanges();
     const bool boxed_in = navigation2d::HitBlocksSwing(body.front) &&
                           navigation2d::HitBlocksSwing(body.side);
@@ -710,7 +670,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   bool TipPinchedNow() const override {
-    if (!scan_ || !Pose()) return false;
+    if (!Scan() || !Pose()) return false;
     const BodyRanges body = ReadBodyRanges();
     if (navigation_.has_session())
       return IsPinchGeometryStall(active_path_min_clearance_m_, body.front,
@@ -904,7 +864,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   // failed mouth is the post-脱困 折返.
   bool GoalIsBehindTrail(const Goal& goal) const override {
     return Pose() && navigation2d::exploration::GoalBehindDrivenTrail(
-        pose_feedback_.trail(), *TourRobot(), goal);
+        observations_.trail(), *TourRobot(), goal);
   }
   bool RetreatPinched() const override {
     const auto body = ReadBodyRanges();
@@ -918,8 +878,8 @@ class AutonomousExplorer final : public rclcpp::Node,
   bool NavigateRetreat(const Goal& goal) override { return StartNavigation(goal, false); }
   void CancelRetreatEvidence() override { evidence_budget_.CancelTrailReplay(); }
   bool StartRetreat() {
-    if (pose_feedback_.trail().size() < 4 || !Pose()) return false;
-    return retreat_.Start(pose_feedback_.trail(), *TourRobot(), PoseCell(),
+    if (observations_.trail().size() < 4 || !Pose()) return false;
+    return retreat_.Start(observations_.trail(), *TourRobot(), PoseCell(),
                           entry_.pending() || entry_.locked(), *this);
   }
 
@@ -1078,17 +1038,17 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   Goal MakeHomeGoal() const {
-    return return_.Home(map_ ? &ObservationGrid() : nullptr,
+    return return_.Home(Map() ? &ObservationGrid() : nullptr,
         {mission_.home()->x, mission_.home()->y, mission_.home()->yaw});
   }
 
   bool StartBreadcrumbTowardHome() override {
-    if (!mission_.home() || !Pose() || pose_feedback_.trail().size() < 4) return false;
+    if (!mission_.home() || !Pose() || observations_.trail().size() < 4) return false;
     const Goal home = MakeHomeGoal();
     const double rx = Pose()->x;
     const double ry = Pose()->y;
     const double home_dist = std::hypot(rx - home.x, ry - home.y);
-    const auto next = return_.NextStep(pose_feedback_.trail(), home, rx, ry, active_goal_);
+    const auto next = return_.NextStep(observations_.trail(), home, rx, ry, active_goal_);
     using navigation2d::exploration::ReturnStepKind;
     if (next.kind == ReturnStepKind::kRepeated) { return false; }
     if (next.kind == ReturnStepKind::kDirect) {
@@ -1121,7 +1081,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   bool TryVisitUnenteredSpace() {
     if (!Pose() || returning_ || mission_.phase() == MissionPhase::kReturning) return false;
     return navigation2d::exploration::TryUnenteredRoomVisits(
-        room_visits_, explorer_, pose_feedback_.trail(), Pose()->x, Pose()->y, *this);
+        room_visits_, explorer_, observations_.trail(), Pose()->x, Pose()->y, *this);
   }
   void PrepareRoomVisit() override {
     mission_.ResumeExploring();
@@ -1535,12 +1495,12 @@ class AutonomousExplorer final : public rclcpp::Node,
          .local_controller = selected_algorithms_.local,
          .mppi_commands = mppi_commands_,
          .rpp_commands = rpp_commands_,
-         .total_distance_m = pose_feedback_.distance_m(),
+         .total_distance_m = observations_.distance_m(),
          .known_cells = KnownCells(),
          .completed_goals = explorer_.completed_goals(),
          .failed_goals = explorer_.failed_goals(),
          .return_error = return_error},
-        map_ ? &ObservationGrid() : nullptr, pose_feedback_.trail());
+        Map() ? &ObservationGrid() : nullptr, observations_.trail());
     PublishStatus(!success ? "FAILED" : (return_.partial() ? "PARTIAL" : "COMPLETE"), final_message);
     // Leave the process so the debug UI can Start a new run without a stuck
     // finished node continuing to republish the old latched status.
@@ -1653,7 +1613,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   bool PathCutsMappedObstacle(bool execution_tick = false) const {
     if (!navigation_.has_session()) return false;
     return navigation2d::exploration_ros::ObservedRouteCutsWall(
-        map_ ? &*map_ : nullptr, navigation_.path(), planning_map_.origin_x(), planning_map_.origin_y(),
+        Map() ? &*Map() : nullptr, navigation_.path(), planning_map_.origin_x(), planning_map_.origin_y(),
         planning_map_.snapshot(), Pose(), ScanEvidence(), execution_tick);
   }
 
@@ -1671,7 +1631,7 @@ class AutonomousExplorer final : public rclcpp::Node,
 
   bool TourSegmentCutsWall(double x0, double y0, double x1, double y1) const {
     return navigation2d::exploration_ros::SegmentCutsWall(
-        map_ ? &*map_ : nullptr, x0, y0, x1, y1);
+        Map() ? &*Map() : nullptr, x0, y0, x1, y1);
   }
 
   void ClearPublishedNavPaths() {
@@ -1697,7 +1657,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     const auto carrot = debug_paths_.Carrot(global.header);
     carrot_publisher_->publish(carrot);
     const auto [tour, frontiers] = debug_paths_.Tour(
-        global.header, map_ ? &*map_ : nullptr, Pose()->x,
+        global.header, Map() ? &*Map() : nullptr, Pose()->x,
         Pose()->y, active_goal_, tour_.goals());
     tour_publisher_->publish(tour);
     frontiers_publisher_->publish(frontiers);
@@ -1708,7 +1668,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     if (mission_.finished()) {
       return;
     }
-    if (!map_ || !Pose() || !scan_ || KnownCells() < 100) return;
+    if (!Map() || !Pose() || !Scan() || KnownCells() < 100) return;
     if (!mission_.started()) {
       const auto& pose = *Pose();
       const navigation2d::exploration::MissionHome home{
@@ -2161,12 +2121,8 @@ class AutonomousExplorer final : public rclcpp::Node,
   navigation2d::exploration::GoalRecoverySession recovery_;
   navigation2d::exploration::TourExecution tour_;
   rclcpp::Time next_selection_{0, 0, RCL_ROS_TIME};
-  rclcpp::Time velocity_stamp_{0, 0, RCL_ROS_TIME};
   rclcpp::Time last_debug_publish_{0, 0, RCL_ROS_TIME};
-  std::optional<nav_msgs::msg::OccupancyGrid> map_;
-  std::optional<sensor_msgs::msg::LaserScan> scan_;
-  navigation2d::exploration_ros::PoseFeedback pose_feedback_;
-  navigation2d::Twist2d velocity_;
+  navigation2d::exploration_ros::ExplorerObservations observations_;
   navigation2d::exploration::AlgorithmSelection selected_algorithms_;
   navigation2d::FrontierExplorer explorer_;
   navigation2d::exploration::NavigationSession navigation_;
@@ -2181,11 +2137,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr frontier_debug_publisher_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr planning_input_publisher_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr inflated_costmap_publisher_;
-  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_subscription_;
-  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr truth_subscription_;
-  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr localization_pose_subscription_;
-  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscription_;
-  rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_subscription_;
+  std::unique_ptr<navigation2d::exploration_ros::ExplorerSubscriptions> subscriptions_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

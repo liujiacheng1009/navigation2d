@@ -51,7 +51,7 @@ int RunEntryProbeReplay(int argc, char** argv) {
         }
       }
     }
-    node->map_ = map;
+    node->ReplayObserveMap(map);
     node->map_revision_ = 17;
     node->explorer_.UpdateMap({static_cast<int>(map.info.width), static_cast<int>(map.info.height),
                                map.info.resolution, 0., 0., map.data});

@@ -49,18 +49,18 @@ int RunCompletionReplay(int argc, char** argv) {
       }
     }
     node->replay_.probe_time_ = rclcpp::Time(1000000000LL, RCL_ROS_TIME);
-    node->map_ = map;
+    node->ReplayObserveMap(map);
     node->map_revision_ = 17;
     node->explorer_.UpdateMap({100, 60, map.info.resolution, 0., 0., map.data});
     geometry_msgs::msg::PoseStamped pose;
     pose.pose = ReplayPose(name == "blocked" ? .15 : 1.2, 1.5, 0.);
     node->ReplayObservePose(pose);
-    node->scan_ = world.Observe();
-    node->velocity_stamp_ = node->replay_.probe_time_;
+    node->ReplayObserveScan(world.Observe());
+    node->ReplayObserveVelocity({}, node->replay_.probe_time_);
     node->Tick();
     // Expire the bootstrap wait before directly invoking the phase.
     node->replay_.probe_time_ = rclcpp::Time(10000000000LL, RCL_ROS_TIME);
-    node->velocity_stamp_ = node->replay_.probe_time_;
+    node->ReplayObserveVelocity({}, node->replay_.probe_time_);
     const auto begin = std::chrono::steady_clock::now();
     node->StartCompletingProbe();
     if ((name == "residual" || name == "finish") && node->ReplayPhase() != 1) {

@@ -4,6 +4,8 @@
 #include "navigation2d/application/exploration/route_validator.h"
 #include "navigation2d/geometry/path_2d.h"
 namespace navigation2d::exploration_ros {
+// Copy raw occupancy values without route-query normalization.
+ExplorationGrid ConvertOccupancyGrid(const nav_msgs::msg::OccupancyGrid& map);
 // World-frame segment against observed occupied cells (>=50). Unknown cells
 // are not walls; out-of-grid samples are blocked. A missing map is permissive,
 // matching the original query; callers retain their independent input guards.

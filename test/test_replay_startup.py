@@ -20,6 +20,7 @@ class ReplayStartup(unittest.TestCase):
         self.assertIn('start_parameter_event_publisher(false)', result)
         self.assertIn('void Tick()', result)
         self.assertNotIn('MakeRosMotionOutput(*this)', result)
+        self.assertNotIn('MakeExplorerSubscriptions(', result)
         with self.assertRaisesRegex(ValueError, 'constructor'):
             module.without_endpoints(source.replace('Node("sweepnav_autonomous_explorer")', 'Node("other")'))
         with self.assertRaisesRegex(ValueError, 'communication setup'):

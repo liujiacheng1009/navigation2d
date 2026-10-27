@@ -34,7 +34,9 @@ def adapt(source, label):
     pending = 'pending_entry_goal_' if old else 'entry_.pending()'
     locked = 'locked_entry_mouth_' if old else 'entry_.locked()'
     set_pending = 'pending_entry_goal_ = goal;' if old else 'entry_.SetPending(goal);'
-    if 'pose_feedback_' in source:
+    if 'observations_' in source:
+        observe_pose = 'observations_.ObserveLocalization(pose);'
+    elif 'pose_feedback_' in source:
         observe_pose = 'pose_feedback_.ObserveLocalization(pose);'
     else:
         observe_pose = """
@@ -48,10 +50,23 @@ def adapt(source, label):
       trajectory_.emplace_back(x, y);
     }
 """
+    if 'observations_' in source:
+        observe_map = 'observations_.ObserveMap(value);'
+        observe_scan = 'observations_.ObserveScan(value);'
+        observe_velocity = 'observations_.ObserveVelocity(value, stamp);'
+    else:
+        observe_map = 'map_ = value;'
+        observe_scan = 'scan_ = value;'
+        observe_velocity = 'velocity_ = value; velocity_stamp_ = stamp;'
     phase = 'mission_.phase()' if 'mission_.phase()' in source else 'phase_'
     finished = 'mission_.finished()' if 'mission_.finished()' in source else 'finished_'
     capture = f'''
   void ReplayObservePose(const geometry_msgs::msg::PoseStamped& pose) {{ {observe_pose} }}
+  void ReplayObserveMap(const nav_msgs::msg::OccupancyGrid& value) {{ {observe_map} }}
+  void ReplayObserveScan(const sensor_msgs::msg::LaserScan& value) {{ {observe_scan} }}
+  void ReplayObserveVelocity(navigation2d::Twist2d value, const rclcpp::Time& stamp) {{
+    {observe_velocity}
+  }}
   int ReplayPhase() const {{ return static_cast<int>({phase}); }}
   bool ReplayFinished() const {{ return {finished}; }}
   void ReplaySetPendingEntry(const Goal& goal) {{ {set_pending} }}

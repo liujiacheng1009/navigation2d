@@ -3,6 +3,16 @@
 #include <algorithm>
 #include <cmath>
 namespace navigation2d::exploration_ros {
+ExplorationGrid ConvertOccupancyGrid(const nav_msgs::msg::OccupancyGrid& map) {
+  ExplorationGrid grid;
+  grid.width = static_cast<int>(map.info.width);
+  grid.height = static_cast<int>(map.info.height);
+  grid.resolution = map.info.resolution;
+  grid.origin_x = map.info.origin.position.x;
+  grid.origin_y = map.info.origin.position.y;
+  grid.cells = map.data;
+  return grid;
+}
 bool SegmentCutsWall(const nav_msgs::msg::OccupancyGrid* map, double x0, double y0, double x1,
                      double y1) {
   if (!map || map->info.resolution <= 0.) {

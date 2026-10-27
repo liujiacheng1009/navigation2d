@@ -26,9 +26,13 @@ def without_unused_motion_object(command, source, logic_only):
     """Logic startup removes this factory; do not load its unused ROS types."""
     if not logic_only:
         return list(command)
-    if re.search(r'\bMakeRosMotionOutput\s*\(', source):
-        raise ValueError('logic replay still constructs a motion publisher')
-    unused = [arg for arg in command if arg.endswith('/motion_output.cc.o')]
-    if len(unused) > 1:
-        raise ValueError('ambiguous motion publisher link inputs')
+    unused = []
+    for factory, filename in [('MakeRosMotionOutput', 'motion_output.cc.o'),
+                              ('MakeExplorerSubscriptions', 'explorer_subscriptions.cc.o')]:
+        if re.search(r'\b' + factory + r'\s*\(', source):
+            raise ValueError('logic replay still constructs an endpoint: ' + factory)
+        objects = [arg for arg in command if arg.endswith('/' + filename)]
+        if len(objects) > 1:
+            raise ValueError('ambiguous endpoint link inputs: ' + filename)
+        unused.extend(objects)
     return [arg for arg in command if arg not in unused]

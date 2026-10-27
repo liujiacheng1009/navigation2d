@@ -48,12 +48,11 @@ int RunExplorerReplay(int argc, char** argv) {
     geometry_msgs::msg::PoseStamped pose;
     pose.pose = ReplayPose(x, y, yaw);
     node->ReplayObservePose(pose);
-    node->velocity_ = {applied.linear.x, applied.angular.z};
-    node->velocity_stamp_ = node->replay_.probe_time_;
+    node->ReplayObserveVelocity({applied.linear.x, applied.angular.z}, node->replay_.probe_time_);
     const auto scan = world.Observe();
-    node->scan_ = scan;
+    node->ReplayObserveScan(scan);
     if (step % 5 == 0) {
-      node->map_ = world.map;
+      node->ReplayObserveMap(world.map);
       node->explorer_.UpdateMap({80, 60, world.res, 0., 0., world.map.data});
       ++node->map_revision_;
     }

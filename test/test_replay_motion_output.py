@@ -39,6 +39,17 @@ class ReplayMotionOutput(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'ambiguous'):
             module.without_unused_motion_object(command + ['/other/motion_output.cc.o'], '', True)
 
+    def test_subscription_object_is_pruned_only_in_logic_scope(self):
+        command = ['c++', 'node.o', '/build/explorer_subscriptions.cc.o', 'core.a']
+        self.assertEqual(module.without_unused_motion_object(command, '', True),
+                         ['c++', 'node.o', 'core.a'])
+        self.assertEqual(module.without_unused_motion_object(command, '', False), command)
+        with self.assertRaisesRegex(ValueError, 'still constructs'):
+            module.without_unused_motion_object(command, 'MakeExplorerSubscriptions(node)', True)
+        with self.assertRaisesRegex(ValueError, 'ambiguous'):
+            module.without_unused_motion_object(
+                command + ['/other/explorer_subscriptions.cc.o'], '', True)
+
     def test_legacy_source_is_byte_identical(self):
         source = 'class AutonomousExplorer { public: void Run(){ command_publisher_->publish(stop); }};'
         self.assertEqual(module.adapt_motion_output(source), (source, 0))
