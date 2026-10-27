@@ -2,16 +2,16 @@
 
 #include <cstdint>
 #include <vector>
+
 #include "navigation2d/configuration/navigation_config.h"
+#include "navigation2d/costmap/cost_values.h"
 #include "navigation2d/costmap/grid_2d.h"
+#include "navigation2d/costmap/grid_change_history.h"
+#include "navigation2d/costmap/obstacle_layer.h"
 #include "navigation2d/geometry/pose_2d.h"
 #include "navigation2d/sensor/observations.h"
 
 namespace navigation2d {
-
-enum Cost : std::uint8_t {
-  kFree = 0, kInscribed = 253, kLethal = 254, kUnknown = 255,
-};
 
 class LayeredCostmap {
  public:
@@ -27,19 +27,16 @@ class LayeredCostmap {
                                           int* origin_x, int* origin_y) const;
   const Grid2d& grid() const { return static_map_; }
   std::uint64_t digest() const;
-  std::uint64_t revision() const { return revision_; }
+  std::uint64_t revision() const { return changes_.revision(); }
   std::vector<int> ChangedCellsSince(std::uint64_t revision) const;
 
  private:
-  bool Raytrace(double x0, double y0, double x1, double y1, bool mark_endpoint);
   void Reinflate();
   Grid2d static_map_;
   NavigationConfig config_;
-  std::vector<std::uint8_t> obstacles_;
+  costmap_internal::ObstacleLayer obstacles_;
   std::vector<std::uint8_t> master_;
-  std::uint64_t revision_ = 0;
-  struct ChangeSet { std::uint64_t revision; std::vector<int> cells; };
-  std::vector<ChangeSet> change_history_;
+  costmap_internal::GridChangeHistory changes_;
 };
 
 }  // namespace navigation2d
