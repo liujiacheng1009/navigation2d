@@ -6,6 +6,7 @@
 
 #include "navigation2d/configuration/navigation_config.h"
 #include "navigation2d/control/local_controller.h"
+#include "navigation2d/control/depth_observation.h"
 #include "navigation2d/sensor/observations.h"
 
 namespace navigation2d {
@@ -48,20 +49,11 @@ class CollisionMonitor {
                                 double timestamp);
 
  private:
-  struct DepthTrack {
-    Eigen::Vector2d point = Eigen::Vector2d::Zero();
-    int hits = 0;
-  };
   void UpdatePoints(const Pose2d& sensor_pose, std::vector<Eigen::Vector2d> points);
-  void CullPassedDepthHolds(const Pose2d& robot_pose);
   NavigationConfig config_;
   std::vector<Eigen::Vector2d> points_;
   std::vector<Eigen::Vector2d> blind_zone_points_;
-  std::vector<Eigen::Vector2d> depth_points_;
-  std::vector<Eigen::Vector2d> held_depth_points_;
-  std::vector<DepthTrack> depth_tracks_;
-  bool has_depth_stamp_ = false;
-  double depth_stamp_ = 0.;
+  collision_internal::DepthObservation depth_;
   bool observation_pending_ = false;
   bool has_observation_ = false;
   double last_observation_time_ = 0.;

@@ -1,141 +1,20 @@
 // Architecture adapted from Nav2 Collision Monitor, Apache-2.0.
 #include "navigation2d/control/collision_monitor.h"
+#include "navigation2d/control/collision_monitor_geometry.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 
 namespace navigation2d {
-namespace {
+using collision_internal::CommandedExtent;
+using collision_internal::Integrate;
+using collision_internal::PointInsideOrNearFootprint;
+using collision_internal::ShellReturn;
+using collision_internal::SlowdownScale;
+using collision_internal::StopCorridorHalfWidth;
+using collision_internal::TravelCorridorHalfWidth;
 
-double BodyHalfWidth(const NavigationConfig& config) {
-  double half_width = 0.;
-  for (const auto& corner : config.footprint)
-    half_width = std::max(half_width, std::abs(corner.y()));
-  if (half_width < 1e-6) half_width = config.robot_radius;
-  return half_width;
-}
-
-// Lateral half-width of the commanded travel corridor. collision_radius adds
-// another 0.10 m that is an along-track stop margin, not extra vehicle width.
-// Using it as the corridor width treats a parallel wall as a forward obstacle:
-// the slowdown latch then never releases, and every command is multiplied by
-// slowdown_ratio before being floored at a crawl. The extra 0.05 m is only a
-// slowdown margin so a corner beside the bumper eases the speed; it must not
-// widen the stop zone.
-double TravelCorridorHalfWidth(const NavigationConfig& config) {
-  const double body = BodyHalfWidth(config);
-  const double raster = std::sqrt(.5) * config.map_resolution;
-  // Passage mode: body + one raster cell only. The extra 0.05 m open-space
-  // margin turns door jambs into travel-corridor hits and latches STOP.
-  if (config.collision_monitor_passage_mode) return body + raster;
-  return body + raster + .05;
-}
-
-// Stop only for returns that overlap the body, plus one raster cell. A jamb
-// a few centimetres outside the chassis is still inside the slowdown corridor
-// and used to satisfy the radial stop test, which then latched a zero command
-// for the rest of the traverse.
-double StopCorridorHalfWidth(const NavigationConfig& config) {
-  const double body = BodyHalfWidth(config);
-  if (config.collision_monitor_passage_mode) return body;
-  return body + std::sqrt(.5) * config.map_resolution;
-}
-
-// Distance from the robot origin to the bumper in the commanded direction.
-// Without a footprint the circular planning radius is that bumper.
-double CommandedExtent(const NavigationConfig& config, double linear) {
-  if (config.footprint.size() >= 3) {
-    double extent = 0.;
-    for (const auto& corner : config.footprint) {
-      const double axial = linear >= 0. ? corner.x() : -corner.x();
-      extent = std::max(extent, axial);
-    }
-    if (extent > 1e-6) return extent;
-  }
-  return config.robot_radius;
-}
-
-// 1 at the outer edge of the slowdown zone, slowdown_ratio at the stop
-// distance or at a one-cycle time-to-collision. A flat ratio makes a return
-// 0.40 m away as slow as one 0.10 m away.
-double SlowdownScale(double clearance, double time_to_collision,
-                     const NavigationConfig& config) {
-  const double minimum = std::clamp(config.collision_monitor_slowdown_ratio, 0., 1.);
-  double scale = 1.;
-  bool applied = false;
-  if (std::isfinite(clearance)) {
-    const double span = std::max(
-        1e-3, config.collision_monitor_slowdown_distance -
-                  config.collision_monitor_stop_distance);
-    const double closeness = std::clamp(
-        (config.collision_monitor_slowdown_distance - clearance) / span, 0., 1.);
-    scale = std::min(scale, 1. - closeness * (1. - minimum));
-    applied = true;
-  }
-  if (std::isfinite(time_to_collision) &&
-      config.collision_monitor_approach_horizon > 1e-3) {
-    const double closeness = std::clamp(
-        (config.collision_monitor_approach_horizon - time_to_collision) /
-            config.collision_monitor_approach_horizon,
-        0., 1.);
-    scale = std::min(scale, 1. - closeness * (1. - minimum));
-    applied = true;
-  }
-  return applied ? scale : minimum;
-}
-
-bool PointInsideOrNearFootprint(const Eigen::Vector2d& world_point,
-                                const Pose2d& pose,
-                                const NavigationConfig& config,
-                                double margin) {
-  if (config.footprint.size() < 3) return false;
-  const double yaw = Yaw(pose);
-  const double c = std::cos(yaw), s = std::sin(yaw);
-  const Eigen::Vector2d delta = world_point - pose.translation();
-  const Eigen::Vector2d point(c * delta.x() + s * delta.y(),
-                              -s * delta.x() + c * delta.y());
-  bool inside = false;
-  double min_edge_distance = std::numeric_limits<double>::infinity();
-  for (std::size_t i = 0; i < config.footprint.size(); ++i) {
-    const Eigen::Vector2d& a = config.footprint[i];
-    const Eigen::Vector2d& b = config.footprint[(i + 1) % config.footprint.size()];
-    const Eigen::Vector2d edge = b - a;
-    const double edge_norm2 = edge.squaredNorm();
-    const double t = edge_norm2 > 1e-12
-        ? std::clamp((point - a).dot(edge) / edge_norm2, 0., 1.) : 0.;
-    min_edge_distance = std::min(min_edge_distance, (point - (a + t * edge)).norm());
-    if ((a.y() > point.y()) != (b.y() > point.y()) &&
-        point.x() < (b.x() - a.x()) * (point.y() - a.y()) /
-                         (b.y() - a.y()) + a.x())
-      inside = !inside;
-  }
-  return inside || min_edge_distance <= margin;
-}
-
-// A return on the chassis is the shell or a one-shot reflection. The measured
-// footprint plus 2 cm covers the flats, about 0.16 m from the centre. Without
-// a footprint the circular body is the shell. A real return farther out still
-// stops.
-bool ShellReturn(const Eigen::Vector2d& point, const Pose2d& pose,
-                 const NavigationConfig& config) {
-  if (config.footprint.size() >= 3)
-    return PointInsideOrNearFootprint(point, pose, config, .02);
-  return (point - pose.translation()).norm() <= std::max(.16, config.robot_radius);
-}
-
-Pose2d Integrate(const Pose2d& pose, const Twist2d& command, double dt) {
-  const double yaw = Yaw(pose);
-  const double next_yaw = yaw + command.angular * dt;
-  if (std::abs(command.angular) < 1e-9)
-    return MakePose2d(X(pose) + command.linear * std::cos(yaw) * dt,
-                      Y(pose) + command.linear * std::sin(yaw) * dt, next_yaw);
-  const double radius = command.linear / command.angular;
-  return MakePose2d(X(pose) + radius * (std::sin(next_yaw) - std::sin(yaw)),
-                    Y(pose) - radius * (std::cos(next_yaw) - std::cos(yaw)), next_yaw);
-}
-
-}  // namespace
 
 void CollisionMonitor::UpdatePoints(const Pose2d& sensor_pose,
                                     std::vector<Eigen::Vector2d> points) {
@@ -191,79 +70,9 @@ void CollisionMonitor::UpdatePointCloud(const Pose2d& sensor_pose, const PointCl
   UpdatePoints(sensor_pose, std::move(points));
 }
 
-void CollisionMonitor::CullPassedDepthHolds(const Pose2d& robot_pose) {
-  const double yaw = Yaw(robot_pose);
-  const double cosine = std::cos(yaw), sine = std::sin(yaw);
-  const double bumper = CommandedExtent(config_, 1.);
-  std::erase_if(held_depth_points_, [&](const Eigen::Vector2d& world) {
-    const Eigen::Vector2d relative = world - robot_pose.translation();
-    const double longitudinal = cosine * relative.x() + sine * relative.y();
-    return longitudinal < bumper;
-  });
-}
-
-void CollisionMonitor::UpdateDepthPoints(
-    const Pose2d& robot_pose, const std::vector<Eigen::Vector2d>& base_points,
-    double timestamp) {
-  const double yaw = Yaw(robot_pose);
-  const double cosine = std::cos(yaw), sine = std::sin(yaw);
-  const double half_width = TravelCorridorHalfWidth(config_);
-  const double reach = config_.robot_radius + config_.collision_monitor_slowdown_distance;
-  constexpr double kMatchRadius = .08;
-  constexpr int kStableHits = 3;
-  std::vector<Eigen::Vector2d> fresh;
-  fresh.reserve(base_points.size());
-  for (const auto& point : base_points) {
-    if (!point.allFinite()) continue;
-    if (point.norm() > reach) continue;
-    fresh.emplace_back(X(robot_pose) + cosine * point.x() - sine * point.y(),
-                       Y(robot_pose) + sine * point.x() + cosine * point.y());
-  }
-  auto forward = [&](const Eigen::Vector2d& world) {
-    const Eigen::Vector2d relative = world - robot_pose.translation();
-    const double longitudinal = cosine * relative.x() + sine * relative.y();
-    const double lateral = std::abs(-sine * relative.x() + cosine * relative.y());
-    return longitudinal > 0. && lateral <= half_width && relative.norm() <= reach + 1e-6;
-  };
-  std::erase_if(held_depth_points_, [&](const Eigen::Vector2d& held) {
-    return std::any_of(fresh.begin(), fresh.end(), [&](const Eigen::Vector2d& point) {
-      return (point - held).norm() < kMatchRadius;
-    });
-  });
-  std::vector<bool> matched(depth_tracks_.size(), false);
-  std::vector<DepthTrack> next_tracks;
-  next_tracks.reserve(fresh.size());
-  for (const auto& point : fresh) {
-    int best = -1;
-    double best_distance = kMatchRadius;
-    for (std::size_t index = 0; index < depth_tracks_.size(); ++index) {
-      if (matched[index]) continue;
-      const double distance = (depth_tracks_[index].point - point).norm();
-      if (distance < best_distance) {
-        best = static_cast<int>(index);
-        best_distance = distance;
-      }
-    }
-    DepthTrack track;
-    track.point = point;
-    if (best >= 0) {
-      matched[static_cast<std::size_t>(best)] = true;
-      track.hits = std::min(depth_tracks_[static_cast<std::size_t>(best)].hits + 1, kStableHits);
-    } else {
-      track.hits = 1;
-    }
-    next_tracks.push_back(track);
-  }
-  for (std::size_t index = 0; index < depth_tracks_.size(); ++index) {
-    if (matched[index]) continue;
-    const DepthTrack& track = depth_tracks_[index];
-    if (track.hits >= kStableHits && forward(track.point))
-      held_depth_points_.push_back(track.point);
-  }
-  depth_tracks_ = std::move(next_tracks);
-  depth_points_ = std::move(fresh);
-  depth_stamp_ = timestamp;
-  has_depth_stamp_ = true;
+void CollisionMonitor::UpdateDepthPoints(const Pose2d& pose,
+    const std::vector<Eigen::Vector2d>& points, double timestamp) {
+  depth_.Update(pose, points, timestamp, config_);
 }
 
 CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2d command,
@@ -278,23 +87,16 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
       timestamp - last_observation_time_ > config_.collision_monitor_source_timeout)
     return {{}, CollisionMonitorAction::kSourceTimeout, 0., 0.};
 
-  if (has_depth_stamp_ && timestamp - depth_stamp_ > .40) {
-    depth_points_.clear();
-    held_depth_points_.clear();
-    depth_tracks_.clear();
-    has_depth_stamp_ = false;
-  } else {
-    CullPassedDepthHolds(robot_pose);
-  }
+  depth_.Refresh(robot_pose, timestamp, config_);
   struct SafetyReturn {
     Eigen::Vector2d point;
     bool depth = false;
   };
   std::vector<SafetyReturn> returns;
-  returns.reserve(points_.size() + depth_points_.size() + held_depth_points_.size());
+  returns.reserve(points_.size() + depth_.points().size() + depth_.held().size());
   for (const auto& point : points_) returns.push_back({point, false});
-  for (const auto& point : depth_points_) returns.push_back({point, true});
-  for (const auto& point : held_depth_points_) returns.push_back({point, true});
+  for (const auto& point : depth_.points()) returns.push_back({point, true});
+  for (const auto& point : depth_.held()) returns.push_back({point, true});
 
   double min_distance = std::numeric_limits<double>::infinity();
   for (const auto& sample : returns)
