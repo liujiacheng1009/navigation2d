@@ -65,6 +65,7 @@ add_library(navigation2d_exploration_application STATIC
   application/exploration/entry_recovery_execution.cc
   application/exploration/open_forward_stop.cc
   application/exploration/forward_blocked.cc
+  application/exploration/alcove_exit.cc
   application/exploration/route_failure_history.cc
   application/exploration/entry_selection.cc
   application/exploration/selection_exhaustion.cc

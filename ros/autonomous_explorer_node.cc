@@ -43,6 +43,7 @@
 #include "navigation2d/application/exploration/goal_execution_watch.h"
 #include "navigation2d/application/exploration/open_forward_stop.h"
 #include "navigation2d/application/exploration/forward_blocked.h"
+#include "navigation2d/application/exploration/alcove_exit.h"
 #include "navigation2d/application/exploration/route_failure_history.h"
 #include "navigation2d/application/exploration/selection_exhaustion.h"
 #include "navigation2d/application/exploration/viewpoint_rejection_executor.h"
@@ -92,6 +93,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::GoalExecutionClock,
                                  private navigation2d::exploration::OpenForwardStopActions,
                                  private navigation2d::exploration::ForwardBlockedActions,
+                                 private navigation2d::exploration::AlcoveExitActions,
                                  private navigation2d::exploration::SelectionExhaustionActions,
                                  private navigation2d::exploration::ViewpointRejectionActions,
                                  private navigation2d::exploration::TourConstraints,
@@ -609,6 +611,21 @@ class AutonomousExplorer final : public rclcpp::Node,
   // boxed in on both axes, or its latest plan failed because the start sits
   // in an obstacle. Anywhere else a plan is the safer way out; escaping in
   // open space drove the tail into walls it could not see.
+  void ReportUnfinishedPocket(std::size_t unknown, bool frontier) override {
+    RCLCPP_WARN(get_logger(),
+                "Corner crawl stalled with local unknown=%zu frontier=%s; "
+                "retry entry instead of cooling pocket",
+                unknown, frontier ? "yes" : "no");
+  }
+  void ReportExhaustedPocket(const navigation2d::exploration::AlcoveObservation& observation) override {
+    RCLCPP_WARN(get_logger(),
+                "Leaving near-goal alcove tip: dist=%.2f front=%.2f side=%.2f "
+                "progress=%.2f/%.2f elapsed=%.1f retreat=%s",
+                observation.goal_distance_m, observation.front_range_m, observation.side_range_m,
+                observation.path_progress_m, observation.path_length_m,
+                goal_execution_.Elapsed(*this), retreat_.active() ? "yes" : "no");
+  }
+
   bool TryStartEscape() override {
     if (!scan_ || !Pose() || escape_.Busy(now().nanoseconds())) return false;
     const BodyRanges body = ReadBodyRanges();
@@ -1897,58 +1914,10 @@ class AutonomousExplorer final : public rclcpp::Node,
         state.requested_command.linear < .06 &&
         corridor_pinch;
     if (near_goal_alcove_crawl) {
-      // Unfinished local unknown (kitchen corner / red-box pocket) must not be
-      // CoolRegion'd away. The old 1.8 m pocket cool + RecordAttempt(true) made
-      // leftovers vanish (raw_cells>>0, completing found none) while the robot
-      // fled down the hall.
-      const bool local_frontier_open =
-          !retreat_.active() && explorer_.GoalRegionStillFrontier(active_goal_);
-      const std::size_t local_unknown = explorer_.ReachableUnknownCells(
-          Pose()->x, Pose()->y);
-      if (local_frontier_open || local_unknown > 80) {
-        RCLCPP_WARN(get_logger(),
-                    "Corner crawl stalled with local unknown=%zu frontier=%s; "
-                    "retry entry instead of cooling pocket",
-                    local_unknown, local_frontier_open ? "yes" : "no");
-        navigation_.Cancel();
-        route_failures_.ClearSignatures();
-        if (local_frontier_open && PassableMouthGoal(active_goal_)) {
-          LockEntryMouth(active_goal_);
-          evidence_budget_.RequestTrailReplay(8.0);
-          if (StartEntryProbe()) return;
-        }
-        // Drop only this viewpoint; keep the pocket nominatable.
-        if (!retreat_.active()) explorer_.RecordAttempt(active_goal_, false);
-        if (!tour_.goals().empty()) tour_.Advance();
-        retreat_.Finish();
-        next_selection_ = now();
-        PublishStatus("SELECTING",
-                      "local pocket unfinished; retrying without pocket cool");
-        return;
-      }
-      RCLCPP_WARN(get_logger(),
-                  "Leaving near-goal alcove tip: dist=%.2f front=%.2f side=%.2f "
-                  "progress=%.2f/%.2f elapsed=%.1f retreat=%s",
-                  goal_distance_now, front_range, side_range,
-                  state.path_progress_m, state.global_path_length_m,
-                  goal_execution_.Elapsed(*this),
-                  retreat_.active() ? "yes" : "no");
-      navigation_.Cancel();
-      if (!retreat_.active()) explorer_.RecordAttempt(active_goal_, true);
-      // Cool only when the tip is truly done (no local unknown left).
-      explorer_.CoolRegion(active_goal_.x, active_goal_.y, 1.80, 3000u);
-      explorer_.CoolRegion(active_goal_.frontier_x, active_goal_.frontier_y, 1.80, 3000u);
-      explorer_.CoolRegion(Pose()->x, Pose()->y, 1.80, 3000u);
-      ClearEntryMouthLock();
-      retreat_.Finish();
-      retreat_.AllowRetry();  // allow a short trail exit from this cell
-      tour_.Suspend();
-      route_failures_.ClearSignatures();
-      if (EscapeOrShortRetreat("leaving alcove tip; peel",
-                               "leaving alcove tip; short trail retreat"))
-        return;
-      next_selection_ = now();
-      PublishStatus("SELECTING", "alcove tip left; pocket cooled, picking a farther goal");
+      navigation2d::exploration::ExecuteAlcoveExit(
+          entry_, explorer_, tour_, retreat_, route_failures_, active_goal_,
+          {*TourRobot(), goal_distance_now, front_range, side_range,
+           state.path_progress_m, state.global_path_length_m}, *this);
       return;
     }
     if (state.status == navigation2d::NavigationStatus::kSucceeded) {
