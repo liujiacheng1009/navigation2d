@@ -43,8 +43,8 @@ int main() {
 
   const char* unknown_path = "/tmp/navigation2d_unknown_test.json";
   std::ofstream unknown_output(unknown_path);
-  unknown_output << R"({"width":20,"height":10,"resolution":0.05,"cells":[)";
-  for (int i = 0; i < 200; ++i) {
+  unknown_output << R"({"width":20,"height":30,"resolution":0.05,"cells":[)";
+  for (int i = 0; i < 600; ++i) {
     const int col = i % 20;
     const int value = col >= 16 ? 255 : (col == 2 && i / 20 == 2 ? 254 : 0);
     unknown_output << (i ? "," : "") << value;
@@ -58,6 +58,7 @@ int main() {
   // Unknown starts at x = 0.80. A pose 0.20 m in front of that edge is where
   // a frontier viewpoint sits, inside the 0.255 m planning radius of a wall
   // and still a valid goal.
-  assert(!unknown_map.lethal(.60, .25, .255));
+  // Keep the full circle inside the map: this checks unknown cells, not borders.
+  assert(!unknown_map.lethal(.60, .40, .255));
   assert(unknown_map.lethal(.125, .125, .22));
 }
