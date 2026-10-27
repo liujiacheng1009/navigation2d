@@ -42,6 +42,7 @@
 #include "navigation2d/application/exploration/retreat_execution.h"
 #include "navigation2d/application/exploration/goal_execution_watch.h"
 #include "navigation2d/application/exploration/open_forward_stop.h"
+#include "navigation2d/application/exploration/forward_blocked.h"
 #include "navigation2d/application/exploration/route_failure_history.h"
 #include "navigation2d/application/exploration/selection_exhaustion.h"
 #include "navigation2d/application/exploration/viewpoint_rejection_executor.h"
@@ -90,6 +91,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::RetreatActions,
                                  private navigation2d::exploration::GoalExecutionClock,
                                  private navigation2d::exploration::OpenForwardStopActions,
+                                 private navigation2d::exploration::ForwardBlockedActions,
                                  private navigation2d::exploration::SelectionExhaustionActions,
                                  private navigation2d::exploration::ViewpointRejectionActions,
                                  private navigation2d::exploration::TourConstraints,
@@ -753,7 +755,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   // True pinch peel. Never fall back to trail reverse while a mouth is locked:
   // StartRetreat sends the robot back along the outbound path (折返) and that
   // is the inefficiency the UI shows after a failed doorway crawl.
-  bool EscapeOrShortRetreat(const char* escape_msg, const char* retreat_msg) {
+  bool EscapeOrShortRetreat(const char* escape_msg, const char* retreat_msg) override {
     if (TryStartEscape()) {
       recovery_.resume_after_escape = true;
       PublishStatus("RECOVERING", escape_msg);
@@ -1461,7 +1463,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         viewpoint_rejections_.RecentlyDemoted(goal, now().nanoseconds());
   }
 
-  void DemoteViewpointForSeconds(const Goal& goal, double seconds) {
+  void DemoteViewpointForSeconds(const Goal& goal, double seconds) override {
     viewpoint_rejections_.Demote(goal, RejectionDeadlineNs(seconds));
   }
   std::int64_t RejectionDeadlineNs(double seconds) const override {
@@ -2003,34 +2005,8 @@ class AutonomousExplorer final : public rclcpp::Node,
 
       // Nose hit is inside the planning circle. Do not resume the same path.
       if (exploring_drive && monitor_stop && forward_blocked_close) {
-        // Locked mouth: one peel, else leave and continue tour from here.
-        if (entry_.locked() || entry_.pending()) {
-          if (!entry_.pending()) entry_.SetPending(entry_.locked());
-          retreat_.AllowRetry();
-          navigation_.Cancel();
-          if (EscapeOrShortRetreat("forward blocked at locked mouth; peel",
-                                   "unused"))
-            return;
-          AbandonLockedEntryMouth(
-              "forward blocked at mouth; leave and continue tour (no reverse)");
-          next_selection_ = now();
-          return;
-        }
-        explorer_.RecordAttempt(entry_.pending().value_or(active_goal_),
-                                false);
-        ClearEntryMouthLock();
-        DemoteViewpointForSeconds(active_goal_, 8.0);
-        if (!tour_.goals().empty()) tour_.Advance();
-        recovery_.Clear();
-        if (TryStartEscape()) {
-          navigation_.Cancel();
-          PublishStatus("RECOVERING",
-                        "forward blocked; escape then advance tour");
-          return;
-        }
-        navigation_.Cancel();
-        next_selection_ = now();
-        PublishStatus("SELECTING", "forward blocked; skipping viewpoint");
+        navigation2d::exploration::ExecuteForwardBlocked(
+            entry_, explorer_, tour_, recovery_, retreat_, active_goal_, *this);
         return;
       }
 
