@@ -8,6 +8,8 @@ enum class NavigationPurpose { kExplore, kEntry, kReturn };
 struct AlgorithmSelection {
   std::string global = "theta_star";
   std::string local = "rpp";
+  AlgorithmParameterSets global_parameters{};
+  AlgorithmParameterSets local_parameters{};
 };
 struct NavigationProfiles {
   AlgorithmSelection explore;

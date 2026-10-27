@@ -1,6 +1,7 @@
 #include "navigation2d/configuration/navigation_config.h"
 
 #include <stdexcept>
+#include "navigation2d/configuration/builtin_parameters.h"
 
 #include "navigation2d/application/builtin_algorithm_catalog.h"
 #include "navigation2d/configuration/navigation_validation.h"
@@ -13,6 +14,7 @@ NavigationConfig NavigationConfig::Load(const std::string& filename) {
     throw std::runtime_error("unknown planner or controller selection");
   }
   configuration_detail::ValidateNavigationBounds(config);
+  ValidateBuiltinParameterSets(config);
   return config;
 }
 }  // namespace navigation2d

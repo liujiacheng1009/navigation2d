@@ -5,6 +5,7 @@
 
 #include "navigation2d/application/algorithm_registry.h"
 #include "navigation2d/application/builtin_algorithm_catalog.h"
+#include "navigation2d/configuration/builtin_parameters.h"
 #include "navigation2d/control/dwa_controller.h"
 #include "navigation2d/control/mpc_controller.h"
 #include "navigation2d/control/mppi_controller.h"
@@ -51,13 +52,35 @@ std::shared_ptr<const AlgorithmRegistry> AlgorithmRegistry::Builtins() {
     auto result = std::make_shared<AlgorithmRegistry>();
     for (const auto& spec : builtin_algorithms::kPlanners) {
       result->RegisterPlanner(
-          std::string(spec.name), [kind = spec.kind](const auto& c) { return Planner(kind, c); },
-          spec.capabilities);
+          std::string(spec.name),
+          [kind = spec.kind, id = std::string(spec.name)](const auto& c) {
+            if (ParametersFor(c.global_planners, id).empty()) {
+              return Planner(kind, c);
+            }
+            return Planner(kind, ResolveBuiltinParameters(c, id, true));
+          },
+          spec.capabilities,
+          [id = std::string(spec.name)](const auto& c, const auto& parameters) {
+            if (!parameters.empty()) {
+              static_cast<void>(ResolveBuiltinParameters(c, id, true));
+            }
+          });
     }
     for (const auto& spec : builtin_algorithms::kControllers) {
       result->RegisterController(
-          std::string(spec.name), [kind = spec.kind](const auto& c) { return Controller(kind, c); },
-          spec.capabilities);
+          std::string(spec.name),
+          [kind = spec.kind, id = std::string(spec.name)](const auto& c) {
+            if (ParametersFor(c.local_controllers, id).empty()) {
+              return Controller(kind, c);
+            }
+            return Controller(kind, ResolveBuiltinParameters(c, id, false));
+          },
+          spec.capabilities,
+          [id = std::string(spec.name)](const auto& c, const auto& parameters) {
+            if (!parameters.empty()) {
+              static_cast<void>(ResolveBuiltinParameters(c, id, false));
+            }
+          });
     }
     return std::shared_ptr<const AlgorithmRegistry>(std::move(result));
   }();

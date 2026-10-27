@@ -6,6 +6,7 @@
 #include <stdexcept>
 
 #include "navigation2d/application/algorithm_registry.h"
+#include "navigation2d/application/navigation_configuration.h"
 #include "navigation2d/configuration/vehicle_config.h"
 #include "rclcpp/rclcpp.hpp"
 namespace navigation2d::exploration_ros {
@@ -24,12 +25,14 @@ double RequiredPositiveEnvironment(const char* name, double fallback) {
 
 void ReadSelection(rclcpp::Node& node, const std::string& prefix,
                    exploration::AlgorithmSelection& selection,
-                   const AlgorithmRegistry& algorithms) {
+                   const AlgorithmRegistry& algorithms, const NavigationConfig& scoped) {
   selection.global =
       node.declare_parameter<std::string>(prefix + ".global_planner", selection.global);
   selection.local =
       node.declare_parameter<std::string>(prefix + ".local_controller", selection.local);
-  NavigationConfig validation;
+  selection.global_parameters = scoped.global_planners;
+  selection.local_parameters = scoped.local_controllers;
+  NavigationConfig validation = scoped;
   validation.planner = selection.global;
   validation.controller = selection.local;
   algorithms.Validate(validation);
@@ -62,9 +65,12 @@ ExplorerParameters ReadExplorerParameters(rclcpp::Node& node, const AlgorithmReg
           .string();
   parameters.max_duration_s = RequiredPositiveEnvironment("SWEEPNAV_EXPLORATION_TIMEOUT", 600.);
   parameters.simulation_speed = RequiredPositiveEnvironment("SWEEPNAV_SIMULATION_SPEED", 1.);
-  ReadSelection(node, "explore", parameters.navigation_profiles.explore, algorithms);
-  ReadSelection(node, "entry", parameters.navigation_profiles.entry, algorithms);
-  ReadSelection(node, "return", parameters.navigation_profiles.returning, algorithms);
+  const auto parameter_file = node.declare_parameter<std::string>("algorithm_parameters_file", "");
+  const auto scoped = parameter_file.empty() ? NavigationConfig{}
+                                            : LoadNavigationConfig(parameter_file, algorithms);
+  ReadSelection(node, "explore", parameters.navigation_profiles.explore, algorithms, scoped);
+  ReadSelection(node, "entry", parameters.navigation_profiles.entry, algorithms, scoped);
+  ReadSelection(node, "return", parameters.navigation_profiles.returning, algorithms, scoped);
   return parameters;
 }
 }  // namespace navigation2d::exploration_ros

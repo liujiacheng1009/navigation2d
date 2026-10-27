@@ -53,13 +53,13 @@ navigation2d_library(navigation2d_algorithm_registry application/algorithm_regis
 navigation2d_library(navigation2d_builtin_algorithms
   application/builtin_algorithms.cc planning/planner_factory.cc)
 target_link_libraries(navigation2d_builtin_algorithms PUBLIC
-  navigation2d_algorithm_registry navigation2d_control navigation2d_planning)
+  navigation2d_algorithm_registry navigation2d_control navigation2d_planning navigation2d_configuration)
 
 navigation2d_library(navigation2d_configuration
   application/navigation_config.cc application/navigation_configuration.cc
   configuration/navigation_yaml.cc configuration/planning_yaml.cc configuration/control_yaml.cc
   configuration/safety_yaml.cc configuration/navigation_validation.cc configuration/vehicle_config.cc
-  configuration/grid_file.cc)
+  configuration/grid_file.cc configuration/builtin_parameters.cc)
 target_link_libraries(navigation2d_configuration PUBLIC
   navigation2d_algorithm_registry navigation2d_costmap PRIVATE yaml-cpp)
 

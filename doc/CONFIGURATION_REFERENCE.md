@@ -6,6 +6,43 @@
 错误类型和不支持的算法名称均立即失败。配置不支持 include、环境变量或隐藏覆盖。机型尺寸和探索距离也在这份文件里，
 见文末 `robot` 与 `exploration`。
 
+## 按算法隔离的可选参数
+
+现有完整 YAML 仍然有效。可额外增加两个可选 mapping；内部每个算法只写要覆盖的标量参数：
+
+```yaml
+global_planners:
+  state_lattice:
+    yaw_bins: 48
+    allow_reverse: true
+local_controllers:
+  rpp:
+    lookahead_time: 2.0
+  dwa:
+    horizon: 1.2
+    linear_samples: 12
+```
+
+优先级为：公共/旧版配置 → 所选算法自己的命名空间。DWA 的 `horizon` 不会进入 RPP，
+state_lattice 的选项不会进入 A*。内置字段名沿用下文相应旧段落；RPP 使用 `controller`
+中的跟踪字段，但公共 `max_reverse_velocity`、`max_angular_velocity`、加速度限制和
+`control_period` 不允许在算法段覆盖。圆/多边形、地图和安全层设置仍归公共配置所有。
+Dijkstra/A*/Theta* 当前没有单独标量选项，非空选项会被拒绝。
+
+命名空间、重复 ID/键、未知字段、非标量值、非有限数和类型/范围错误在创建后端前拒绝；
+整数不接受小数，bool 使用 `true`/`false`。所有已配置命名空间都校验，包括本次未选中的算法。
+外部算法使用 `LoadNavigationConfig(file, registry)` 与自己的注册表；
+`RegisterTypedPlanner`/`RegisterTypedController` 的解析器接收公共配置和本算法标量表，
+返回算法专用类型并负责未知键、必填项和交叉约束。工厂只接收该类型，不能在校验回调构建后端。
+旧工厂若没有参数描述器，只接受空参数表，避免静默忽略配置。
+
+自由探索可通过 ROS 启动参数 `algorithm_parameters_file` 指定一份完整导航 YAML，
+只把其中两个命名空间带入 explore/entry/return 用途；原有探索的地图、安全和速度策略不受该文件
+旧段落覆盖。用途的算法选择仍由 `explore.global_planner` 等参数控制。默认空路径保持原策略。
+程序内 `AlgorithmSelection` 也可分别携带两个参数集合，`BuildNavigationProfile` 保留这些集合。
+配置启动后固定，不提供行驶中热切换。当前内置算法仍由兼容适配器转换至旧构造配置，
+外部新算法可以直接使用自己的类型化配置；这不等于结果/取消契约已经补齐。
+
 ## `selection`
 
 - `planner`：`dijkstra`、`astar`、`theta_star`、`state_lattice`。

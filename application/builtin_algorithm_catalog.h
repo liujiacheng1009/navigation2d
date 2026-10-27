@@ -22,13 +22,13 @@ inline constexpr std::array<PlannerSpec, 4> kPlanners{{
     {"dijkstra", PlannerId::kDijkstra, {}},
     {"astar", PlannerId::kAStar, {}},
     {"theta_star", PlannerId::kThetaStar, {false, false, true}},
-    {"state_lattice", PlannerId::kStateLattice, {true, true, true}},
+    {"state_lattice", PlannerId::kStateLattice, {true, true, true, true}},
 }};
 inline constexpr std::array<ControllerSpec, 4> kControllers{{
-    {"rpp", ControllerId::kRpp, {}},
-    {"dwa", ControllerId::kDwa, {}},
-    {"mppi", ControllerId::kMppi, {}},
-    {"mpc", ControllerId::kMpc, {true, true}},
+    {"rpp", ControllerId::kRpp, {false, false, false, true}},
+    {"dwa", ControllerId::kDwa, {false, false, false, true}},
+    {"mppi", ControllerId::kMppi, {false, false, true, true}},
+    {"mpc", ControllerId::kMpc, {true, true, true, true}},
 }};
 constexpr bool HasPlanner(std::string_view name) noexcept {
   for (const auto& spec : kPlanners) {

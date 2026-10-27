@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Eigen/Core>
+#include "navigation2d/configuration/algorithm_parameters.h"
 #include <string>
 #include <vector>
 
@@ -8,6 +9,8 @@ namespace navigation2d {
 
 struct NavigationConfig {
   static NavigationConfig Load(const std::string& filename);
+  AlgorithmParameterSets global_planners;
+  AlgorithmParameterSets local_controllers;
   std::string planner = "dijkstra";
   std::string controller = "rpp";
   double map_resolution = .03;

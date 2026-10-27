@@ -40,6 +40,11 @@ int main() {
   auto custom = BuildNavigationProfile({}, {"custom_global", "custom_local"});
   Require(custom.planner == "custom_global" && custom.controller == "custom_local");
 
+  profiles.explore.local_parameters["rpp"]["lookahead_time"] = "2.5";
+  const auto scoped_profile = BuildNavigationProfile({}, profiles.explore);
+  Require(scoped_profile.local_controllers.at("rpp").at("lookahead_time") == "2.5");
+  Require(BuildNavigationProfile({}, profiles.entry).local_controllers.empty());
+
   ExplorationGrid map{40, 30, .1, -1., -1., std::vector<std::int8_t>(1200, -1)};
   auto index = [&](double x, double y) {
     return static_cast<int>(std::floor((y - map.origin_y) / map.resolution)) * map.width +

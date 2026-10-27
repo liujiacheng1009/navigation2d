@@ -1,11 +1,14 @@
 #include "navigation2d/ros/exploration/explorer_parameters.h"
 
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "navigation2d/application/algorithm_registry.h"
+#include "navigation2d/test/temporary_directory.h"
 #include "rclcpp/rclcpp.hpp"
 namespace {
 void Require(bool value) {
@@ -20,7 +23,8 @@ int main(int argc, char** argv) {
   const std::string mode = argc > 1 ? argv[1] : "normal";
   Require(mode == "normal" || mode == "defaults" || mode == "ground_truth" ||
           mode == "invalid_pose" || mode == "invalid_timeout" || mode == "invalid_speed" ||
-          mode == "unknown_algorithm" || mode == "unknown_controller" || mode == "custom_registry");
+          mode == "unknown_algorithm" || mode == "unknown_controller" ||
+          mode == "custom_registry" || mode == "scoped_algorithms" || mode == "invalid_scoped");
   if (argc > 1) {
     --argc;
     ++argv;
@@ -38,7 +42,7 @@ int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
   const bool failure_expected = mode == "invalid_pose" || mode == "invalid_timeout" ||
                                 mode == "invalid_speed" || mode == "unknown_algorithm" ||
-                                mode == "unknown_controller";
+                                mode == "unknown_controller" || mode == "invalid_scoped";
   bool rejected = false;
   try {
     rclcpp::NodeOptions options;
@@ -55,6 +59,16 @@ int main(int argc, char** argv) {
     if (mode == "custom_registry") {
       overrides.emplace_back("explore.global_planner", "custom_global");
       overrides.emplace_back("explore.local_controller", "custom_local");
+    }
+    test::TemporaryDirectory temporary;
+    if (mode == "scoped_algorithms" || mode == "invalid_scoped") {
+      const auto file = temporary.path() / "algorithms.yaml";
+      std::filesystem::copy_file("/opt/sweepnav/navigation2d/config/navigation2d.yaml", file);
+      std::ofstream output(file, std::ios::app);
+      output << "\nlocal_controllers:\n  rpp:\n    lookahead_time: "
+             << (mode == "invalid_scoped" ? "nan" : "2.5") << "\n";
+      output.close();
+      overrides.emplace_back("algorithm_parameters_file", file.string());
     }
     options.parameter_overrides(overrides);
     auto node = std::make_shared<rclcpp::Node>("explorer_parameters_test", options);
@@ -90,6 +104,11 @@ int main(int argc, char** argv) {
               (mode == "custom_registry" ? "custom_local" : "rpp"));
       Require(parameters.navigation_profiles.entry.global == "astar");
       Require(parameters.navigation_profiles.returning.global == "theta_star");
+      if (mode == "scoped_algorithms") {
+        const auto profile =
+            exploration::BuildNavigationProfile({}, parameters.navigation_profiles.explore);
+        Require(profile.local_controllers.at("rpp").at("lookahead_time") == "2.5");
+      }
       const auto config = ReadExplorerConfig(*node);
       Require(config.minimum_frontier_cells == 6 && config.cover_residuals);
     }

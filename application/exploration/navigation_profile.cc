@@ -19,6 +19,8 @@ const AlgorithmSelection& NavigationProfiles::For(NavigationPurpose purpose) con
 NavigationConfig BuildNavigationProfile(const NavigationProfileRequest& request,
                                         const AlgorithmSelection& algorithms) {
   navigation2d::NavigationConfig config;
+  config.global_planners = algorithms.global_parameters;
+  config.local_controllers = algorithms.local_parameters;
   config.map_resolution = request.resolution;
   // Grid search stays inside the explorer Tick budget.  The SE(2) lattice
   // plus its obstacle heuristic can allocate a yaw-binned graph the size of
