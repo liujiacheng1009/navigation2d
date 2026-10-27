@@ -69,7 +69,7 @@ void AlgorithmRegistry::Validate(const NavigationConfig& config,
   if ((requirements.dynamic_predictions && !capabilities.dynamic_predictions) ||
       (requirements.guidance_candidates && !capabilities.guidance_candidates) ||
       (requirements.reverse_paths && (!planners_.at(config.planner).capabilities.reverse_paths ||
-                                      !capabilities.reverse_tracking)) ||
+                                      !capabilities.reverse_tracking || !capabilities.body_heading_paths)) ||
       (requirements.in_place_rotation && !capabilities.in_place_rotation)) {
     throw std::invalid_argument("algorithm combination lacks required capability: " +
                                 config.controller);
@@ -122,4 +122,9 @@ PlannerCapabilities AlgorithmRegistry::PlannerTraits(const std::string& id) cons
   return found->second.capabilities;
 }
 
+ControllerCapabilities AlgorithmRegistry::ControllerTraits(const std::string& id) const {
+  const auto found = controllers_.find(id);
+  if (found == controllers_.end()) { throw std::runtime_error("unknown controller: " + id); }
+  return found->second.capabilities;
+}
 }  // namespace navigation2d

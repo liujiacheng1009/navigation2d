@@ -273,9 +273,12 @@ class AutonomousExplorer final : public rclcpp::Node,
          .home_goal = home_goal},
         parameters_.navigation_profiles.For(purpose));
     try {
-      navigation_.Begin(config, planning_map_.path(), navigation2d::MakePose2d(
-          goal.x - planning_map_.origin_x(), goal.y - planning_map_.origin_y(), goal.yaw),
-          route_failures_.CooledSignatures());
+      navigation_.Begin(
+          config, planning_map_.path(),
+          navigation2d::MakePose2d(goal.x - planning_map_.origin_x(),
+                                   goal.y - planning_map_.origin_y(), goal.yaw),
+          route_failures_.CooledSignatures(),
+          {.heading_policy = parameters_.navigation_profiles.For(purpose).heading_policy});
       reported_recoveries_ = 0;
       // Do not commit active_goal_/returning_/recovery_ until the plan is
       // accepted. Early assign left ghost GOALs outside painted free and kept

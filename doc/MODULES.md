@@ -17,7 +17,9 @@ exploration、configuration、algorithm_registry 与探索应用/输出已有独
 
 ## application
 
-- `navigation_system.h/.cc`：唯一产品编排入口；拥有 costmap、planner、controller、目标和调度状态。
+- `navigation_system.h/.cc`：产品编排入口；拥有 costmap、目标和调度状态，组合后端会话与安全链；具体执行阶段仍待继续分离。
+- `navigation_algorithms.*`：独立拥有注册表、规划/控制实例与能力快照，准备路线、重置控制器及执行受校验的请求，配置只读借用。
+- `navigation_execution_options.h`：每个导航实例的局部地图帧及朝向处理策略；默认保留原前进投影，可显式保留后端车体朝向。
 - `application/navigation_config.h`：旧 include 兼容入口；值定义在 `configuration/navigation_config.h`。
 - `navigation_config.cc`：内置选择的兼容加载入口；分组 YAML 解析、范围检查与参数描述在 `configuration/`。
 - `typed_algorithm_registration.h`：外部算法专用配置解析/校验与工厂接入，不构建后端来验证参数。
@@ -57,11 +59,12 @@ exploration、configuration、algorithm_registry 与探索应用/输出已有独
 - `grid_search.*`：三种策略共享的网格搜索基础设施，不解析配置字符串。
 - `planner_factory.*`：旧工厂兼容入口，委托 `application/algorithm_registry.*`。
 - `path_geometry.*`、`route_identity.*`、`path_metrics.*`：导航路线的几何、身份与指标。
-  `DensifyRoute` 与 grid_search 的 `DensifyPath` 保持各自原有零长度段/朝向语义。
+  `path_resampling.*` 保留原 `DensifyRoute`，另有保留车体朝向、倒车和零平移旋转段的采样；保留模式不会进入切线平滑器。
+  默认旧 Plan 适配器可使用历史投影，新请求后端的车体朝向不能被静默抹除。
 
 ## control
 
-- `local_controller.h`、`controller_contract.cc`：保留旧 `Compute`，新增 `ComputeRequest`/`ComputeWithContext`；区分有效零速、刻意停止、不可行、取消、预算、输入/输出和后端错误。错误及取消不能携带运动，NaN/Inf 和“停止却返回运动”被拒绝。接口边界已实现，NavigationSystem 调用链迁移另行验收。
+- `local_controller.h`、`controller_contract.cc`：保留旧 `Compute`，新增 `ComputeRequest`/`ComputeWithContext`；区分有效零速、刻意停止、不可行、取消、预算、输入/输出和后端错误。错误及取消不能携带运动，NaN/Inf 和“停止却返回运动”被拒绝。NavigationSystem 与探索 NavigationSession 已接入该边界；故障锁存直到显式新目标，取消清除目标，单次预算耗尽返回零速并保留可重试会话。
 - `depth_observation.*`：世界帧深度轨迹、消失保持与时间过期的唯一状态所有者。
 - `collision_monitor_geometry.*`：通道/外形、点相交和速度积分的无状态几何。
 - `regulated_pure_pursuit.*`：路径跟踪、曲率/代价调速、加速度限制和前向碰撞预测。

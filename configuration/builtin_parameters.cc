@@ -142,9 +142,11 @@ NavigationConfig ResolveBuiltinParameters(const NavigationConfig& common, const 
   }
   if (!parameters.empty()) {
     configuration_detail::ValidateNavigationBounds(result);
-    if (result.desired_linear_velocity <= 0. || result.max_angular_velocity <= 0. ||
-        result.max_linear_acceleration <= 0. || result.max_angular_acceleration <= 0. ||
-        result.max_reverse_velocity < 0. || result.min_lookahead_distance <= 0. ||
+    if (result.desired_linear_velocity <= 0. ||
+        result.desired_linear_velocity > common.desired_linear_velocity ||
+        result.max_angular_velocity <= 0. || result.max_linear_acceleration <= 0. ||
+        result.max_angular_acceleration <= 0. || result.max_reverse_velocity < 0. ||
+        result.min_lookahead_distance <= 0. ||
         result.max_lookahead_distance < result.min_lookahead_distance ||
         result.lookahead_time <= 0.) {
       throw std::invalid_argument("invalid algorithm motion bounds: " + id);

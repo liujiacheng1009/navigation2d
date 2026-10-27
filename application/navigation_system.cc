@@ -15,10 +15,12 @@
 #include "navigation2d/application/command_safety_pipeline.h"
 #include "navigation2d/application/docking_servo.h"
 #include "navigation2d/application/execution_watchdog.h"
+#include "navigation2d/application/navigation_algorithms.h"
 #include "navigation2d/application/navigation_failure.h"
 #include "navigation2d/application/route_preparation.h"
 #include "navigation2d/control/collision_monitor.h"
 #include "navigation2d/costmap/grid_2d.h"
+#include "navigation2d/costmap/coordinate_validation.h"
 #include "navigation2d/costmap/layered_costmap.h"
 #include "navigation2d/planning/collision_checker.h"
 #include "navigation2d/planning/global_planner.h"
@@ -46,13 +48,11 @@ double EffectivePlanningRadius(const NavigationConfig& config, const LayeredCost
 class NavigationSystem::Impl {
  public:
   Impl(NavigationConfig value, const std::string& map_path,
-       std::shared_ptr<const AlgorithmRegistry> registry)
+       std::shared_ptr<const AlgorithmRegistry> registry, NavigationExecutionOptions options)
       : config(std::move(value)),
-        algorithms(std::move(registry)),
+        execution_options(std::move(options)),
         costmap(Grid2d::Load(map_path), config),
-        planner(algorithms->CreatePlanner(config)),
-        controller(algorithms->CreateController(config)),
-        planner_traits(algorithms->PlannerTraits(config.planner)),
+        algorithms(config, std::move(registry)),
         safety(config),
         docking({config.goal_xy_tolerance, config.goal_yaw_tolerance,
                  config.max_linear_acceleration, config.max_angular_acceleration,
@@ -64,22 +64,25 @@ class NavigationSystem::Impl {
     }
   }
 
-  void Replan(const Pose2d& pose) {
+  void Replan(const Pose2d& pose, const AlgorithmBudget& budget) {
     ++state.replans;
     try {
       const auto planning_started = std::chrono::steady_clock::now();
-      auto prepared = PrepareRoute(*planner, costmap, config, planner_traits,
-                                   {pose, *goal, banned_path_signatures});
+      auto prepared = algorithms.Prepare(
+          costmap, {pose, *goal, banned_path_signatures, execution_options.frame_id, budget,
+                    execution_options.heading_policy});
       path = std::move(prepared.path);
+      metadata = std::move(prepared.metadata);
       state.path_signature = prepared.signature;
       // Keep Theta* long chords when they stay footprint-valid. Narrow-door
       // entry uses a tighter radius / A*, not a planner swap for a few
       // centimetres of clearance (that made sawtooth GLOBAL).
       // A replan is a new ordered route contract. Reset the controller's
       // internal projection state even when the new path has similar endpoints.
-      controller = algorithms->CreateController(config);
-      state.global_planning = planner->Diagnostics();
+      algorithms.ResetController();
+      state.global_planning = algorithms.PlanningDiagnostics();
       state.planning_failure_reason.clear();
+      state.planning_status = GlobalPlanStatus::kSuccess;
       const double planning_elapsed =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - planning_started)
               .count();
@@ -107,17 +110,58 @@ class NavigationSystem::Impl {
       execution.NewRoute();
       planning_failures = 0;
       state.status = NavigationStatus::kNavigating;
+    } catch (const RoutePlanningError& error) {
+      RejectPlanning(error.status(), error.what());
     } catch (const std::runtime_error& error) {
-      path.clear();
-      state.command = {};
-      state.path_signature = 0;
-      execution.PlanningFailed();
-      state.planning_failure_reason = error.what();
-      ++planning_failures;
-      state.status = planning_failures > config.max_recovery_attempts
-                         ? NavigationStatus::kBlocked
-                         : NavigationStatus::kNavigating;
+      RejectPlanning(GlobalPlanStatus::kNoPath, error.what());
     }
+  }
+
+  void StopAlgorithm(AlgorithmStop stop) {
+    state.algorithm_stop = stop;
+    state.command = {};
+    state.requested_command = {};
+    state.published_command = {};
+    state.controller_commanded_motion = false;
+    state.planning_failure_reason =
+        stop == AlgorithmStop::kCancelled ? "navigation cancelled" : "navigation budget exceeded";
+    if (stop == AlgorithmStop::kCancelled) {
+      goal.reset();
+      path.clear();
+      state.path_signature = 0;
+      algorithm_fault_latched = false;
+      state.status = NavigationStatus::kIdle;
+    } else {
+      state.status = algorithm_fault_latched
+                         ? NavigationStatus::kBlocked
+                         : (goal ? NavigationStatus::kNavigating : NavigationStatus::kIdle);
+    }
+  }
+
+  void RejectPlanning(GlobalPlanStatus status, const std::string& reason) {
+    path.clear();
+    state.command = {};
+    state.path_signature = 0;
+    state.planning_status = status;
+    state.planning_failure_reason = reason;
+    if (status == GlobalPlanStatus::kCancelled || status == GlobalPlanStatus::kBudgetExceeded) {
+      StopAlgorithm(status == GlobalPlanStatus::kCancelled ? AlgorithmStop::kCancelled
+                                                           : AlgorithmStop::kBudgetExceeded);
+      return;
+    }
+    if (status == GlobalPlanStatus::kInvalidInput || status == GlobalPlanStatus::kInvalidOutput ||
+        status == GlobalPlanStatus::kBackendError) {
+      algorithm_fault_latched = true;
+      state.published_command = {};
+      state.requested_command = {};
+      state.controller_commanded_motion = false;
+      state.status = NavigationStatus::kBlocked;
+      return;
+    }
+    execution.PlanningFailed();
+    ++planning_failures;
+    state.status = planning_failures > config.max_recovery_attempts ? NavigationStatus::kBlocked
+                                                                    : NavigationStatus::kNavigating;
   }
 
   bool ApplyFailure(NavigationFailure failure) {
@@ -145,13 +189,13 @@ class NavigationSystem::Impl {
   }
 
   NavigationConfig config;
-  std::shared_ptr<const AlgorithmRegistry> algorithms;
+  NavigationExecutionOptions execution_options;
   LayeredCostmap costmap;
-  std::unique_ptr<GlobalPlanner> planner;
-  std::unique_ptr<LocalController> controller;
-  PlannerCapabilities planner_traits;
+  NavigationAlgorithms algorithms;
+  PlannedPathMetadata metadata;
   CommandSafetyPipeline safety;
   std::optional<Pose2d> goal;
+  bool algorithm_fault_latched = false;
   Path path;
   NavigationState state;
   bool observation_changed = false;
@@ -166,23 +210,37 @@ NavigationSystem::NavigationSystem(NavigationConfig config, const std::string& m
     : NavigationSystem(std::move(config), map_path, AlgorithmRegistry::Builtins()) {}
 
 NavigationSystem::NavigationSystem(NavigationConfig config, const std::string& map_path,
-                                   std::shared_ptr<const AlgorithmRegistry> algorithms) {
+                                   std::shared_ptr<const AlgorithmRegistry> algorithms)
+    : NavigationSystem(std::move(config), map_path, std::move(algorithms), {}) {}
+
+NavigationSystem::NavigationSystem(NavigationConfig config, const std::string& map_path,
+                                   std::shared_ptr<const AlgorithmRegistry> algorithms,
+                                   NavigationExecutionOptions options) {
+  if (options.frame_id.empty()) {
+    throw std::invalid_argument("empty navigation frame");
+  }
   if (!algorithms) {
     throw std::invalid_argument("null algorithm registry");
   }
   algorithms->Validate(config);
-  impl_ = std::make_unique<Impl>(std::move(config), map_path, std::move(algorithms));
+  impl_ = std::make_unique<Impl>(std::move(config), map_path, std::move(algorithms),
+                                 std::move(options));
 }
 NavigationSystem::~NavigationSystem() = default;
 NavigationSystem::NavigationSystem(NavigationSystem&&) noexcept = default;
 NavigationSystem& NavigationSystem::operator=(NavigationSystem&&) noexcept = default;
 
 const Path& NavigationSystem::path() const { return impl_->path; }
+const PlannedPathMetadata& NavigationSystem::path_metadata() const {
+  static const PlannedPathMetadata empty;
+  return impl_->path.empty() ? empty : impl_->metadata;
+}
 const std::string& NavigationSystem::planner_id() const { return impl_->config.planner; }
 const std::string& NavigationSystem::controller_id() const { return impl_->config.controller; }
 
 void NavigationSystem::SetGoal(Pose2d goal) {
   impl_->goal = goal;
+  impl_->algorithm_fault_latched = false;
   impl_->path.clear();
   impl_->state.status = NavigationStatus::kNavigating;
   impl_->state.global_path_length_m = 0.;
@@ -199,6 +257,9 @@ void NavigationSystem::SetGoal(Pose2d goal) {
   impl_->state.collision_monitor_action = CollisionMonitorAction::kNone;
   impl_->state.planning_failure_reason.clear();
   impl_->state.path_signature = 0;
+  impl_->state.planning_status = GlobalPlanStatus::kNotRun;
+  impl_->state.control_status = LocalControlStatus::kNotRun;
+  impl_->state.algorithm_stop = AlgorithmStop::kNone;
 }
 
 void NavigationSystem::BanPathSignatures(std::vector<std::uint64_t> signatures) {
@@ -242,11 +303,49 @@ void NavigationSystem::UpdateDynamicObstacles(std::vector<PredictedObstacle> obs
 }
 
 void NavigationSystem::UpdateGuidanceCandidates(std::vector<GuidanceCandidate> candidates) {
-  impl_->controller->SetGuidanceCandidates(std::move(candidates));
+  impl_->algorithms.SetGuidance(std::move(candidates));
 }
 
 NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d measured_velocity,
                                                  double timestamp) {
+  return ComputeCommand(pose, measured_velocity, timestamp, {});
+}
+
+NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d measured_velocity,
+                                                 double timestamp, const AlgorithmBudget& budget) {
+  impl_->state.algorithm_stop = AlgorithmStop::kNone;
+  if (const auto stop = budget.Check(); stop != AlgorithmStop::kNone) {
+    impl_->StopAlgorithm(stop);
+    return impl_->state;
+  }
+  if (impl_->algorithm_fault_latched) {
+    return impl_->state;
+  }
+  impl_->state.control_status = LocalControlStatus::kNotRun;
+  if (!costmap_internal::IndexablePose(impl_->costmap.grid(), pose) || !std::isfinite(timestamp)) {
+    impl_->state.command = {};
+    impl_->state.requested_command = {};
+    impl_->state.published_command = {};
+    impl_->state.controller_commanded_motion = false;
+    impl_->state.status = NavigationStatus::kBlocked;
+    impl_->state.control_status = LocalControlStatus::kInvalidInput;
+    impl_->state.planning_failure_reason = "invalid navigation pose or timestamp";
+    return impl_->state;
+  }
+  if (impl_->state.planning_failure_reason == "invalid navigation pose or timestamp") {
+    impl_->state.planning_failure_reason.clear();
+  }
+  auto result = ComputeCommandCycle(pose, measured_velocity, timestamp, budget);
+  if (const auto stop = budget.Check(); stop != AlgorithmStop::kNone) {
+    impl_->StopAlgorithm(stop);
+    return impl_->state;
+  }
+  return result;
+}
+
+NavigationState NavigationSystem::ComputeCommandCycle(const Pose2d& pose, Twist2d measured_velocity,
+                                                      double timestamp,
+                                                      const AlgorithmBudget& budget) {
   // Treat odometry as a measured input, not an unlimited control state. Some
   // simulator diff-drive backends emit a one-sample angular derivative across
   // yaw wrapping (observed at >120 rad/s). Feeding that value into acceleration
@@ -280,7 +379,7 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
   // footprint-illegal, drop it immediately so we never keep publishing a
   // path that cuts through newly observed walls/specks.
   if (!impl_->path.empty()) {
-    const double planning_radius = impl_->planner_traits.owns_smoothing
+    const double planning_radius = impl_->algorithms.planner_traits().owns_smoothing
                                        ? impl_->config.robot_radius
                                        : EffectivePlanningRadius(impl_->config, impl_->costmap);
     if (!PathFootprintValid(impl_->path, impl_->costmap, planning_radius)) {
@@ -291,7 +390,7 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
     }
   }
   if (impl_->path.empty()) {
-    impl_->Replan(pose);
+    impl_->Replan(pose, budget);
     impl_->observation_changed = false;
     impl_->execution.PlanningAttempted(timestamp);
   }
@@ -305,7 +404,8 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
   // A centimetre-scale SE(2) docking pose is not a short global path. Switch
   // to a dedicated pose servo before the remaining polyline becomes smaller
   // than RPP's lookahead and its progress coordinate loses useful meaning.
-  if (precision_goal && goal_distance <= .30) {
+  const bool body_heading_route = impl_->metadata.headings == PathHeadingSemantics::kBodyHeading;
+  if (precision_goal && goal_distance <= .30 && !body_heading_route) {
     impl_->state.phase = NavigationPhase::kDockToGoal;
     const auto servo =
         impl_->docking.Advance(pose, *impl_->goal, goal_distance, impl_->state.published_command);
@@ -353,13 +453,16 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
       impl_->state.status = NavigationStatus::kSucceeded;
       return impl_->state;
     }
-    const double target = std::clamp(2. * yaw_error, -impl_->config.max_angular_velocity,
-                                     impl_->config.max_angular_velocity);
-    const double max_delta = impl_->config.max_angular_acceleration * impl_->config.control_period;
-    impl_->state.command = {0., std::clamp(target, measured_velocity.angular - max_delta,
-                                           measured_velocity.angular + max_delta)};
-    impl_->state.status = NavigationStatus::kNavigating;
-    return impl_->state;
+    if (!body_heading_route) {
+      const double target = std::clamp(2. * yaw_error, -impl_->config.max_angular_velocity,
+                                       impl_->config.max_angular_velocity);
+      const double max_delta =
+          impl_->config.max_angular_acceleration * impl_->config.control_period;
+      impl_->state.command = {0., std::clamp(target, measured_velocity.angular - max_delta,
+                                             measured_velocity.angular + max_delta)};
+      impl_->state.status = NavigationStatus::kNavigating;
+      return impl_->state;
+    }
   }
   // Translating in a circle is not navigation progress.  Measure progress in
   // the path's arc-length coordinate instead of straight-line distance to the
@@ -369,7 +472,10 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
   impl_->state.path_progress_m = path_progress;
   if (impl_->state.phase == NavigationPhase::kAlignToPath && impl_->path.size() >= 2) {
     const auto tangent = impl_->path[1].translation() - impl_->path[0].translation();
-    const double heading_error = NormalizeAngle(std::atan2(tangent.y(), tangent.x()) - Yaw(pose));
+    const double target_heading = impl_->metadata.headings == PathHeadingSemantics::kBodyHeading
+                                      ? Yaw(impl_->path.front())
+                                      : std::atan2(tangent.y(), tangent.x());
+    const double heading_error = NormalizeAngle(target_heading - Yaw(pose));
     const double alignment_score = std::abs(heading_error) + DistanceToPath(impl_->path, pose);
     if (impl_->execution.ObserveAlignment(alignment_score, heading_error, path_progress,
                                           timestamp)) {
@@ -436,11 +542,42 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
     double route_heading_error = 0.;
     if (impl_->path.size() >= 2) {
       const auto tangent = impl_->path[1].translation() - impl_->path[0].translation();
-      route_heading_error = NormalizeAngle(std::atan2(tangent.y(), tangent.x()) - Yaw(pose));
+      const double target_heading = impl_->metadata.headings == PathHeadingSemantics::kBodyHeading
+                                        ? Yaw(impl_->path.front())
+                                        : std::atan2(tangent.y(), tangent.x());
+      route_heading_error = NormalizeAngle(target_heading - Yaw(pose));
     }
     const auto solve_started = std::chrono::steady_clock::now();
-    command = impl_->controller->Compute(impl_->path, pose, measured_velocity, impl_->costmap,
-                                         impl_->safety.predictions());
+    auto computed =
+        impl_->algorithms.Compute({impl_->path, pose, measured_velocity, impl_->costmap,
+                                   impl_->safety.predictions(), budget, &impl_->metadata});
+    impl_->state.control_status = computed.status;
+    if (!computed.has_command()) {
+      impl_->state.controller_solve_us = std::chrono::duration<double, std::micro>(
+                                             std::chrono::steady_clock::now() - solve_started)
+                                             .count();
+      impl_->state.controller_diagnostics = computed.diagnostics.value_or(ControllerDiagnostics{});
+      if (!computed.diagnostics) {
+        impl_->state.controller_diagnostics.status = ControllerSolveStatus::kFailure;
+      }
+      impl_->state.command = {};
+      impl_->state.requested_command = {};
+      impl_->state.published_command = {};
+      impl_->state.controller_commanded_motion = false;
+      if (computed.status == LocalControlStatus::kCancelled ||
+          computed.status == LocalControlStatus::kBudgetExceeded) {
+        impl_->StopAlgorithm(computed.status == LocalControlStatus::kCancelled
+                                 ? AlgorithmStop::kCancelled
+                                 : AlgorithmStop::kBudgetExceeded);
+      } else {
+        impl_->algorithm_fault_latched = true;
+        impl_->state.status = NavigationStatus::kBlocked;
+      }
+      impl_->state.planning_failure_reason =
+          computed.reason.empty() ? "controller produced no valid command" : computed.reason;
+      return impl_->state;
+    }
+    command = computed.command;
     impl_->state.requested_command = command;
     impl_->state.controller_commanded_motion =
         std::abs(command.linear) > 1e-4 || std::abs(command.angular) > 1e-4;
@@ -448,7 +585,7 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
     impl_->state.controller_solve_us =
         std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - solve_started)
             .count();
-    impl_->state.controller_diagnostics = impl_->controller->Diagnostics();
+    impl_->state.controller_diagnostics = *computed.diagnostics;
     if (impl_->state.controller_diagnostics.solve_us <= 0.) {
       impl_->state.controller_diagnostics.solve_us = impl_->state.controller_solve_us;
     }

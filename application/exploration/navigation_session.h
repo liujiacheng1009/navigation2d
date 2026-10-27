@@ -11,7 +11,16 @@
 namespace navigation2d::exploration {
 
 enum class SessionStage { kEmpty, kPreparing, kReady, kActive };
-enum class InitialPlanFailure { kNone, kNoRoute, kStartOccupied, kGoalOccupied };
+enum class InitialPlanFailure {
+  kNone,
+  kNoRoute,
+  kStartOccupied,
+  kGoalOccupied,
+  kCancelled,
+  kBudgetExceeded,
+  kInvalidInput,
+  kBackendError
+};
 enum class Cancellation { kNoSession, kDiscardedPreparation, kStoppedActive };
 
 struct InitialPlanResult {
@@ -41,12 +50,19 @@ class NavigationSession {
 
   void Begin(const NavigationConfig& config, const std::string& map_path, Pose2d goal,
              std::vector<std::uint64_t> banned_signatures);
+  void Begin(const NavigationConfig& config, const std::string& map_path, Pose2d goal,
+             std::vector<std::uint64_t> banned_signatures, NavigationExecutionOptions options);
   [[nodiscard]] InitialPlanResult Probe(const Pose2d& pose, Twist2d measured_velocity,
                                         double timestamp);
+  [[nodiscard]] InitialPlanResult Probe(const Pose2d& pose, Twist2d measured_velocity,
+                                        double timestamp, const AlgorithmBudget& budget);
   void Accept();
   Cancellation Cancel() noexcept;
   [[nodiscard]] NavigationState Step(const Pose2d& pose, Twist2d measured_velocity,
                                      double timestamp);
+  [[nodiscard]] NavigationState Step(const Pose2d& pose, Twist2d measured_velocity,
+                                     double timestamp, const AlgorithmBudget& budget);
+  const PlannedPathMetadata& path_metadata() const;
   // Collision-only integration preserves static-map authority. Allowed during
   // preparation so Probe observes the same near-field evidence as execution.
   void UpdateCollisionScan(const Pose2d& sensor_pose, const LaserScan& scan);

@@ -43,6 +43,16 @@ Dijkstra/A*/Theta* 当前没有单独标量选项，非空选项会被拒绝。
 配置启动后固定，不提供行驶中热切换。当前内置算法仍由兼容适配器转换至旧构造配置，
 外部新算法可以直接使用自己的类型化配置；这不等于结果/取消契约已经补齐。
 
+探索用途还可显式设置 `explore.preserve_planner_heading`（entry/return 同名后缀），
+默认 false 保留旧前进投影。保留模式会保留车体 yaw、倒车及零平移旋转，并由所选控制器完成精停；
+全局/局部声明不支持的组合在启动或路线接受前拒绝。现有内置控制器允许某些负速度采样，
+但不因此声明能跟踪车体朝向倒车路径；该模式应配合明确声明支持的外部控制器使用。
+程序内同样可向 NavigationSystem/NavigationSession 传 NavigationExecutionOptions。
+普通前进切线路径仍可由所有内置控制器执行。
+
+公共运动上限由导航会话校验，算法段的期望线速度不能超过该用途的公共值。
+预算 API 使用单调墙钟截止时间/停止令牌，失败或取消不能返回运动；旧同步后端不保证能被中断。
+
 ## `selection`
 
 - `planner`：`dijkstra`、`astar`、`theta_star`、`state_lattice`。

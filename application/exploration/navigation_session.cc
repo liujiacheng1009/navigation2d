@@ -43,7 +43,12 @@ NavigationSession& NavigationSession::operator=(NavigationSession&& other) noexc
 
 void NavigationSession::Begin(const NavigationConfig& config, const std::string& map_path,
                               Pose2d goal, std::vector<std::uint64_t> banned_signatures) {
-  system_ = std::make_unique<NavigationSystem>(config, map_path, algorithms_);
+  Begin(config, map_path, goal, std::move(banned_signatures), {});
+}
+void NavigationSession::Begin(const NavigationConfig& config, const std::string& map_path,
+                              Pose2d goal, std::vector<std::uint64_t> banned_signatures,
+                              NavigationExecutionOptions options) {
+  system_ = std::make_unique<NavigationSystem>(config, map_path, algorithms_, std::move(options));
   stage_ = SessionStage::kPreparing;
   goal_ = goal;
   goal_tolerance_m_ = config.goal_xy_tolerance;
@@ -53,10 +58,36 @@ void NavigationSession::Begin(const NavigationConfig& config, const std::string&
 
 InitialPlanResult NavigationSession::Probe(const Pose2d& pose, Twist2d measured_velocity,
                                            double timestamp) {
+  return Probe(pose, measured_velocity, timestamp, {});
+}
+InitialPlanResult NavigationSession::Probe(const Pose2d& pose, Twist2d measured_velocity,
+                                           double timestamp, const AlgorithmBudget& budget) {
   if (stage() != SessionStage::kPreparing) {
     throw std::logic_error("Probe requires a preparing navigation session");
   }
-  InitialPlanResult result{system_->ComputeCommand(pose, measured_velocity, timestamp)};
+  InitialPlanResult result{system_->ComputeCommand(pose, measured_velocity, timestamp, budget)};
+  if (result.state.algorithm_stop != AlgorithmStop::kNone) {
+    result.failure = result.state.algorithm_stop == AlgorithmStop::kCancelled
+                         ? InitialPlanFailure::kCancelled
+                         : InitialPlanFailure::kBudgetExceeded;
+    if (result.failure == InitialPlanFailure::kCancelled) {
+      static_cast<void>(Cancel());
+    }
+    return result;
+  }
+  if (result.state.planning_status == GlobalPlanStatus::kInvalidInput ||
+      result.state.planning_status == GlobalPlanStatus::kInvalidOutput ||
+      result.state.control_status == LocalControlStatus::kInvalidInput ||
+      result.state.control_status == LocalControlStatus::kInvalidOutput) {
+    result.failure = InitialPlanFailure::kInvalidInput;
+    return result;
+  }
+  if (result.state.planning_status == GlobalPlanStatus::kBackendError ||
+      result.state.control_status == LocalControlStatus::kBackendError ||
+      result.state.control_status == LocalControlStatus::kInfeasible) {
+    result.failure = InitialPlanFailure::kBackendError;
+    return result;
+  }
   const double distance = std::hypot(X(goal_) - X(pose), Y(goal_) - Y(pose));
   if (distance > goal_tolerance_m_ && result.state.global_path_length_m <= 0.) {
     const auto& reason = result.state.planning_failure_reason;
@@ -92,10 +123,18 @@ Cancellation NavigationSession::Cancel() noexcept {
 
 NavigationState NavigationSession::Step(const Pose2d& pose, Twist2d measured_velocity,
                                         double timestamp) {
+  return Step(pose, measured_velocity, timestamp, {});
+}
+NavigationState NavigationSession::Step(const Pose2d& pose, Twist2d measured_velocity,
+                                        double timestamp, const AlgorithmBudget& budget) {
   if (stage() != SessionStage::kActive) {
     throw std::logic_error("Step requires an accepted navigation session");
   }
-  return system_->ComputeCommand(pose, measured_velocity, timestamp);
+  auto result = system_->ComputeCommand(pose, measured_velocity, timestamp, budget);
+  if (result.algorithm_stop == AlgorithmStop::kCancelled) {
+    static_cast<void>(Cancel());
+  }
+  return result;
 }
 
 void NavigationSession::UpdateCollisionScan(const Pose2d& sensor_pose, const LaserScan& scan) {
@@ -110,6 +149,13 @@ const Path& NavigationSession::path() const {
     throw std::logic_error("path requires a navigation session");
   }
   return system_->path();
+}
+
+const PlannedPathMetadata& NavigationSession::path_metadata() const {
+  if (!system_) {
+    throw std::logic_error("metadata requires a navigation session");
+  }
+  return system_->path_metadata();
 }
 
 SessionStage NavigationSession::stage() const noexcept {

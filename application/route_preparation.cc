@@ -14,32 +14,67 @@ using planning_internal::DensifyRoute;
 using planning_internal::FirstSegmentSignature;
 using planning_internal::PathFootprintValid;
 
-Path PlanWithFallback(GlobalPlanner& planner, const LayeredCostmap& map, double radius,
-                      PlannerCapabilities traits, const RouteRequest& request) {
+GlobalPlanResult RequirePlan(GlobalPlanner& planner, const LayeredCostmap& map,
+                             const RouteRequest& request) {
+  auto result =
+      planner.PlanWithContext({map, request.start, request.goal, request.frame_id, request.budget});
+  if (!result.succeeded()) {
+    throw RoutePlanningError(result.status,
+                             result.reason.empty() ? "global planning failed" : result.reason);
+  }
+  if (request.heading_policy == RouteHeadingPolicy::kPreservePlannerHeading &&
+      result.metadata.headings == PathHeadingSemantics::kUnspecified) {
+    throw RoutePlanningError(GlobalPlanStatus::kInvalidOutput, "planner omitted heading semantics");
+  }
+  if (request.heading_policy == RouteHeadingPolicy::kLegacyForwardProjection &&
+      result.metadata.headings == PathHeadingSemantics::kBodyHeading &&
+      !result.metadata.legacy_forward_projection_allowed) {
+    throw RoutePlanningError(GlobalPlanStatus::kInvalidInput,
+                             "body-heading path requires preservation policy");
+  }
+  const bool body = request.heading_policy == RouteHeadingPolicy::kPreservePlannerHeading &&
+                    result.metadata.headings == PathHeadingSemantics::kBodyHeading;
+  result.path = body ? planning_internal::DensifyBodyHeadingRoute(result.path, .08)
+                     : DensifyRoute(result.path, .08);
+  if (!body) {
+    result.metadata.headings = PathHeadingSemantics::kForwardTangent;
+  }
+  return result;
+}
+
+GlobalPlanResult GridPlan(const LayeredCostmap& map, double radius, const RouteRequest& request) {
+  AStarPlanner fallback(radius);
+  return RequirePlan(fallback, map, request);
+}
+
+GlobalPlanResult PlanWithFallback(GlobalPlanner& planner, const LayeredCostmap& map, double radius,
+                                  PlannerCapabilities traits, const RouteRequest& request) {
   try {
-    return DensifyRoute(planner.Plan(map, request.start, request.goal), .08);
-  } catch (const std::runtime_error&) {
-    // Preserve the lattice's existing circular-grid fallback when polygon
-    // admission rejects a route accepted by the navigation execution contract.
-    if (!traits.grid_fallback) {
+    return RequirePlan(planner, map, request);
+  } catch (const RoutePlanningError& error) {
+    // Cancellation, invalid data and late output are not no-route retries.
+    if (!traits.grid_fallback || error.status() == GlobalPlanStatus::kCancelled ||
+        error.status() == GlobalPlanStatus::kBudgetExceeded ||
+        error.status() == GlobalPlanStatus::kInvalidInput ||
+        error.status() == GlobalPlanStatus::kInvalidOutput) {
       throw;
     }
-    return DensifyRoute(AStarPlanner(radius).Plan(map, request.start, request.goal), .08);
+    return GridPlan(map, radius, request);
   }
 }
 
-Path ValidateCorners(Path path, const LayeredCostmap& map, double radius,
-                     PlannerCapabilities traits, const RouteRequest& request) {
-  if (!PathFootprintValid(path, map, radius)) {
-    // Visibility chords and densified lattice segments may cut a corner.
+GlobalPlanResult ValidateCorners(GlobalPlanResult result, const LayeredCostmap& map, double radius,
+                                 PlannerCapabilities traits, const RouteRequest& request) {
+  if (!PathFootprintValid(result.path, map, radius)) {
     if (traits.corner_grid_retry) {
-      path = DensifyRoute(AStarPlanner(radius).Plan(map, request.start, request.goal), .08);
+      result = GridPlan(map, radius, request);
     }
-    if (!PathFootprintValid(path, map, radius)) {
-      throw std::runtime_error("planned path failed dense footprint validation");
+    if (!PathFootprintValid(result.path, map, radius)) {
+      throw RoutePlanningError(GlobalPlanStatus::kNoPath,
+                               "planned path failed dense footprint validation");
     }
   }
-  return path;
+  return result;
 }
 
 PreparedRoute AvoidCooledRoute(PreparedRoute route, const LayeredCostmap& map,
@@ -52,8 +87,8 @@ PreparedRoute AvoidCooledRoute(PreparedRoute route, const LayeredCostmap& map,
   if (config.planner == "astar") {
     throw std::runtime_error("failed first-segment replay");
   }
-  auto alternate =
-      DensifyRoute(AStarPlanner(config.robot_radius).Plan(map, request.start, request.goal), .08);
+  auto planned = GridPlan(map, config.robot_radius, request);
+  auto alternate = std::move(planned.path);
   if (!PathFootprintValid(alternate, map, config.robot_radius)) {
     throw std::runtime_error("failed first-segment replay");
   }
@@ -61,7 +96,7 @@ PreparedRoute AvoidCooledRoute(PreparedRoute route, const LayeredCostmap& map,
   if (request.banned_signatures.count(signature) != 0) {
     throw std::runtime_error("failed first-segment replay");
   }
-  return {std::move(alternate), signature};
+  return {std::move(alternate), signature, std::move(planned.metadata)};
 }
 
 Path SmoothRoute(Path path, const LayeredCostmap& map, const NavigationConfig& config,
@@ -86,12 +121,17 @@ Path SmoothRoute(Path path, const LayeredCostmap& map, const NavigationConfig& c
 PreparedRoute PrepareRoute(GlobalPlanner& planner, const LayeredCostmap& costmap,
                            const NavigationConfig& config, PlannerCapabilities traits,
                            const RouteRequest& request) {
-  auto path = PlanWithFallback(planner, costmap, config.robot_radius, traits, request);
-  path = ValidateCorners(std::move(path), costmap, config.robot_radius, traits, request);
-  const auto signature = FirstSegmentSignature(path, request.start, costmap.grid().resolution());
-  auto route = AvoidCooledRoute({std::move(path), signature}, costmap, config, request);
-  // The legacy identity is measured before smoothing; do not recompute it.
-  route.path = SmoothRoute(std::move(route.path), costmap, config, traits);
+  auto planned = PlanWithFallback(planner, costmap, config.robot_radius, traits, request);
+  planned = ValidateCorners(std::move(planned), costmap, config.robot_radius, traits, request);
+  const auto signature =
+      FirstSegmentSignature(planned.path, request.start, costmap.grid().resolution());
+  auto route = AvoidCooledRoute({std::move(planned.path), signature, std::move(planned.metadata)},
+                                costmap, config, request);
+  // Legacy identity is measured before smoothing. Body-heading paths own their
+  // yaw/rotation/cusp contract and cannot pass through a tangent-only smoother.
+  if (route.metadata.headings != PathHeadingSemantics::kBodyHeading) {
+    route.path = SmoothRoute(std::move(route.path), costmap, config, traits);
+  }
   return route;
 }
 }  // namespace navigation2d

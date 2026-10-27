@@ -3,9 +3,10 @@
 #include <stdexcept>
 
 #include "navigation2d/control/local_controller.h"
+#include "navigation2d/costmap/coordinate_validation.h"
 namespace navigation2d {
 Twist2d LocalController::Compute(const Path&, const Pose2d&, Twist2d, const LayeredCostmap&,
-                                const std::vector<PredictedObstacle>&) const {
+                                 const std::vector<PredictedObstacle>&) const {
   throw std::logic_error("controller does not implement the legacy Compute API");
 }
 LocalControlResult LocalController::ComputeWithContext(const LocalControlRequest& request) const {
@@ -20,7 +21,8 @@ LocalControlResult LocalController::ComputeWithContext(const LocalControlRequest
   if (const auto stop = request.budget.Check(); stop != AlgorithmStop::kNone) {
     return stopped(stop);
   }
-  if (!request.pose.matrix().allFinite() || !std::isfinite(request.measured_velocity.linear) ||
+  if (!costmap_internal::IndexablePose(request.costmap.grid(), request.pose) ||
+      !std::isfinite(request.measured_velocity.linear) ||
       !std::isfinite(request.measured_velocity.angular)) {
     return {LocalControlStatus::kInvalidInput, {}, "invalid control pose or measured velocity", {}};
   }
@@ -34,12 +36,25 @@ LocalControlResult LocalController::ComputeWithContext(const LocalControlRequest
       return {
           LocalControlStatus::kInvalidOutput, {}, "controller returned non-finite velocity", {}};
     }
+    if (result.status == LocalControlStatus::kNotRun) {
+      result.status = LocalControlStatus::kInvalidOutput;
+      result.reason = "controller returned no outcome";
+    }
     if (!result.has_command()) {
       result.command = {};
     }
     if (result.status == LocalControlStatus::kIntentionalStop &&
         (command.linear != 0. || command.angular != 0.)) {
       return {LocalControlStatus::kInvalidOutput, {}, "intentional stop returned motion", {}};
+    }
+    if (result.has_command() && !result.diagnostics) {
+      result.diagnostics = Diagnostics();
+    }
+    if (result.status == LocalControlStatus::kIntentionalStop) {
+      result.diagnostics->intentional_stop = true;
+    }
+    if (const auto stop = request.budget.Check(); stop != AlgorithmStop::kNone) {
+      return stopped(stop);
     }
     return result;
   } catch (const std::exception& error) {

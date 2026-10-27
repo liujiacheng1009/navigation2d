@@ -9,8 +9,10 @@ struct PlannerCapabilities {
 struct ControllerCapabilities {
   bool dynamic_predictions = false;
   bool guidance_candidates = false;
+  // Reverse velocity sampling alone does not establish reverse-path tracking.
   bool reverse_tracking = false;
   bool in_place_rotation = false;
+  bool body_heading_paths = false;
 };
 struct AlgorithmRequirements {
   bool dynamic_predictions = false;

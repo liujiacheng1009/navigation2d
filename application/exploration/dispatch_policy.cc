@@ -37,6 +37,9 @@ DispatchVerdict DispatchPolicy::RejectUnreachable(const ExplorationGoal& goal,
       {.kind = DispatchRejection::kNoRoute,
        .reason = probe.failure_reason(),
        .start_occupied = probe.failure == InitialPlanFailure::kStartOccupied});
+  if (probe.failure != InitialPlanFailure::kNoRoute &&
+      probe.failure != InitialPlanFailure::kStartOccupied &&
+      probe.failure != InitialPlanFailure::kGoalOccupied) { return DispatchVerdict::kRejected; }
   const auto reason = state.planning_failure_reason.empty()
                           ? std::string_view("no route")
                           : std::string_view(state.planning_failure_reason);

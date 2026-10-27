@@ -25,10 +25,10 @@ inline constexpr std::array<PlannerSpec, 4> kPlanners{{
     {"state_lattice", PlannerId::kStateLattice, {true, true, true, true}},
 }};
 inline constexpr std::array<ControllerSpec, 4> kControllers{{
-    {"rpp", ControllerId::kRpp, {false, false, false, true}},
-    {"dwa", ControllerId::kDwa, {false, false, false, true}},
-    {"mppi", ControllerId::kMppi, {false, false, true, true}},
-    {"mpc", ControllerId::kMpc, {true, true, true, true}},
+    {"rpp", ControllerId::kRpp, {false, false, false, true, false}},
+    {"dwa", ControllerId::kDwa, {false, false, false, true, false}},
+    {"mppi", ControllerId::kMppi, {false, false, false, true, false}},
+    {"mpc", ControllerId::kMpc, {true, true, false, true, false}},
 }};
 constexpr bool HasPlanner(std::string_view name) noexcept {
   for (const auto& spec : kPlanners) {

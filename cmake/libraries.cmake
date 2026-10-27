@@ -15,7 +15,7 @@ navigation2d_library(navigation2d_planning
   planning/obstacle_heuristic.cc planning/grid_search.cc planning/motion_primitives.cc
   planning/path_smoother.cc planning/dijkstra_planner.cc planning/astar_planner.cc
   planning/state_lattice_planner.cc planning/theta_star_planner.cc
-  planning/path_geometry.cc planning/route_identity.cc planning/path_metrics.cc)
+  planning/path_geometry.cc planning/path_resampling.cc planning/route_identity.cc planning/path_metrics.cc)
 target_link_libraries(navigation2d_planning PUBLIC navigation2d_costmap)
 
 navigation2d_library(navigation2d_control
@@ -71,7 +71,7 @@ target_link_libraries(navigation2d_configuration PUBLIC
 # Compatibility product facade: callers keep linking navigation2d_core. Domain
 # targets above can be built and linked without this aggregate entry point.
 navigation2d_library(navigation2d_core
-  application/execution_watchdog.cc application/navigation_failure.cc
+  application/execution_watchdog.cc application/navigation_failure.cc application/navigation_algorithms.cc
   application/command_safety_pipeline.cc application/docking_servo.cc
   application/command_stall_watch.cc application/route_preparation.cc
   application/navigation_system.cc)

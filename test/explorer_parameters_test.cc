@@ -24,7 +24,8 @@ int main(int argc, char** argv) {
   Require(mode == "normal" || mode == "defaults" || mode == "ground_truth" ||
           mode == "invalid_pose" || mode == "invalid_timeout" || mode == "invalid_speed" ||
           mode == "unknown_algorithm" || mode == "unknown_controller" ||
-          mode == "custom_registry" || mode == "scoped_algorithms" || mode == "invalid_scoped");
+          mode == "custom_registry" || mode == "scoped_algorithms" || mode == "invalid_scoped" ||
+          mode == "unsupported_body");
   if (argc > 1) {
     --argc;
     ++argv;
@@ -42,7 +43,8 @@ int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
   const bool failure_expected = mode == "invalid_pose" || mode == "invalid_timeout" ||
                                 mode == "invalid_speed" || mode == "unknown_algorithm" ||
-                                mode == "unknown_controller" || mode == "invalid_scoped";
+                                mode == "unknown_controller" || mode == "invalid_scoped" ||
+                                mode == "unsupported_body";
   bool rejected = false;
   try {
     rclcpp::NodeOptions options;
@@ -55,6 +57,10 @@ int main(int argc, char** argv) {
     }
     if (mode == "unknown_controller") {
       overrides.emplace_back("entry.local_controller", "unknown");
+    }
+    if (mode == "unsupported_body") {
+      overrides.emplace_back("explore.global_planner", "state_lattice");
+      overrides.emplace_back("explore.preserve_planner_heading", true);
     }
     if (mode == "custom_registry") {
       overrides.emplace_back("explore.global_planner", "custom_global");
@@ -129,6 +135,9 @@ int main(int argc, char** argv) {
     }
     if (mode == "unknown_algorithm") {
       Require(message.find("unknown planner") != std::string::npos);
+    }
+    if (mode == "unsupported_body") {
+      Require(message.find("capability") != std::string::npos);
     }
     if (mode == "unknown_controller") {
       Require(message.find("unknown controller") != std::string::npos);

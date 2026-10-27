@@ -33,6 +33,7 @@ class AlgorithmRegistry {
       const NavigationConfig& config) const;
   void Validate(const NavigationConfig& config, AlgorithmRequirements requirements = {}) const;
   PlannerCapabilities PlannerTraits(const std::string& id) const;
+  ControllerCapabilities ControllerTraits(const std::string& id) const;
   static std::shared_ptr<const AlgorithmRegistry> Builtins();
 
  private:

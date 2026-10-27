@@ -8,6 +8,7 @@
 
 #include "navigation2d/costmap/layered_costmap.h"
 #include "navigation2d/execution/algorithm_budget.h"
+#include "navigation2d/planning/path_metadata.h"
 #include "navigation2d/geometry/path_2d.h"
 
 namespace navigation2d {
@@ -35,23 +36,15 @@ enum class GlobalPlanStatus {
   kBudgetExceeded,
   kInvalidInput,
   kInvalidOutput,
-  kBackendError
+  kBackendError,
+  kNotRun
 };
-enum class PathHeadingSemantics { kUnspecified, kForwardTangent, kBodyHeading };
 struct GlobalPlanRequest {
   const LayeredCostmap& costmap;
   const Pose2d& start;
   const Pose2d& goal;
   std::string_view frame_id = "navigation_map";
   AlgorithmBudget budget{};
-};
-struct PlannedPathMetadata {
-  std::string frame_id;
-  // Revision is meaningful only within the same costmap instance/lifetime.
-  std::uint64_t map_revision = 0;
-  // ForwardTangent forbids reverse segments. BodyHeading encodes body yaw:
-  // tangent dot heading determines forward/reverse; zero translation rotates.
-  PathHeadingSemantics headings = PathHeadingSemantics::kUnspecified;
 };
 struct GlobalPlanResult {
   GlobalPlanStatus status = GlobalPlanStatus::kNoPath;

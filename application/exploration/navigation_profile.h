@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 
+#include "navigation2d/application/navigation_execution_options.h"
 #include "navigation2d/configuration/navigation_config.h"
 
 namespace navigation2d::exploration {
@@ -10,6 +11,7 @@ struct AlgorithmSelection {
   std::string local = "rpp";
   AlgorithmParameterSets global_parameters{};
   AlgorithmParameterSets local_parameters{};
+  RouteHeadingPolicy heading_policy = RouteHeadingPolicy::kLegacyForwardProjection;
 };
 struct NavigationProfiles {
   AlgorithmSelection explore;

@@ -51,7 +51,7 @@ int main() {
   auto reverse = config;
   reverse.planner = "state_lattice";
   reverse.controller = "mppi";
-  AlgorithmRegistry::Builtins()->Validate(reverse, {.reverse_paths = true});
+  Reject([&] { AlgorithmRegistry::Builtins()->Validate(reverse, {.reverse_paths = true}); });
   reverse.controller = "rpp";
   Reject([&] { AlgorithmRegistry::Builtins()->Validate(reverse, {.reverse_paths = true}); });
   reverse.controller = "mppi";

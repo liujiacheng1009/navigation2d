@@ -1,7 +1,10 @@
+#include <cmath>
 #include <exception>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
+#include "navigation2d/costmap/coordinate_validation.h"
 #include "navigation2d/planning/global_planner.h"
 namespace navigation2d {
 namespace {
@@ -27,15 +30,19 @@ Path GlobalPlanner::Plan(const LayeredCostmap&, const Pose2d&, const Pose2d&) co
 }
 GlobalPlanResult GlobalPlanner::PlanWithContext(const GlobalPlanRequest& request) const {
   GlobalPlanResult result;
-  result.metadata = {std::string(request.frame_id), request.costmap.revision(), HeadingSemantics()};
+  result.metadata = {std::string(request.frame_id), request.costmap.revision(), HeadingSemantics(),
+                     true};
   if (const auto stop = request.budget.Check(); stop != AlgorithmStop::kNone) {
     result.status = Stopped(stop);
     result.reason =
         stop == AlgorithmStop::kCancelled ? "planning cancelled" : "planning budget exceeded";
     return result;
   }
-  if (request.frame_id.empty() || !request.start.matrix().allFinite() ||
-      !request.goal.matrix().allFinite()) {
+  const auto& grid = request.costmap.grid();
+  if (grid.width() <= 0 || grid.height() <= 0 || !std::isfinite(grid.resolution()) ||
+      grid.resolution() <= 0. || !costmap_internal::IndexablePose(grid, request.start) ||
+      !costmap_internal::IndexablePose(grid, request.goal) || request.frame_id.empty() ||
+      !request.start.matrix().allFinite() || !request.goal.matrix().allFinite()) {
     result.status = GlobalPlanStatus::kInvalidInput;
     result.reason = "invalid planning frame or pose";
     return result;
@@ -48,6 +55,10 @@ GlobalPlanResult GlobalPlanner::PlanWithContext(const GlobalPlanRequest& request
           stop == AlgorithmStop::kCancelled ? "planning cancelled" : "planning budget exceeded";
       result.path.clear();
       return result;
+    }
+    if (result.status == GlobalPlanStatus::kNotRun) {
+      result.status = GlobalPlanStatus::kInvalidOutput;
+      result.reason = "planner returned no outcome";
     }
     if (!result.succeeded()) {
       result.path.clear();
@@ -73,6 +84,15 @@ GlobalPlanResult GlobalPlanner::PlanWithContext(const GlobalPlanRequest& request
         return result;
       }
     }
+    for (const auto& pose : result.path) {
+      if (X(pose) < 0. || Y(pose) < 0. || X(pose) >= grid.width() * grid.resolution() ||
+          Y(pose) >= grid.height() * grid.resolution()) {
+        result.status = GlobalPlanStatus::kInvalidOutput;
+        result.reason = "planner returned a path outside the map";
+        result.path.clear();
+        return result;
+      }
+    }
     result.status = GlobalPlanStatus::kSuccess;
   } catch (const std::exception& error) {
     result.status = GlobalPlanStatus::kBackendError;
@@ -87,7 +107,8 @@ GlobalPlanResult GlobalPlanner::PlanWithContext(const GlobalPlanRequest& request
 }
 GlobalPlanResult GlobalPlanner::PlanRequest(const GlobalPlanRequest& request) const {
   GlobalPlanResult result;
-  result.metadata = {std::string(request.frame_id), request.costmap.revision(), HeadingSemantics()};
+  result.metadata = {std::string(request.frame_id), request.costmap.revision(), HeadingSemantics(),
+                     true};
   try {
     result.path = Plan(request.costmap, request.start, request.goal);
     result.status = GlobalPlanStatus::kSuccess;

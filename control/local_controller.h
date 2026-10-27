@@ -8,6 +8,7 @@
 #include "navigation2d/costmap/layered_costmap.h"
 #include "navigation2d/execution/algorithm_budget.h"
 #include "navigation2d/geometry/path_2d.h"
+#include "navigation2d/planning/path_metadata.h"
 #include "navigation2d/geometry/twist_2d.h"
 
 namespace navigation2d {
@@ -60,7 +61,8 @@ enum class LocalControlStatus {
   kBudgetExceeded,
   kInvalidInput,
   kInvalidOutput,
-  kBackendError
+  kBackendError,
+  kNotRun
 };
 struct LocalControlRequest {
   // Path must already be validated and share the pose/costmap frame. Borrowed
@@ -71,6 +73,7 @@ struct LocalControlRequest {
   const LayeredCostmap& costmap;
   const std::vector<PredictedObstacle>& dynamic_obstacles;
   AlgorithmBudget budget{};
+  const PlannedPathMetadata* path_metadata = nullptr;
 };
 struct LocalControlResult {
   LocalControlStatus status = LocalControlStatus::kSuccess;

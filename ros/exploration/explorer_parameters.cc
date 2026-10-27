@@ -24,18 +24,27 @@ double RequiredPositiveEnvironment(const char* name, double fallback) {
 }
 
 void ReadSelection(rclcpp::Node& node, const std::string& prefix,
-                   exploration::AlgorithmSelection& selection,
-                   const AlgorithmRegistry& algorithms, const NavigationConfig& scoped) {
+                   exploration::AlgorithmSelection& selection, const AlgorithmRegistry& algorithms,
+                   const NavigationConfig& scoped) {
   selection.global =
       node.declare_parameter<std::string>(prefix + ".global_planner", selection.global);
   selection.local =
       node.declare_parameter<std::string>(prefix + ".local_controller", selection.local);
+  selection.heading_policy =
+      node.declare_parameter<bool>(prefix + ".preserve_planner_heading", false)
+          ? RouteHeadingPolicy::kPreservePlannerHeading
+          : RouteHeadingPolicy::kLegacyForwardProjection;
   selection.global_parameters = scoped.global_planners;
   selection.local_parameters = scoped.local_controllers;
-  NavigationConfig validation = scoped;
-  validation.planner = selection.global;
-  validation.controller = selection.local;
+  const auto validation = exploration::BuildNavigationProfile({.resolution = scoped.map_resolution,
+                                                               .entry = prefix == "entry",
+                                                               .returning = prefix == "return"},
+                                                              selection);
   algorithms.Validate(validation);
+  if (selection.heading_policy == RouteHeadingPolicy::kPreservePlannerHeading &&
+      algorithms.PlannerTraits(selection.global).reverse_paths) {
+    algorithms.Validate(validation, {.reverse_paths = true});
+  }
 }
 }  // namespace
 FrontierExplorerConfig ReadExplorerConfig(rclcpp::Node& node) {
@@ -67,7 +76,7 @@ ExplorerParameters ReadExplorerParameters(rclcpp::Node& node, const AlgorithmReg
   parameters.simulation_speed = RequiredPositiveEnvironment("SWEEPNAV_SIMULATION_SPEED", 1.);
   const auto parameter_file = node.declare_parameter<std::string>("algorithm_parameters_file", "");
   const auto scoped = parameter_file.empty() ? NavigationConfig{}
-                                            : LoadNavigationConfig(parameter_file, algorithms);
+                                             : LoadNavigationConfig(parameter_file, algorithms);
   ReadSelection(node, "explore", parameters.navigation_profiles.explore, algorithms, scoped);
   ReadSelection(node, "entry", parameters.navigation_profiles.entry, algorithms, scoped);
   ReadSelection(node, "return", parameters.navigation_profiles.returning, algorithms, scoped);

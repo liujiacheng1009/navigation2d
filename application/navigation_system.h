@@ -4,9 +4,11 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+#include "navigation2d/application/navigation_execution_options.h"
 #include "navigation2d/configuration/navigation_config.h"
-#include "navigation2d/control/local_controller.h"
 #include "navigation2d/control/collision_monitor.h"
+#include "navigation2d/control/local_controller.h"
 #include "navigation2d/geometry/pose_2d.h"
 #include "navigation2d/planning/global_planner.h"
 #include "navigation2d/sensor/observations.h"
@@ -20,6 +22,9 @@ enum class NavigationPhase { kAlignToPath, kTrackPath, kDockToGoal };
 
 struct NavigationState {
   NavigationStatus status = NavigationStatus::kIdle;
+  GlobalPlanStatus planning_status = GlobalPlanStatus::kNotRun;
+  LocalControlStatus control_status = LocalControlStatus::kNotRun;
+  AlgorithmStop algorithm_stop = AlgorithmStop::kNone;
   NavigationPhase phase = NavigationPhase::kAlignToPath;
   Twist2d command;
   int replans = 0;
@@ -66,6 +71,9 @@ class NavigationSystem {
   NavigationSystem(NavigationConfig config, const std::string& map_path);
   NavigationSystem(NavigationConfig config, const std::string& map_path,
                    std::shared_ptr<const AlgorithmRegistry> algorithms);
+  NavigationSystem(NavigationConfig config, const std::string& map_path,
+                   std::shared_ptr<const AlgorithmRegistry> algorithms,
+                   NavigationExecutionOptions options);
   ~NavigationSystem();
   NavigationSystem(NavigationSystem&&) noexcept;
   NavigationSystem& operator=(NavigationSystem&&) noexcept;
@@ -92,12 +100,17 @@ class NavigationSystem {
   void UpdateGuidanceCandidates(std::vector<GuidanceCandidate> candidates);
   NavigationState ComputeCommand(const Pose2d& pose, Twist2d measured_velocity,
                                  double timestamp);
+  NavigationState ComputeCommand(const Pose2d& pose, Twist2d measured_velocity, double timestamp,
+                                 const AlgorithmBudget& budget);
+  const PlannedPathMetadata& path_metadata() const;
   // Active global route in the navigation/map frame (empty when idle).
   const Path& path() const;
   const std::string& planner_id() const;
   const std::string& controller_id() const;
 
  private:
+  NavigationState ComputeCommandCycle(const Pose2d& pose, Twist2d measured_velocity,
+                                      double timestamp, const AlgorithmBudget& budget);
   class Impl;
   std::unique_ptr<Impl> impl_;
 };
