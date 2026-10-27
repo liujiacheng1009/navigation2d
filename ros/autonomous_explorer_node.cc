@@ -90,7 +90,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::ExecutionCommandEvidence,
                                  private navigation2d::exploration::ViewpointArrivalActions,
                                  private navigation2d::exploration::RetreatActions,
-                                 private navigation2d::exploration::GoalExecutionClock,
+                                 private navigation2d::exploration::MissionRuntime,
                                  private navigation2d::exploration::OpenForwardStopActions,
                                  private navigation2d::exploration::ForwardBlockedActions,
                                  private navigation2d::exploration::AlcoveExitActions,
@@ -156,7 +156,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     return navigation2d::exploration_ros::ScanEvidence(Scan() ? &*Scan() : nullptr);
   }
 
-  std::size_t KnownCells() const {
+  std::size_t KnownCells() const override {
     return explorer_.KnownCells();
   }
 
@@ -610,7 +610,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     return true;
   }
 
-  bool TickEscape() {
+  bool TickEscape() override {
     if (!escape_.scheduled()) return false;
     if (escape_.Busy(now().nanoseconds())) {
       // Re-read body-frame lidar every tick. Do not trust the frozen command's
@@ -623,35 +623,36 @@ class AutonomousExplorer final : public rclcpp::Node,
     }
     escape_.Unschedule();
     motion_output_->Send({});
-    const bool resume_return = escape_.ConsumeReturnIntent();
-    if (resume_return) {
-      BeginReturn(true);
-      return true;
-    }
-    // Session-owned peel exit: resume without clearing side_peels/open_replans.
-    if (recovery_.resume_after_escape) {
-      recovery_.resume_after_escape = false;
-      if (mission_.phase() == MissionPhase::kExploring && !returning_) {
-        if (entry_.locked() || entry_.pending()) {
-          navigation2d::exploration::ResumeLockedEntryAfterPeel(entry_, explorer_, *this);
-          return true;
+    using navigation2d::exploration::EscapeContinuation;
+    const auto continuation = escape_.AfterStop(
+        recovery_, {mission_.phase(), returning_, entry_.locked() || entry_.pending()});
+    switch (continuation) {
+      case EscapeContinuation::kReturn:
+        BeginReturn(true);
+        break;
+      case EscapeContinuation::kEntry:
+        navigation2d::exploration::ResumeLockedEntryAfterPeel(entry_, explorer_, *this);
+        break;
+      case EscapeContinuation::kResumeGoal:
+        // A peeled wall scrape cannot resume its banned chord.
+        if (BreakWallScrapeAfterPeel()) {
+          break;
         }
-        // Wall-scrape peels must not resume the banned chord — that rebuilds
-        // the STOP→peel→scrape sawtooth along the inflation rim.
-        if (BreakWallScrapeAfterPeel()) return true;
         if (StartNavigation(active_goal_, false)) {
           PublishStatus("NAVIGATING", "resumed goal after open-space peel");
-          return true;
+          break;
         }
-      }
-      DemoteActiveGoal("resume after peel failed; demoting viewpoint");
-      return true;
+        [[fallthrough]];
+      case EscapeContinuation::kDemoteGoal:
+        DemoteActiveGoal("resume after peel failed; demoting viewpoint");
+        break;
+      case EscapeContinuation::kComplete:
+        FinishCompleting();
+        break;
+      case EscapeContinuation::kSelect:
+        next_selection_ = now();
+        break;
     }
-    if (mission_.phase() == MissionPhase::kCompleting) {
-      FinishCompleting();
-      return true;
-    }
-    next_selection_ = now();
     return true;
   }
 
@@ -1306,7 +1307,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     return true;
   }
 
-  void NotePoseMotion() {
+  void NotePoseMotion() override {
     if (!Pose()) {
       return;
     }
@@ -1465,7 +1466,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                 explorer_.IsCorridorMouth(goal.frontier_x, goal.frontier_y) ? "yes" : "no");
   }
 
-  void Finish(bool success, const std::string& message) {
+  void Finish(bool success, const std::string& message) override {
     if (!mission_.Finish()) {
       return;
     }
@@ -1665,37 +1666,34 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   void Tick() {
-    if (mission_.finished()) {
-      return;
+    mission_.Tick(parameters_.max_duration_s, *motion_output_, *this);
+  }
+
+  std::optional<navigation2d::exploration::MissionHome> ReadyMissionHome() const override {
+    if (!Map() || !Pose() || !Scan() || KnownCells() < 100) {
+      return std::nullopt;
     }
-    if (!Map() || !Pose() || !Scan() || KnownCells() < 100) return;
-    if (!mission_.started()) {
-      const auto& pose = *Pose();
-      const navigation2d::exploration::MissionHome home{
-          pose.x, pose.y, pose.yaw};
-      const auto started = now();
-      return_.ResetEscapes();
-      escape_.ClearReturnIntent();
-      const auto initial_known = KnownCells();
-      selection_exhaustion_.InitializeKnown(initial_known);
-      last_progress_known_cells_ = initial_known;
-      last_progress_time_ = now();
-      const auto bootstrap_deadline = now() + rclcpp::Duration::from_seconds(8.0);
-      mission_.Start(home, initial_known, started.nanoseconds(), bootstrap_deadline.nanoseconds());
-      next_selection_ = bootstrap_deadline;
-      PublishStatus("WAITING", parameters_.pose_source + " pose ready; waiting for a stable online map");
-    }
-    if (mission_.TimedOut(now().nanoseconds(), parameters_.max_duration_s)) {
-      Finish(false, "exploration timed out");
-      return;
-    }
-    NoteKnownProgress(KnownCells());
-    NotePoseMotion();
-    if (TickEscape()) return;
-    if (mission_.Bootstrapping(now().nanoseconds())) {
-      motion_output_->Send({});
-      return;
-    }
+    const auto& pose = *Pose();
+    return navigation2d::exploration::MissionHome{pose.x, pose.y, pose.yaw};
+  }
+
+  void ResetMissionRecovery() override {
+    return_.ResetEscapes();
+    escape_.ClearReturnIntent();
+  }
+
+  void InitializeMissionProgress(std::size_t known) override {
+    selection_exhaustion_.InitializeKnown(known);
+    last_progress_known_cells_ = known;
+    last_progress_time_ = now();
+  }
+
+  void MissionBootstrapScheduled(std::int64_t deadline_ns) override {
+    next_selection_ = rclcpp::Time(deadline_ns, RCL_ROS_TIME);
+    PublishStatus("WAITING", parameters_.pose_source + " pose ready; waiting for a stable online map");
+  }
+
+  bool TickIdleNavigation() override {
     if (mission_.phase() == MissionPhase::kReturning || returning_) {
       if (!navigation_.has_session()) {
         using navigation2d::exploration::ReturnIdleResult;
@@ -1708,14 +1706,14 @@ class AutonomousExplorer final : public rclcpp::Node,
         } else if (result == ReturnIdleResult::kRestart) {
           BeginReturn(return_.partial());
         }
-        return;
+        return true;
       }
     } else if (!navigation_.has_session()) {
       // Continue open-loop doorway crawl across ticks (navigation_ was reset
       // when CommandStalled fired; without this the crawl lasted one frame).
       if (navigation2d::exploration::HasActiveEntryCrawl(entry_) && Pose()) {
         navigation2d::exploration::ExecuteEntryCrawl(entry_, explorer_, active_goal_, *TourRobot(), *this);
-        return;
+        return true;
       }
       // No route and no crawl: drop the last approach command. Leaving it
       // running while the next goal is planned rolls the chassis from the
@@ -1726,8 +1724,12 @@ class AutonomousExplorer final : public rclcpp::Node,
         next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
         SelectNextGoal();
       }
-      return;
+      return true;
     }
+    return false;
+  }
+
+  void TickNavigation() override {
     if (HandoffToNextTourGoal()) return;
     // Do not cancel a running path merely because its frontier has been
     // observed. That feedback loop was the source of the visible zig-zags:
@@ -2080,7 +2082,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   std::size_t last_progress_known_cells_ = 0;
   rclcpp::Time last_progress_time_{0, 0, RCL_ROS_TIME};
   using MissionPhase = navigation2d::exploration::MissionPhase;
-  navigation2d::exploration::MissionLifecycle mission_;
+  navigation2d::exploration::ExplorationMission mission_;
   navigation2d::exploration::CompletionExecution completion_;
   navigation2d::exploration::RouteFailureHistory route_failures_;
   int reject_streak_ = 0;

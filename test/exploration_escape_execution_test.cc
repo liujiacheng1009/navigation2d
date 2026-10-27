@@ -31,4 +31,34 @@ int main() {
   Require(!escape.resume_return());
   escape.Begin({.1, -.2}, 400);
   Require(escape.phase(300) == EscapeExecution::Phase::kDriving);
+  escape.Unschedule();
+  GoalRecoverySession recovery;
+  recovery.Begin(1., 2.);
+  recovery.side_peels = 2;
+  recovery.open_replans = 1;
+  recovery.resume_after_escape = true;
+  escape.ResumeReturn();
+  Require(escape.AfterStop(recovery, {MissionPhase::kExploring, false, true}) ==
+          EscapeContinuation::kReturn);
+  Require(recovery.resume_after_escape && !escape.resume_return());
+  Require(escape.AfterStop(recovery, {MissionPhase::kExploring, false, true}) ==
+          EscapeContinuation::kEntry);
+  Require(!recovery.resume_after_escape && recovery.side_peels == 2 && recovery.open_replans == 1);
+  recovery.resume_after_escape = true;
+  Require(escape.AfterStop(recovery, {MissionPhase::kExploring, false, false}) ==
+          EscapeContinuation::kResumeGoal);
+  Require(!recovery.resume_after_escape);
+  for (const auto context : {EscapeExitContext{MissionPhase::kReturning, false, true},
+                             EscapeExitContext{MissionPhase::kCompleting, false, false},
+                             EscapeExitContext{MissionPhase::kExploring, true, false}}) {
+    recovery.resume_after_escape = true;
+    Require(escape.AfterStop(recovery, context) == EscapeContinuation::kDemoteGoal);
+    Require(!recovery.resume_after_escape && recovery.side_peels == 2);
+  }
+  Require(escape.AfterStop(recovery, {MissionPhase::kCompleting, false, true}) ==
+          EscapeContinuation::kComplete);
+  Require(escape.AfterStop(recovery, {MissionPhase::kExploring, false, true}) ==
+          EscapeContinuation::kSelect);
+  Require(escape.AfterStop(recovery, {MissionPhase::kReturning, true, false}) ==
+          EscapeContinuation::kSelect);
 }

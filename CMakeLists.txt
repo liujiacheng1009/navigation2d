@@ -48,7 +48,7 @@ add_library(navigation2d_exploration_application STATIC
   application/exploration/navigation_telemetry.cc
   application/exploration/room_visit_ledger.cc
   application/exploration/status_serializer.cc
-  application/exploration/mission_lifecycle.cc
+  application/exploration/exploration_mission.cc
   application/exploration/dispatch_policy.cc
   application/exploration/pose_motion_watch.cc
   application/exploration/entry_completion.cc

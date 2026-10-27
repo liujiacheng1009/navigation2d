@@ -5,9 +5,10 @@ import re
 def adapt_motion_output(source):
     pattern = r'motion_output_\s*->\s*Send\s*\(([^;]+)\);'
     source, count = re.subn(pattern, r'ReplaySendMotion(\1);', source)
-    if re.search(r'motion_output_\s*->', source):
+    source, bindings = re.subn(r'\*\s*motion_output_\b', 'replay_motion_sink_', source)
+    if re.search(r'motion_output_\s*(?:->|\.)', source):
         raise ValueError('motion output adaptation incomplete')
-    if not count:
+    if not count and not bindings:
         return source, 0
     marker = ' public:'
     begin = source.index(marker, source.index('class AutonomousExplorer')) + len(marker)
@@ -19,7 +20,16 @@ def adapt_motion_output(source):
     replay_.ProbeCommand(message);
   }
 """
-    return source[:begin] + capture + source[begin:], count
+    if bindings:
+        capture += """
+  struct ReplayMotionSink final : navigation2d::exploration::MotionOutput {
+    explicit ReplayMotionSink(AutonomousExplorer& value) : owner(value) {}
+    void Send(navigation2d::Twist2d value) override { owner.ReplaySendMotion(value); }
+    AutonomousExplorer& owner;
+  };
+  ReplayMotionSink replay_motion_sink_{*this};
+"""
+    return source[:begin] + capture + source[begin:], count + bindings
 
 
 def without_unused_motion_object(command, source, logic_only):

@@ -59,7 +59,8 @@ def adapt(source, label):
         observe_scan = 'scan_ = value;'
         observe_velocity = 'velocity_ = value; velocity_stamp_ = stamp;'
     phase = 'mission_.phase()' if 'mission_.phase()' in source else 'phase_'
-    finished = 'mission_.finished()' if 'mission_.finished()' in source else 'finished_'
+    mission_owned = re.search(r'\b(?:ExplorationMission|MissionLifecycle)\s+mission_\b', source)
+    finished = 'mission_.finished()' if mission_owned or 'mission_.finished()' in source else 'finished_'
     capture = f'''
   void ReplayObservePose(const geometry_msgs::msg::PoseStamped& pose) {{ {observe_pose} }}
   void ReplayObserveMap(const nav_msgs::msg::OccupancyGrid& value) {{ {observe_map} }}

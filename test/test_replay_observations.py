@@ -9,6 +9,14 @@ from build_explorer_replays import adapt
 
 
 class ReplayObservations(unittest.TestCase):
+    def test_mission_owner_without_inline_finished_query(self):
+        source = ('class AutonomousExplorer { private: '
+                  'navigation2d::exploration::ExplorationMission mission_; '
+                  'void Send(){command_publisher_->publish(stop); status_publisher_->publish(status);} '
+                  '}; int main(int argc, char** argv) {}')
+        generated = adapt(source, 'unit')
+        self.assertIn('bool ReplayFinished() const { return mission_.finished(); }', generated)
+
     def test_ownership_variants(self):
         for field, call in [('observations_', 'observations_.ObserveLocalization(pose);'),
                             ('pose_feedback_', 'pose_feedback_.ObserveLocalization(pose);'),

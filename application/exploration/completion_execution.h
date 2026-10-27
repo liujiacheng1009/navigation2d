@@ -1,9 +1,10 @@
 #pragma once
+#include "navigation2d/application/exploration/mission_lifecycle.h"
 #include <cstddef>
 
 #include "navigation2d/application/exploration/tour_order.h"
 namespace navigation2d::exploration {
-class MissionLifecycle;
+
 class TourExecution;
 enum class CompletionNoticeKind {
   kEmpty,

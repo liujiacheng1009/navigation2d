@@ -2,6 +2,9 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import shutil
+import subprocess
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('motion', ROOT / 'tools/replay_motion_output.py')
@@ -23,6 +26,48 @@ class ReplayMotionOutput(unittest.TestCase):
         self.assertIn('replay_.ProbeCommand(message);', result)
         self.assertIn('message.linear.x = value.linear;', result)
         self.assertIn('message.angular.z = value.angular;', result)
+
+    @unittest.skipUnless(shutil.which('c++'), 'C++ compiler required for generated-port contract')
+    def test_core_motion_reference_uses_capture_sink_without_ros(self):
+        source = r'''#include <memory>
+#include <stdexcept>
+#include "navigation2d/application/exploration/motion_output.h"
+namespace geometry_msgs::msg {
+struct Twist { struct Axis { double x = 0., z = 0.; }; Axis linear, angular; };
+}
+struct Outputs {
+  int commands = 0;
+  void ProbeCommand(const geometry_msgs::msg::Twist& message) {
+    if (message.linear.x != .3 || message.angular.z != -.4) throw std::runtime_error("command");
+    ++commands;
+  }
+};
+struct Mission {
+  void Tick(navigation2d::exploration::MotionOutput& output) { output.Send({.3, -.4}); }
+};
+class AutonomousExplorer {
+ public:
+  void Run() { mission_.Tick(*motion_output_); }
+  int Count() const { return replay_.commands; }
+ private:
+  Mission mission_;
+  std::unique_ptr<navigation2d::exploration::MotionOutput> motion_output_;
+  Outputs replay_;
+};
+int main() { AutonomousExplorer node; node.Run(); return node.Count() == 1 ? 0 : 1; }
+'''
+        generated, count = module.adapt_motion_output(source)
+        self.assertEqual(count, 1)
+        self.assertNotIn('*motion_output_', generated)
+        self.assertIn('mission_.Tick(replay_motion_sink_);', generated)
+        with tempfile.TemporaryDirectory() as directory:
+            cpp = Path(directory) / 'capture.cc'
+            binary = Path(directory) / 'capture'
+            cpp.write_text(generated)
+            subprocess.run(['c++', '-std=c++20', '-Wall', '-Wextra', '-Werror',
+                            '-I' + str(ROOT.parent), str(cpp), '-o', str(binary)],
+                           check=True, capture_output=True, text=True)
+            subprocess.run([str(binary)], check=True)
 
     def test_rejects_unknown_port_operation(self):
         with self.assertRaisesRegex(ValueError, 'incomplete'):
