@@ -10,14 +10,17 @@ planning / control / costmap → configuration values / geometry values
 simulation → application（仅 benchmark / replay）
 ```
 
-当前仍保留 navigation2d_core 聚合 target；已新增 navigation2d_values 与
-navigation2d_geometry 边界，尚未把所有概念层拆成独立 target。
+当前保留 navigation2d_core 聚合兼容 target；values、geometry、costmap、planning、control、
+exploration、configuration、algorithm_registry 与探索应用/输出已有独立 target。
+新增 navigation2d_algorithm_contracts 只依赖 costmap/值类型，承载全局与局部算法执行边界；
+注册表可使用接口而不链接具体搜索器、控制器或求解 SDK。
 
 ## application
 
 - `navigation_system.h/.cc`：唯一产品编排入口；拥有 costmap、planner、controller、目标和调度状态。
 - `application/navigation_config.h`：旧 include 兼容入口；值定义在 `configuration/navigation_config.h`。
-- `navigation_config.cc`：现有 YAML schema、类型转换和校验，分组解析仍待后续迁移。
+- `navigation_config.cc`：内置选择的兼容加载入口；分组 YAML 解析、范围检查与参数描述在 `configuration/`。
+- `typed_algorithm_registration.h`：外部算法专用配置解析/校验与工厂接入，不构建后端来验证参数。
 - `route_preparation.*`：规划回退、角点验收、签名冷却和平滑流水线，不拥有执行状态。
 - `docking_servo.*`：精停进度/姿态迟滞与速度生成，按新目标重置；安全过滤和失败提交仍由导航编排执行。
 - `command_safety_pipeline.*`：独立拥有传感器监测和动态预测；借用 Impl 内稳定寿命的配置，先动态否决后消费原始传感器观测，保留 TTC 的原调用位置。
@@ -48,7 +51,8 @@ navigation2d_geometry 边界，尚未把所有概念层拆成独立 target。
 
 ## planning
 
-- `global_planner.h`：`GlobalPlanner` 接口及 `Path` 契约。
+- `global_planner.h`、`planner_contract.cc`：保留旧 `Plan`，新增受保护 `PlanRequest` 扩展点和不可绕过的 `PlanWithContext` 校验边界；结果带状态、帧、地图版本和朝向语义。旧异常文字只在兼容适配中转换，不能代替新后端的类型化结果。
+- `execution/algorithm_budget.h`：ROS 无关的停止令牌和 steady_clock 截止时间。旧同步后端只支持调用前后检查及拒绝迟到输出，不能宣称可抢占中断。
 - `dijkstra_planner.*`、`astar_planner.*`、`theta_star_planner.*`：独立全局规划策略。
 - `grid_search.*`：三种策略共享的网格搜索基础设施，不解析配置字符串。
 - `planner_factory.*`：旧工厂兼容入口，委托 `application/algorithm_registry.*`。
@@ -57,7 +61,9 @@ navigation2d_geometry 边界，尚未把所有概念层拆成独立 target。
 
 ## control
 
-- `local_controller.h`：`LocalController` 接口与 `Twist2d` 控制契约。
+- `local_controller.h`、`controller_contract.cc`：保留旧 `Compute`，新增 `ComputeRequest`/`ComputeWithContext`；区分有效零速、刻意停止、不可行、取消、预算、输入/输出和后端错误。错误及取消不能携带运动，NaN/Inf 和“停止却返回运动”被拒绝。接口边界已实现，NavigationSystem 调用链迁移另行验收。
+- `depth_observation.*`：世界帧深度轨迹、消失保持与时间过期的唯一状态所有者。
+- `collision_monitor_geometry.*`：通道/外形、点相交和速度积分的无状态几何。
 - `regulated_pure_pursuit.*`：路径跟踪、曲率/代价调速、加速度限制和前向碰撞预测。
 - `dwa_controller.*`：低算力动态窗口速度采样、恒定控制 rollout 和多项代价评分。
 - `mppi_controller.*`：控制序列采样、差速批量 rollout、critics 评分和重要性加权更新。

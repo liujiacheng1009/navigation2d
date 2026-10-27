@@ -6,6 +6,9 @@ namespace navigation2d {
 
 class DijkstraPlanner final : public GlobalPlanner {
  public:
+  PathHeadingSemantics HeadingSemantics() const noexcept override {
+    return PathHeadingSemantics::kForwardTangent;
+  }
   explicit DijkstraPlanner(double clearance) : clearance_(clearance) {}
   Path Plan(const LayeredCostmap&, const Pose2d&, const Pose2d&) const override;
 

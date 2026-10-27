@@ -6,6 +6,9 @@ namespace navigation2d {
 
 class AStarPlanner final : public GlobalPlanner {
  public:
+  PathHeadingSemantics HeadingSemantics() const noexcept override {
+    return PathHeadingSemantics::kForwardTangent;
+  }
   explicit AStarPlanner(double clearance) : clearance_(clearance) {}
   Path Plan(const LayeredCostmap&, const Pose2d&, const Pose2d&) const override;
 

@@ -14,6 +14,9 @@ namespace navigation2d {
 
 class StateLatticePlanner final : public GlobalPlanner {
  public:
+  PathHeadingSemantics HeadingSemantics() const noexcept override {
+    return PathHeadingSemantics::kBodyHeading;
+  }
   explicit StateLatticePlanner(NavigationConfig config) : config_(std::move(config)) {}
   ~StateLatticePlanner() override = default;
   Path Plan(const LayeredCostmap& costmap, const Pose2d& start,
