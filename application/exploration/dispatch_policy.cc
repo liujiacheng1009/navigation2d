@@ -32,18 +32,13 @@ DispatchVerdict DispatchPolicy::RejectUnreachable(const ExplorationGoal& goal,
                                                   DispatchPurpose purpose, bool latest_map_retry,
                                                   const InitialPlanResult& probe,
                                                   DispatchActions& actions) {
-  const auto& state = probe.state;
   actions.RejectPreparation(
       {.kind = DispatchRejection::kNoRoute,
        .reason = probe.failure_reason(),
        .start_occupied = probe.failure == InitialPlanFailure::kStartOccupied});
-  if (probe.failure != InitialPlanFailure::kNoRoute &&
-      probe.failure != InitialPlanFailure::kStartOccupied &&
-      probe.failure != InitialPlanFailure::kGoalOccupied) { return DispatchVerdict::kRejected; }
-  const auto reason = state.planning_failure_reason.empty()
-                          ? std::string_view("no route")
-                          : std::string_view(state.planning_failure_reason);
-  if (!purpose.returning && !purpose.retreat && PinchWorthy(reason, purpose.entry) &&
+  const bool pinch_candidate = probe.failure == InitialPlanFailure::kNoRoute ||
+      (probe.failure == InitialPlanFailure::kExcludedRoute && purpose.entry);
+  if (!purpose.returning && !purpose.retreat && pinch_candidate &&
       Retry(RetryKind::kPinch, [&] {
         actions.ReportDispatchRetry({DispatchRetryNotice::Kind::kNoRoutePinch, purpose.entry});
         return actions.RetryNavigation(

@@ -87,6 +87,7 @@ class NavigationSystem::Impl {
       state.global_planning = algorithms.PlanningDiagnostics();
       state.planning_failure_reason.clear();
       state.planning_status = GlobalPlanStatus::kSuccess;
+      state.route_rejection = RouteRejection::kNone;
       const double planning_elapsed =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - planning_started)
               .count();
@@ -115,7 +116,7 @@ class NavigationSystem::Impl {
       planning_failures = 0;
       state.status = NavigationStatus::kNavigating;
     } catch (const RoutePlanningError& error) {
-      RejectPlanning(error.status(), error.what());
+      RejectPlanning(error.status(), error.what(), error.rejection());
     } catch (const std::runtime_error& error) {
       RejectPlanning(GlobalPlanStatus::kNoPath, error.what());
     }
@@ -142,11 +143,13 @@ class NavigationSystem::Impl {
     }
   }
 
-  void RejectPlanning(GlobalPlanStatus status, const std::string& reason) {
+  void RejectPlanning(GlobalPlanStatus status, const std::string& reason,
+                      RouteRejection rejection = RouteRejection::kNone) {
     path.clear();
     state.command = {};
     state.path_signature = 0;
     state.planning_status = status;
+    state.route_rejection = rejection;
     state.planning_failure_reason = reason;
     if (status == GlobalPlanStatus::kCancelled || status == GlobalPlanStatus::kBudgetExceeded) {
       StopAlgorithm(status == GlobalPlanStatus::kCancelled ? AlgorithmStop::kCancelled
@@ -263,6 +266,7 @@ void NavigationSystem::SetGoal(Pose2d goal) {
   impl_->state.planning_failure_reason.clear();
   impl_->state.path_signature = 0;
   impl_->state.planning_status = GlobalPlanStatus::kNotRun;
+  impl_->state.route_rejection = RouteRejection::kNone;
   impl_->state.control_status = LocalControlStatus::kNotRun;
   impl_->state.algorithm_stop = AlgorithmStop::kNone;
 }

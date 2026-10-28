@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "navigation2d/application/algorithm_registry.h"
+#include "navigation2d/application/route_admission.h"
 #include "navigation2d/application/navigation_execution_options.h"
 
 namespace navigation2d {
@@ -25,12 +26,15 @@ struct PreparedRoute {
 };
 class RoutePlanningError : public std::runtime_error {
  public:
-  RoutePlanningError(GlobalPlanStatus status, std::string reason)
-      : std::runtime_error(std::move(reason)), status_(status) {}
+  RoutePlanningError(GlobalPlanStatus status, std::string reason,
+                     RouteRejection rejection = RouteRejection::kNone)
+      : std::runtime_error(std::move(reason)), status_(status), rejection_(rejection) {}
   GlobalPlanStatus status() const { return status_; }
+  RouteRejection rejection() const { return rejection_; }
 
  private:
   GlobalPlanStatus status_;
+  RouteRejection rejection_;
 };
 // Synchronous, borrowed inputs in one local map frame. Preserves planning,
 // fallback, signature cooling, smoothing and dense validation order. Does not

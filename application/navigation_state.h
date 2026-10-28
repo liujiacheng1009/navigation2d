@@ -3,7 +3,8 @@
 #include <cstdint>
 #include <string>
 
-#include "navigation2d/control/collision_monitor.h"
+#include "navigation2d/application/route_admission.h"
+#include "navigation2d/control/collision_monitor_types.h"
 #include "navigation2d/control/local_controller.h"
 #include "navigation2d/geometry/twist_2d.h"
 #include "navigation2d/planning/global_planner.h"
@@ -14,6 +15,7 @@ enum class NavigationPhase { kAlignToPath, kTrackPath, kDockToGoal };
 struct NavigationState {
   NavigationStatus status = NavigationStatus::kIdle;
   GlobalPlanStatus planning_status = GlobalPlanStatus::kNotRun;
+  RouteRejection route_rejection = RouteRejection::kNone;
   LocalControlStatus control_status = LocalControlStatus::kNotRun;
   AlgorithmStop algorithm_stop = AlgorithmStop::kNone;
   NavigationPhase phase = NavigationPhase::kAlignToPath;

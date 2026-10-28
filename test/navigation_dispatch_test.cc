@@ -140,4 +140,27 @@ int main() {
     Require(std::string(error.what()) == "injected");
   }
   Require(!policy.active(DispatchPolicy::RetryKind::kPinch));
+  // Typed failures control retries, independently of diagnostic language.
+  for (auto failure : {InitialPlanFailure::kNoRoute, InitialPlanFailure::kStartOccupied,
+                       InitialPlanFailure::kGoalOccupied, InitialPlanFailure::kExcludedRoute,
+                       InitialPlanFailure::kBackendError, InitialPlanFailure::kBudgetExceeded,
+                       InitialPlanFailure::kInvalidInput, InitialPlanFailure::kCancelled,
+                       InitialPlanFailure::kInvalidRoute}) {
+    for (auto purpose : {DispatchPurpose{}, DispatchPurpose{.entry = true},
+                         DispatchPurpose{.returning = true}, DispatchPurpose{.retreat = true}}) {
+      probe = Probe();
+      probe.failure = failure;
+      probe.state.planning_failure_reason = "goal occupied; no path; first-segment";
+      actions = {};
+      actions.accept_retry = true;
+      const bool retry = !purpose.returning && !purpose.retreat &&
+                         (failure == InitialPlanFailure::kNoRoute ||
+                          (failure == InitialPlanFailure::kExcludedRoute && purpose.entry));
+      Require(evaluate(purpose) ==
+              (retry ? DispatchVerdict::kAcceptedRetry : DispatchVerdict::kRejected));
+      Require(actions.occupied == (failure == InitialPlanFailure::kStartOccupied));
+      Require(actions.events == (retry ? std::vector<std::string>{"reject", "notice", "retry"}
+                                        : std::vector<std::string>{"reject"}));
+    }
+  }
 }

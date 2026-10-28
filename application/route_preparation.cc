@@ -71,7 +71,8 @@ GlobalPlanResult ValidateCorners(GlobalPlanResult result, const LayeredCostmap& 
     }
     if (!PathFootprintValid(result.path, map, radius)) {
       throw RoutePlanningError(GlobalPlanStatus::kNoPath,
-                               "planned path failed dense footprint validation");
+                               "planned path failed dense footprint validation",
+                               RouteRejection::kFootprintInvalid);
     }
   }
   return result;
@@ -85,16 +86,19 @@ PreparedRoute AvoidCooledRoute(PreparedRoute route, const LayeredCostmap& map,
   // One A* retry can change the first segment. Replaying an already cooled
   // signature is an execution failure, not a newly admitted route.
   if (config.planner == "astar") {
-    throw std::runtime_error("failed first-segment replay");
+    throw RoutePlanningError(GlobalPlanStatus::kNoPath, "failed first-segment replay",
+                             RouteRejection::kSignatureExcluded);
   }
   auto planned = GridPlan(map, config.robot_radius, request);
   auto alternate = std::move(planned.path);
   if (!PathFootprintValid(alternate, map, config.robot_radius)) {
-    throw std::runtime_error("failed first-segment replay");
+    throw RoutePlanningError(GlobalPlanStatus::kNoPath, "failed first-segment replay",
+                             RouteRejection::kSignatureExcluded);
   }
   const auto signature = FirstSegmentSignature(alternate, request.start, map.grid().resolution());
   if (request.banned_signatures.count(signature) != 0) {
-    throw std::runtime_error("failed first-segment replay");
+    throw RoutePlanningError(GlobalPlanStatus::kNoPath, "failed first-segment replay",
+                             RouteRejection::kSignatureExcluded);
   }
   return {std::move(alternate), signature, std::move(planned.metadata)};
 }

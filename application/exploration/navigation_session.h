@@ -19,7 +19,9 @@ enum class InitialPlanFailure {
   kCancelled,
   kBudgetExceeded,
   kInvalidInput,
-  kBackendError
+  kBackendError,
+  kExcludedRoute,
+  kInvalidRoute
 };
 enum class Cancellation { kNoSession, kDiscardedPreparation, kStoppedActive };
 

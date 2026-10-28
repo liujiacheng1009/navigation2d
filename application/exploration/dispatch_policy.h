@@ -70,6 +70,7 @@ class DispatchPolicy {
   [[nodiscard]] DispatchVerdict Evaluate(const ExplorationGoal&, DispatchPurpose,
                                          bool latest_map_retry, const InitialPlanResult&,
                                          DispatchActions&);
+  // Legacy diagnostic helper; live dispatch consumes InitialPlanFailure.
   static bool PinchWorthy(std::string_view failure, bool entry);
   static RouteAcceptance CheckClearance(DispatchPurpose purpose, double margin_m);
   static double GoalTimeout(bool returning, double path_length_m);

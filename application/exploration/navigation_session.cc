@@ -90,11 +90,14 @@ InitialPlanResult NavigationSession::Probe(const Pose2d& pose, Twist2d measured_
   }
   const double distance = std::hypot(X(goal_) - X(pose), Y(goal_) - Y(pose));
   if (distance > goal_tolerance_m_ && result.state.global_path_length_m <= 0.) {
-    const auto& reason = result.state.planning_failure_reason;
-    if (reason.find("start occupied") != std::string::npos) {
+    if (result.state.planning_status == GlobalPlanStatus::kStartOccupied) {
       result.failure = InitialPlanFailure::kStartOccupied;
-    } else if (reason.find("goal occupied") != std::string::npos) {
+    } else if (result.state.planning_status == GlobalPlanStatus::kGoalOccupied) {
       result.failure = InitialPlanFailure::kGoalOccupied;
+    } else if (result.state.route_rejection == RouteRejection::kFootprintInvalid) {
+      result.failure = InitialPlanFailure::kInvalidRoute;
+    } else if (result.state.route_rejection == RouteRejection::kSignatureExcluded) {
+      result.failure = InitialPlanFailure::kExcludedRoute;
     } else {
       result.failure = InitialPlanFailure::kNoRoute;
     }
