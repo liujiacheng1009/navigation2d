@@ -56,7 +56,7 @@ double PathHeading(const Path& path, std::size_t index) {
 
 MppiController::MppiController(const NavigationConfig& config)
     : MppiController(MppiParametersFrom(config)) {}
-MppiController::MppiController(MppiParameters config)
+MppiController::MppiController(MppiParameters config, ParameterTag)
     : config_(config),
       core_(std::make_unique<control_internal::Nav2MppiCore>(config_.rollout)) {}
 MppiController::~MppiController() = default;

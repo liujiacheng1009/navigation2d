@@ -1,14 +1,15 @@
 #pragma once
-
-#include <optional>
+#include <concepts>
 #include <memory>
+#include <optional>
+#include <utility>
 
-#include "navigation2d/planning/state_lattice_parameters.h"
-#include "navigation2d/planning/global_planner.h"
-#include "navigation2d/planning/obstacle_heuristic.h"
 #include "navigation2d/planning/collision_checker.h"
+#include "navigation2d/planning/global_planner.h"
 #include "navigation2d/planning/incremental_search.h"
 #include "navigation2d/planning/motion_primitives.h"
+#include "navigation2d/planning/obstacle_heuristic.h"
+#include "navigation2d/planning/state_lattice_parameters.h"
 
 namespace navigation2d {
 
@@ -18,10 +19,10 @@ class StateLatticePlanner final : public GlobalPlanner {
     return PathHeadingSemantics::kBodyHeading;
   }
   explicit StateLatticePlanner(const NavigationConfig& config);
-  explicit StateLatticePlanner(StateLatticeParameters config) : config_(std::move(config)) {}
+  template <std::same_as<StateLatticeParameters> Parameters>
+  explicit StateLatticePlanner(Parameters config) : config_(std::move(config)) {}
   ~StateLatticePlanner() override = default;
-  Path Plan(const LayeredCostmap& costmap, const Pose2d& start,
-            const Pose2d& goal) const override;
+  Path Plan(const LayeredCostmap& costmap, const Pose2d& start, const Pose2d& goal) const override;
   GlobalPlanningDiagnostics Diagnostics() const override { return diagnostics_; }
 
  private:
@@ -41,7 +42,7 @@ class StateLatticePlanner final : public GlobalPlanner {
   int Encode(int x, int y, int yaw_bin) const;
   void Decode(int state, int* x, int* y, int* yaw_bin) const;
   std::optional<double> PrimitiveCost(int x, int y,
-      const planning_internal::MotionPrimitive& primitive) const;
+                                      const planning_internal::MotionPrimitive& primitive) const;
   void VisitSuccessors(int state, const planning_internal::SuccessorVisitor& visit) const;
   void VisitPredecessors(int state, const planning_internal::SuccessorVisitor& visit) const;
   double PairHeuristic(int first, int second) const;

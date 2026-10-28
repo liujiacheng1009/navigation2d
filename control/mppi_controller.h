@@ -1,21 +1,26 @@
 #pragma once
-
+#include <concepts>
 #include <cstddef>
 #include <memory>
+#include <utility>
 
-#include "navigation2d/control/mppi_parameters.h"
 #include "navigation2d/control/local_controller.h"
+#include "navigation2d/control/mppi_parameters.h"
 
 namespace navigation2d {
 
-namespace control_internal { class Nav2MppiCore; }
+namespace control_internal {
+class Nav2MppiCore;
+}
 
 // ROS-free differential-drive MPPI controller adapted from Nav2's
 // nav2_mppi_controller optimizer and critic architecture.
 class MppiController final : public LocalController {
  public:
   explicit MppiController(const NavigationConfig& config);
-  explicit MppiController(MppiParameters config);
+  // Constrained deduction preserves the legacy Constructor({}) entry point.
+  template <std::same_as<MppiParameters> Parameters>
+  explicit MppiController(Parameters config) : MppiController(std::move(config), ParameterTag{}) {}
   ~MppiController() override;
   Twist2d Compute(const Path& path, const Pose2d& pose, Twist2d current,
                   const LayeredCostmap& costmap,
@@ -25,6 +30,8 @@ class MppiController final : public LocalController {
   ControllerDiagnostics Diagnostics() const override { return diagnostics_; }
 
  private:
+  struct ParameterTag {};
+  explicit MppiController(MppiParameters config, ParameterTag);
   MppiParameters config_;
   mutable std::unique_ptr<control_internal::Nav2MppiCore> core_;
   mutable ControllerDiagnostics diagnostics_;

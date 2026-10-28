@@ -1,12 +1,12 @@
 #pragma once
-
-#include <array>
-#include <random>
-
 #include <Eigen/Core>
+#include <array>
+#include <concepts>
+#include <random>
+#include <utility>
 
-#include "navigation2d/control/mppi_parameters.h"
 #include "navigation2d/control/local_controller.h"
+#include "navigation2d/control/mppi_parameters.h"
 
 namespace navigation2d::control_internal {
 
@@ -22,7 +22,9 @@ struct MppiRollouts {
 class Nav2MppiCore {
  public:
   explicit Nav2MppiCore(const NavigationConfig& config);
-  explicit Nav2MppiCore(MppiRolloutParameters config);
+  // Constrained deduction preserves the legacy Constructor({}) entry point.
+  template <std::same_as<MppiRolloutParameters> Parameters>
+  explicit Nav2MppiCore(Parameters config) : Nav2MppiCore(std::move(config), ParameterTag{}) {}
   // A warm start belongs to exactly one geometric reference path. Retaining
   // it across a replan injects steering commands for an unrelated route.
   void Reset();
@@ -32,6 +34,8 @@ class Nav2MppiCore {
   Twist2d Command(Twist2d current);
 
  private:
+  struct ParameterTag {};
+  explicit Nav2MppiCore(MppiRolloutParameters config, ParameterTag);
   MppiRolloutParameters config_;
   Eigen::ArrayXd sequence_velocity_, sequence_angular_;
   std::array<Twist2d, 4> history_{};

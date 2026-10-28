@@ -1,4 +1,6 @@
 #pragma once
+#include <concepts>
+#include <utility>
 
 #include "navigation2d/control/dwa_parameters.h"
 #include "navigation2d/control/local_controller.h"
@@ -8,7 +10,8 @@ namespace navigation2d {
 class DwaController final : public LocalController {
  public:
   explicit DwaController(const NavigationConfig& config);
-  explicit DwaController(DwaParameters config) : config_(config) {}
+  template <std::same_as<DwaParameters> Parameters>
+  explicit DwaController(Parameters config) : config_(config) {}
   Twist2d Compute(const Path& path, const Pose2d& pose, Twist2d current,
                   const LayeredCostmap& costmap,
                   const std::vector<PredictedObstacle>& dynamic_obstacles = {}) const override;

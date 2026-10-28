@@ -11,7 +11,7 @@ namespace navigation2d::control_internal {
 Nav2MppiCore::Nav2MppiCore(const NavigationConfig& config)
     : Nav2MppiCore(MppiParametersFrom(config).rollout) {}
 
-Nav2MppiCore::Nav2MppiCore(MppiRolloutParameters config)
+Nav2MppiCore::Nav2MppiCore(MppiRolloutParameters config, ParameterTag)
     : config_(config),
       sequence_velocity_(Eigen::ArrayXd::Zero(config.mppi_time_steps)),
       sequence_angular_(Eigen::ArrayXd::Zero(config.mppi_time_steps)),

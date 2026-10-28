@@ -61,7 +61,7 @@ struct AcadosMpcBackend::Impl {
 
 AcadosMpcBackend::AcadosMpcBackend(const NavigationConfig& config)
     : AcadosMpcBackend(AcadosParametersFrom(config)) {}
-AcadosMpcBackend::AcadosMpcBackend(AcadosParameters config)
+AcadosMpcBackend::AcadosMpcBackend(AcadosParameters config, ParameterTag)
     : impl_(std::make_unique<Impl>(std::move(config))) {}
 AcadosMpcBackend::~AcadosMpcBackend() = default;
 bool AcadosMpcBackend::available() const { return impl_->ready; }

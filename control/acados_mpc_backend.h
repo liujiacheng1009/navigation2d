@@ -1,7 +1,8 @@
 #pragma once
-
+#include <concepts>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "navigation2d/control/acados_parameters.h"
@@ -12,7 +13,10 @@ namespace navigation2d {
 class AcadosMpcBackend {
  public:
   explicit AcadosMpcBackend(const NavigationConfig& config);
-  explicit AcadosMpcBackend(AcadosParameters config);
+  // Constrained deduction preserves the legacy Constructor({}) entry point.
+  template <std::same_as<AcadosParameters> Parameters>
+  explicit AcadosMpcBackend(Parameters config)
+      : AcadosMpcBackend(std::move(config), ParameterTag{}) {}
   ~AcadosMpcBackend();
   AcadosMpcBackend(const AcadosMpcBackend&) = delete;
   AcadosMpcBackend& operator=(const AcadosMpcBackend&) = delete;
@@ -24,6 +28,8 @@ class AcadosMpcBackend {
   ControllerDiagnostics Diagnostics() const;
 
  private:
+  struct ParameterTag {};
+  explicit AcadosMpcBackend(AcadosParameters config, ParameterTag);
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
