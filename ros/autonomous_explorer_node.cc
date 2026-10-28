@@ -44,6 +44,7 @@
 #include "navigation2d/application/exploration/pose_observation.h"
 #include "navigation2d/application/exploration/recovery_policy.h"
 #include "navigation2d/application/exploration/recovery_session.h"
+#include "navigation2d/application/exploration/wall_scrape_actions.h"
 #include "navigation2d/application/exploration/retreat_execution.h"
 #include "navigation2d/application/exploration/return_coordinator.h"
 #include "navigation2d/application/exploration/return_mission_actions.h"
@@ -96,6 +97,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::EscapeRuntime,
                                  private navigation2d::exploration::EntryImmobilityActions,
                                  private navigation2d::exploration::OpenForwardStopActions,
+                                 private navigation2d::exploration::WallScrapeActions,
                                  private navigation2d::exploration::ForwardBlockedActions,
                                  private navigation2d::exploration::AlcoveExitActions,
                                  private navigation2d::exploration::ViewpointSelectionActions,
@@ -687,7 +689,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   // Peel off the jamb, cool the viewpoint, pick something else. Do not
   // replan-in-place while the chassis sits on the threshold (live: scrapes
   // counter Cleared every tick → forever wall_scrapes=1).
-  bool UnstickFromPinch(const char* reason) {
+  bool UnstickFromPinch(const char* reason) override {
     if (last_path_signature_ != 0)
       route_failures_.Cool(last_path_signature_);
     RCLCPP_WARN(get_logger(),
@@ -724,37 +726,20 @@ class AutonomousExplorer final : public rclcpp::Node,
     return true;
   }
 
-  bool BreakWallScrapeThrash(const char* reason) override {
-    if (last_path_signature_ != 0)
-      route_failures_.Cool(last_path_signature_);
-    ++recovery_.wall_scrapes;
-    navigation_.Cancel();
-    RCLCPP_WARN(get_logger(),
-                "%s; wall_scrapes=%d clearance=%.3f signature=%llu", reason,
-                recovery_.wall_scrapes, active_path_min_clearance_m_,
+  navigation2d::exploration::ScrapeRoute ReadScrapeRoute() const override {
+    return {last_path_signature_, active_path_min_clearance_m_};
+  }
+  void ReportWallScrape(const char* reason, int scrapes) override {
+    RCLCPP_WARN(get_logger(), "%s; wall_scrapes=%d clearance=%.3f signature=%llu", reason,
+                scrapes, active_path_min_clearance_m_,
                 static_cast<unsigned long long>(last_path_signature_));
-    // First scrape: same-goal latest-map replan. Second scrape / prior peel /
-    // lethal tip → demote. Do not unstick on first open-front scrape (that
-    // burned tour goals via "driving scrape path into corner tip").
-    if (recovery_.wall_scrapes >= 2 || recovery_.side_peels > 0 ||
-        !navigation2d::PathClearsPinch(active_path_min_clearance_m_)) {
-      return UnstickFromPinch(reason);
-    }
+  }
+  bool RetryScrapedGoal() override {
     dispatch_.ResetLatestMapReplans();
-    const int scrapes = recovery_.wall_scrapes;
-    if (StartNavigation(ActiveGoal(), false, true)) {
-      recovery_.wall_scrapes = scrapes;  // Begin must not erase the budget
-      if (!navigation2d::PathClearsPinch(active_path_min_clearance_m_)) {
-        if (last_path_signature_ != 0)
-          route_failures_.Cool(last_path_signature_);
-        // Count as a failed replan scrape; next BreakWallScrapeThrash demotes.
-        ++recovery_.wall_scrapes;
-        return UnstickFromPinch("replanned path still pinch-scrape");
-      }
-      PublishStatus("NAVIGATING", "replanned off wall after scrape stop");
-      return true;
-    }
-    return UnstickFromPinch("pinch replan failed");
+    return StartNavigation(ActiveGoal(), false, true);
+  }
+  bool BreakWallScrapeThrash(const char* reason) override {
+    return recovery_.BreakWallScrape(reason, *this);
   }
 
   bool BreakWallScrapeAfterPeel() override {

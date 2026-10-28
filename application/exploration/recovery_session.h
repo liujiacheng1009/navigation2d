@@ -1,6 +1,7 @@
 #pragma once
 #include <cmath>
 namespace navigation2d::exploration {
+class WallScrapeActions;
 // Per-goal recovery budget. Counters survive resume/replan of the same
 // viewpoint so side-speck peel cannot reset itself into an infinite loop.
 struct GoalRecoverySession {
@@ -12,6 +13,8 @@ struct GoalRecoverySession {
   int wall_scrapes = 0;
   bool resume_after_escape = false;
   bool active = false;
+
+  bool BreakWallScrape(const char* reason, WallScrapeActions&);
 
   bool SameGoal(double x, double y, double tol = 0.5) const {
     return active && std::hypot(x - goal_x, y - goal_y) <= tol;
