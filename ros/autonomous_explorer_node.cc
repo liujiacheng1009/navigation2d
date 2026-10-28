@@ -54,6 +54,7 @@
 #include "navigation2d/application/exploration/viewpoint_arrival.h"
 #include "navigation2d/application/exploration/viewpoint_rejection_executor.h"
 #include "navigation2d/application/exploration/viewpoint_rejections.h"
+#include "navigation2d/application/exploration/viewpoint_selection.h"
 #include "navigation2d/configuration/vehicle_config.h"
 #include "navigation2d/exploration/frontier_explorer.h"
 #include "navigation2d/geometry/robot_geometry.h"
@@ -76,10 +77,6 @@ namespace {
 
 constexpr double kExploreGoalTolerance = .18;
 
-double NormalizeAngle(double value) {
-  return std::atan2(std::sin(value), std::cos(value));
-}
-
 using Goal = navigation2d::ExplorationGoal;
 
 class AutonomousExplorer final : public rclcpp::Node,
@@ -87,7 +84,6 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::ContinuousHandoffActions,
                                  private navigation2d::exploration::RoomVisitActions,
                                  private navigation2d::exploration::EntryActions,
-                                 private navigation2d::exploration::EntrySelectionActions,
                                  private navigation2d::exploration::EntryCrawlActions,
                                  private navigation2d::exploration::ExecutionCommandEvidence,
                                  private navigation2d::exploration::ViewpointArrivalActions,
@@ -96,9 +92,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::OpenForwardStopActions,
                                  private navigation2d::exploration::ForwardBlockedActions,
                                  private navigation2d::exploration::AlcoveExitActions,
-                                 private navigation2d::exploration::SelectionExhaustionActions,
-                                 private navigation2d::exploration::ViewpointRejectionActions,
-                                 private navigation2d::exploration::TourConstraints,
+                                 private navigation2d::exploration::ViewpointSelectionActions,
                                  private navigation2d::exploration::DispatchActions,
                                  private navigation2d::exploration::CompletionActions,
                                  private navigation2d::exploration_ros::EntryStatusSink {
@@ -106,6 +100,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   AutonomousExplorer()
       : Node("sweepnav_autonomous_explorer"),
         explorer_(navigation2d::exploration_ros::ReadExplorerConfig(*this)),
+        selection_(explorer_, entry_, tour_, completion_, viewpoint_rejections_),
         parameters_(navigation2d::exploration_ros::ReadExplorerParameters(
             *this, *navigation2d::AlgorithmRegistry::Builtins())) {
     motion_output_ = navigation2d::exploration_ros::MakeRosMotionOutput(*this);
@@ -622,7 +617,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   bool ShouldKeepWaitingForFrontiers() const override {
-    return completion_.ShouldWait(explorer_.HasExploringWork(), selection_exhaustion_.blocked_cycles());
+    return completion_.ShouldWait(explorer_.HasExploringWork(), selection_.blocked_cycles());
   }
 
   bool TipPinchedNow() const override {
@@ -652,8 +647,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     route_failures_.ClearSignatures();
     explorer_.ClearFailedBlacklist();
     completion_.ResetBudget();
-    selection_exhaustion_.ResetBlocked();
-    reject_streak_ = 0;
+    selection_.ResetBlocked();
+    selection_.ResetRejected();
     ClearEntryMouthLock();
     navigation_.Cancel();
     ClearPublishedNavPaths();
@@ -849,113 +844,31 @@ class AutonomousExplorer final : public rclcpp::Node,
             navigation2d::exploration::EntrySelectionResult::kHandled) {
       return;
     }
-    // Drop mouths the lidar already cleared; keep the remaining committed
-    // order. Rebuilding the tour on every SelectNextGoal reordered T1..Tn and
-    // made the robot U-turn between alcoves (triangular stutter in open space).
-    tour_.SkipResolved(explorer_);
-    if (tour_.goals().empty()) BuildTour();
-    // A frontier extractor can emit many viewpoints around one wall.  Do not
-    // synchronously exhaust that list when the local controller rejects a
-    // viewpoint: that turns one transient costmap disagreement into hundreds
-    // of failures before the mapper has published its next observation.  This
-    // is the same bounded retry principle used by Nav2 recovery trees: try a
-    // small, diverse budget, then yield to new sensor/map evidence.
-    constexpr int kCandidatePlanBudget = 3;
-    int attempted = 0;
-    int rotated_reverse = 0;
-    const double yaw = Pose()->yaw;
-    while (!tour_.goals().empty() && attempted < kCandidatePlanBudget) {
-      const Goal goal = tour_.goals().front();
-      if (!explorer_.GoalRegionStillFrontier(goal)) {
-        RCLCPP_INFO(get_logger(), "Skipping resolved tour viewpoint (%.2f, %.2f)", goal.x, goal.y);
-        tour_.Advance();
-        continue;
-      }
-      if (RecentlyDemoted(goal)) {
-        RCLCPP_INFO(get_logger(),
-                    "Skipping recently demoted viewpoint (%.2f, %.2f)", goal.x,
-                    goal.y);
-        tour_.Advance();
-        // Rebuild inside the open room. Do not pull a global goal while a
-        // door in this room is still holding the tour.
-        if (tour_.goals().empty() && Pose()) BuildTour();
-        continue;
-      }
-      // Defer reverse goals only when they are far. A tip inside the local
-      // pocket must be finished even if it sits behind the robot — otherwise
-      // we flee the alcove with a red frontier arc still visible.
-      const double bearing = std::atan2(goal.y - Pose()->y,
-                                        goal.x - Pose()->x);
-      const double turn = std::abs(NormalizeAngle(bearing - yaw));
-      const double goal_range = std::hypot(goal.x - Pose()->x,
-                                           goal.y - Pose()->y);
-      if (turn > 1.75 && goal_range > 2.5 &&
-          rotated_reverse < static_cast<int>(tour_.goals().size())) {
-        tour_.DeferCurrent(goal);
-        ++rotated_reverse;
-        continue;
-      }
-      if (StartNavigation(goal, false)) {
-        selection_exhaustion_.GoalAccepted();
-        reject_streak_ = 0;
-        mission_.ResumeExploring();
-        completion_.ResetBudget();
-        return;
-      }
-      tour_.Advance();
-      ++attempted;
-      // Start pinched in wall-corner inflation: every other goal fails the same
-      // start check. Do not entry-probe / rebuild-tour — leave the pinch first.
-      const bool start_pinched = start_occupied_;
-      if (start_pinched) {
-        ++reject_streak_;
-        evidence_budget_.RequestStartReplay();
-        evidence_budget_.ResumeTrailReplay();
-        RCLCPP_WARN(get_logger(),
-                    "Start pinched (%s); peel/short-retreat instead of reject-looping frontiers",
-                    last_planning_failure_.c_str());
-        if (EscapeOrShortRetreat(
-                "start pinched; peel out of inflation",
-                "start pinched; short trail retreat")) {
-          route_failures_.ClearSignatures();
-          return;
-        }
-        break;
-      }
-      // Entry only for real corridor mouths. Open-wall / residual frontiers
-      // (user: 没有门缝) must not LockEntryMouth — that burned attempts on
-      // gap=1.65 open spans and looked like "stuck at a door".
-      if (PassableMouthGoal(goal)) {
-        if (entry_.locked() && !SameEntryMouth(*entry_.locked(), goal)) {
-          explorer_.RecordAttempt(goal, false);
-          continue;
-        }
-        LockEntryMouth(goal);
-        if (StartEntryProbe()) return;
-        if (entry_.attempts() >= EntryAttemptBudget()) {
-          AbandonLockedEntryMouth(
-              "hallway reject; entry probe exhausted, leaving mouth");
-          continue;
-        }
-        entry_.ClearPending();  // lock retained
-        next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
-        return;
-      }
-      navigation2d::exploration::RejectOpenWallViewpoint(
-          explorer_, tour_, viewpoint_rejections_, {goal, last_planning_failure_, last_path_signature_},
-          *this);
-      continue;
+    selection_.Select(*TourRobot(), *this);
+  }
+  bool NavigateViewpoint(const Goal& goal) override { return StartNavigation(goal, false); }
+  navigation2d::exploration::ViewpointPlanFailure LastViewpointFailure() const override {
+    return {start_occupied_, last_planning_failure_, last_path_signature_};
+  }
+  void ViewpointAccepted() override { mission_.ResumeExploring(); }
+  void PreparePinchedViewpoint(const std::string& reason) override {
+    evidence_budget_.RequestStartReplay();
+    evidence_budget_.ResumeTrailReplay();
+    RCLCPP_WARN(get_logger(),
+                "Start pinched (%s); peel/short-retreat instead of reject-looping frontiers",
+                reason.c_str());
+  }
+  void ClearSelectionRouteCooling() override { route_failures_.ClearSignatures(); }
+  void DeferViewpointRetry() override {
+    next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+  }
+  void ReportSelectionSkip(navigation2d::exploration::SelectionSkip kind,
+                           const Goal& goal) override {
+    if (kind == navigation2d::exploration::SelectionSkip::kResolved) {
+      RCLCPP_INFO(get_logger(), "Skipping resolved tour viewpoint (%.2f, %.2f)", goal.x, goal.y);
+    } else {
+      RCLCPP_INFO(get_logger(), "Skipping recently demoted viewpoint (%.2f, %.2f)", goal.x, goal.y);
     }
-    // Same pose keeps rejecting every queued frontier (often cooled first-
-    // segment signatures while pinched in an alcove). Retreat along the
-    // driven trail before spinning on identical rejections until PARTIAL.
-    if (reject_streak_ >= 2 &&
-        EscapeOrShortRetreat("reject streak; peel before reselect",
-                             "reject streak; short trail retreat")) {
-      route_failures_.ClearSignatures();
-      return;
-    }
-    selection_exhaustion_.Resolve(explorer_, completion_, tour_, {*TourRobot(), attempted}, *this);
   }
 
   void StopSelectionMotion() override {
@@ -1613,7 +1526,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   void InitializeMissionProgress(std::size_t known) override {
-    selection_exhaustion_.InitializeKnown(known);
+    selection_.InitializeKnown(known);
     last_progress_known_cells_ = known;
     last_progress_time_ = now();
   }
@@ -1799,7 +1712,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         FinishCompleting();
       } else if (retreat_.active()) {
         retreat_.Finish();
-        reject_streak_ = 0;
+        selection_.ResetRejected();
         // After a trail retreat while a mouth is locked, resume that mouth.
         if (navigation2d::exploration::ResumeEntryAfterRetreat(entry_, explorer_, *this)) return;
         // Keep the committed tour; retreat is not a license to rebuild reverse.
@@ -1981,7 +1894,6 @@ class AutonomousExplorer final : public rclcpp::Node,
 
   navigation2d::exploration::GoalExecutionWatch goal_execution_;
   std::uint64_t map_revision_ = 0;
-  navigation2d::exploration::SelectionExhaustion selection_exhaustion_;
   navigation2d::exploration::ViewpointArrival viewpoint_arrival_;
   std::size_t last_progress_known_cells_ = 0;
   rclcpp::Time last_progress_time_{0, 0, RCL_ROS_TIME};
@@ -1989,7 +1901,6 @@ class AutonomousExplorer final : public rclcpp::Node,
   navigation2d::exploration::ExplorationMission mission_;
   navigation2d::exploration::CompletionExecution completion_;
   navigation2d::exploration::RouteFailureHistory route_failures_;
-  int reject_streak_ = 0;
   int mapped_obstacle_rejects_ = 0;
   navigation2d::exploration::DispatchPolicy dispatch_;
   bool reject_pose_valid_ = false;
@@ -2027,6 +1938,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   rclcpp::Time last_debug_publish_{0, 0, RCL_ROS_TIME};
   navigation2d::exploration_ros::ExplorerObservations observations_;
   navigation2d::FrontierExplorer explorer_;
+  navigation2d::exploration::ViewpointSelection selection_;
   navigation2d::exploration::NavigationSession navigation_;
   const navigation2d::exploration_ros::ExplorerParameters parameters_;
   std::unique_ptr<navigation2d::exploration::MotionOutput> motion_output_;
