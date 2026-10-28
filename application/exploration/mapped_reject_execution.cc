@@ -1,9 +1,8 @@
-#include "navigation2d/application/exploration/goal_failure_execution.h"
+#include "navigation2d/application/exploration/goal_execution.h"
 #include "navigation2d/application/exploration/route_failure_history.h"
 #include "navigation2d/exploration/frontier_explorer.h"
 namespace navigation2d::exploration {
-bool GoalFailureExecution::HandleMappedThrash(RouteFailureHistory& routes,
-                                              GoalFailureActions& actions) {
+bool GoalExecution::HandleMappedThrash(RouteFailureHistory& routes, GoalFailureActions& actions) {
   if (!routes.TakeMappedThrash()) {
     return false;
   }

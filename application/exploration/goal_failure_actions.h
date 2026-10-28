@@ -33,7 +33,7 @@ class GoalFailureActions : public OpenForwardStopActions,
   virtual bool NavigateImmobileGoal() = 0;
   // Schedule the historical 0.4 s cooldown without publishing a status.
   virtual void DelayRecoverySelection() = 0;
-  virtual void RequestImmobilityReplay() = 0;
+  virtual void RequestRecoveryStartReplay() = 0;
   virtual bool TryRescueDistantMouths(const char* reason) = 0;
   virtual const ExplorationGoal& ActiveGoal() const = 0;
   virtual double ActivePathMargin(double sample) const = 0;

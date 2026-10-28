@@ -4,6 +4,7 @@
 
 #include "navigation2d/application/exploration/completion_execution.h"
 #include "navigation2d/application/exploration/entry_coordinator.h"
+#include "navigation2d/application/exploration/entry_recovery_execution.h"
 #include "navigation2d/application/exploration/tour_execution.h"
 #include "navigation2d/application/exploration/viewpoint_rejections.h"
 #include "navigation2d/exploration/frontier_explorer.h"
@@ -116,5 +117,13 @@ void ViewpointSelection::Select(TourPose robot, ViewpointSelectionActions& actio
     return;
   }
   exhaustion_.Resolve(explorer_, completion_, tour_, {robot, attempted}, actions);
+}
+void ViewpointSelection::AfterRetreat(EntryRecoveryActions& actions) {
+  ResetRejected();
+  if (ResumeEntryAfterRetreat(entry_, explorer_, actions)) {
+    return;
+  }
+  actions.SelectAfterEntry();
+  actions.PublishStatus("SELECTING", "left the pinched corridor");
 }
 }  // namespace navigation2d::exploration

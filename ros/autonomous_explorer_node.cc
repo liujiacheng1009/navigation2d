@@ -33,7 +33,8 @@
 #include "navigation2d/application/exploration/execution_command.h"
 #include "navigation2d/application/exploration/forward_blocked.h"
 #include "navigation2d/application/exploration/goal_execution_watch.h"
-#include "navigation2d/application/exploration/goal_failure_execution.h"
+#include "navigation2d/application/exploration/goal_execution.h"
+#include "navigation2d/application/exploration/goal_tracking_actions.h"
 #include "navigation2d/application/exploration/mission_lifecycle.h"
 #include "navigation2d/application/exploration/navigation_profile.h"
 #include "navigation2d/application/exploration/navigation_session.h"
@@ -91,14 +92,11 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::RoomVisitActions,
                                  private navigation2d::exploration::EntryActions,
                                  private navigation2d::exploration::EntryCrawlActions,
-                                 private navigation2d::exploration::ExecutionCommandEvidence,
-                                 private navigation2d::exploration::ViewpointArrivalActions,
                                  private navigation2d::exploration::RetreatActions,
                                  private navigation2d::exploration::MissionRuntime,
                                  private navigation2d::exploration::EscapeRuntime,
                                  private navigation2d::exploration::WallScrapeActions,
-                                 private navigation2d::exploration::GoalFailureActions,
-                                 private navigation2d::exploration::AlcoveExitActions,
+                                 private navigation2d::exploration::GoalTrackingActions,
                                  private navigation2d::exploration::ViewpointSelectionActions,
                                  private navigation2d::exploration::NavigationDispatchRuntime,
                                  private navigation2d::exploration::CompletionActions,
@@ -114,7 +112,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         navigation_(algorithms),
         parameters_(navigation2d::exploration_ros::ReadExplorerParameters(*this, *algorithms)),
         dispatch_(explorer_, parameters_.navigation_profiles),
-        goal_failure_(mission_, return_, entry_, tour_, recovery_, retreat_, explorer_, goal_execution_) {
+        navigation_execution_(mission_, return_, entry_, tour_, recovery_, retreat_, explorer_, goal_execution_) {
     motion_output_ = navigation2d::exploration_ros::MakeRosMotionOutput(*this);
     status_publisher_ = create_publisher<std_msgs::msg::String>(
         "/exploration/status", rclcpp::QoS(1).transient_local().reliable());
@@ -411,13 +409,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     return result == navigation2d::exploration::EntryProbeResult::kDriving;
   }
 
-  bool EntryProbeSatisfied() const {
-    if (!Pose()) { return false; }
-    return entry_.Satisfied(Pose()->x, Pose()->y, ActiveGoal(), explorer_);
-  }
 
-  // After crossing a mouth: queue in-room leftovers before any hallway tour so
-  // the kitchen white pocket is observed before soft-unlock hops out.
   void QueueActiveRegionFinish() override {
     if (!Pose()) return;
     const double rx = Pose()->x;
@@ -462,7 +454,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   using BodyRanges = navigation2d::exploration::BodyRanges;
-  BodyRanges ReadBodyRanges() const {
+  BodyRanges ReadBodyRanges() const override {
     return navigation2d::exploration::ReadBodyRanges(ScanEvidence());
   }
 
@@ -633,7 +625,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   bool UnstickFromPinch(const char* reason) override {
-    goal_failure_.LeavePinch(reason, *this);
+    navigation_execution_.LeavePinch(reason, *this);
     return true;
   }
   void ReportPinchRecovery(const char* reason) override {
@@ -748,7 +740,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     return navigation2d::AxisSwingClear(ReadBodyRanges().front);
   }
 
-  bool HandoffToNextTourGoal() {
+  bool HandoffToNextTourGoal() override {
     if (mission_.phase() != MissionPhase::kExploring || return_.returning() || !navigation_.has_session() ||
         tour_.goals().size() < 2) return false;
     return navigation2d::exploration::TryContinuousTourHandoff(tour_, explorer_, navigation_,
@@ -846,7 +838,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   void HandleReturnRecovery(navigation2d::exploration::ReturnRecoveryMode mode,
-                            const char* unavailable_message) {
+                            const char* unavailable_message) override {
     return_.RecoverMission(mode, unavailable_message, *this);
   }
   void BeginReturn(bool force_return = false) override {
@@ -871,7 +863,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   bool ReplanActiveGoalOnLatestMap(const char* reason) override {
     return dispatch_.ReplanLatest(reason, return_.returning(), navigation_, *this);
   }
-  bool ReplanAfterRouteCut() {
+  bool ReplanAfterRouteCut() override {
     return dispatch_.ReplanAfterCut(return_.returning(), navigation_, *this);
   }
 
@@ -918,8 +910,8 @@ class AutonomousExplorer final : public rclcpp::Node,
   void DelayRecoverySelection() override {
     selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.4)).nanoseconds());
   }
-  void RequestImmobilityReplay() override { evidence_budget_.RequestStartReplay(); }
-  bool PoseImmobilityWatchdog(const navigation2d::NavigationState& state) {
+  void RequestRecoveryStartReplay() override { evidence_budget_.RequestStartReplay(); }
+  bool PoseImmobilityWatchdog(const navigation2d::NavigationState& state) override {
     NotePoseMotion();
     if (!navigation_.has_session() || !Pose()) return false;
     const bool entry_drive = entry_.pending() || entry_.locked();
@@ -945,7 +937,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     motion_output_->Send({});
     navigation_.Cancel();
     pose_motion_.Debounce(now().nanoseconds());
-    goal_failure_.RecoverImmobility(
+    navigation_execution_.RecoverImmobility(
         pose_motion_, {Pose()->x, Pose()->y, state.path_progress_m, entry_drive, tip_wedged}, *this);
     return true;
   }
@@ -1077,7 +1069,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   void CaptureNavTelemetry(const navigation2d::NavigationState& state,
-                           const navigation2d::Twist2d& measured_velocity) {
+                           const navigation2d::Twist2d& measured_velocity) override {
     telemetry_.Capture(state, measured_velocity);
     active_path_min_clearance_m_ = state.global_planning.path_min_clearance_m;
     last_planning_failure_ = state.planning_failure_reason;
@@ -1093,7 +1085,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   bool BreakMappedObstacleThrash() override {
-    return goal_failure_.HandleMappedThrash(route_failures_, *this);
+    return navigation_execution_.HandleMappedThrash(route_failures_, *this);
   }
   std::size_t ReachableUnknownForRecovery() const override {
     return Pose() ? explorer_.ReachableUnknownCells(Pose()->x, Pose()->y) : 0;
@@ -1118,7 +1110,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   // about one accepted route in four dropped mid-drive, return retraced in
   // 0.44 m hops). While driving, only the part ahead of the robot matters and
   // a cut needs a new cell touching the chassis, not the planning circle.
-  bool PathCutsMappedObstacle(bool execution_tick = false) const {
+  bool PathCutsMappedObstacle(bool execution_tick = false) const override {
     if (!navigation_.has_session()) return false;
     return navigation2d::exploration_ros::ObservedRouteCutsWall(
         Map() ? &*Map() : nullptr, navigation_.path(), planning_map_.origin_x(), planning_map_.origin_y(),
@@ -1142,7 +1134,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         Map() ? &*Map() : nullptr, x0, y0, x1, y1);
   }
 
-  void ClearPublishedNavPaths() {
+  void ClearPublishedNavPaths() override {
     debug_reporter_.ClearPaths(*debug_output_, [this] { return now(); });
   }
 
@@ -1236,90 +1228,17 @@ class AutonomousExplorer final : public rclcpp::Node,
     last_planning_failure_ = state.planning_failure_reason;
   }
 
-  void TickNavigation() override {
-    if (HandoffToNextTourGoal()) return;
-    // Do not cancel a running path merely because its frontier has been
-    // observed. That feedback loop was the source of the visible zig-zags:
-    // every new scan invalidated the target, stopped the robot, then selected
-    // another frontier. Keep tracking this safe standoff pose until the
-    // controller reports success or an actual navigation failure.
+  navigation2d::exploration::GoalStepInput ReadStepInput() const override {
     const auto local_pose = LocalPose(*Pose());
     const auto tick_time = now();
-    const auto measured_velocity = FreshVelocity(tick_time);
-    const auto state = navigation_.Step(local_pose, measured_velocity,
-                                                    tick_time.seconds());
-    if (PoseImmobilityWatchdog(state)) return;
-    // Mouth crossing is geometric — acknowledge once past the jambs, but keep
-    // tracking the room-side probe so the chassis finishes into the pocket.
-    if (entry_.pending() && !return_.returning() && !retreat_.active() && Pose() &&
-        EntryProbeSatisfied()) {
-      AcknowledgeEntry(navigation2d::exploration::EntryArrival::kDriving);
-      return;
-    }
-    // Goal already in the observation disk — finish it instead of sitting on
-    // CARROT/GOAL with zero command (junction hesitation).
-    if (mission_.phase() == MissionPhase::kExploring && !return_.returning() && Pose() &&
-        !retreat_.active()) {
-      const double goal_dist = std::hypot(ActiveGoal().x - Pose()->x, ActiveGoal().y - Pose()->y);
-      if (goal_dist < .28 && state.path_progress_m >= .05) {
-        navigation_.Cancel();
-        motion_output_->Send({});
-        viewpoint_arrival_.Near(explorer_, entry_, tour_, ActiveGoal(), *TourRobot(), *this);
-        return;
-      }
-    }
-    if (PathCutsMappedObstacle(/*execution_tick=*/true)) {
-      RCLCPP_WARN(get_logger(), "Dropping path that intersects mapped obstacles goal=(%.2f, %.2f)",
-                  ActiveGoal().x, ActiveGoal().y);
-      motion_output_->Send({});
-      ClearPublishedNavPaths();
-      if (ReplanAfterRouteCut()) return;
-      if (mission_.phase() == MissionPhase::kReturning || return_.returning()) {
-        navigation_.Cancel();
-        route_failures_.ClearSignatures();
-        evidence_budget_.RequestStartReplay();
-        HandleReturnRecovery(navigation2d::exploration::ReturnRecoveryMode::kPathFailure,
-                             "return path intersected mapped obstacles");
-        return;
-      }
-      return;
-    }
-    CaptureNavTelemetry(state, measured_velocity);
-    goal_execution_.ObserveProgress(state.path_progress_m, *this);
-    // Driving a scrape chord into a wall pocket: do not wait for monitor STOP
-    // after the nose is already in the corner (live: clear=0.13, cmd still
-    // 0.27 m/s into south tip).
-    if (mission_.phase() == MissionPhase::kExploring && !return_.returning() && !retreat_.active() &&
-        !entry_.pending() && !entry_.locked() && Pose()) {
-      const double path_clear =
-          ActivePathMargin(state.global_planning.path_min_clearance_m);
-      const double goal_dist = std::hypot(ActiveGoal().x - Pose()->x, ActiveGoal().y - Pose()->y);
-      const BodyRanges body = ReadBodyRanges();
-      if (goal_dist < 4. * navigation2d::kSwingClearance() &&
-          state.path_progress_m >= navigation2d::kPlanningRadius() &&
-          IsCornerTipStall(path_clear, body.front, body.side)) {
-        motion_output_->Send({});
-        BreakWallScrapeThrash("driving scrape path into corner tip");
-        return;
-      }
-    }
-    // Keep the committed region-ordered transit; selecting another mouth here
-    // previously caused goal flicker and crossed paths.
-    telemetry_.NoteCommandBackend(state.controller_diagnostics.backend);
-    const bool safety_held =
-        state.safety_stopped_motion ||
-        state.collision_monitor_action == navigation2d::CollisionMonitorAction::kStop ||
-        state.collision_monitor_action == navigation2d::CollisionMonitorAction::kBlindZoneStop;
-    std::optional<navigation2d::exploration::EntryApproach> approach;
-    if (!safety_held && (entry_.pending() || entry_.locked()) && Pose() &&
-        !retreat_.active() && state.status != navigation2d::NavigationStatus::kSucceeded) {
-      approach = navigation2d::exploration::EntryApproach{*entry_.ActiveMouth(), ActiveGoal(),
-                                                          *TourRobot()};
-    }
-    const auto velocity = navigation2d::exploration::ExecutionCommand(
-        state.command, safety_held, approach, *this);
-    motion_output_->Send(velocity);
-    // Throttle debug topics; control still runs every tick.
+    return {local_pose, FreshVelocity(tick_time), tick_time.seconds()};
+  }
+  void ReportCutNavigationRoute() override {
+    RCLCPP_WARN(get_logger(), "Dropping path that intersects mapped obstacles goal=(%.2f, %.2f)",
+                ActiveGoal().x, ActiveGoal().y);
+  }
+  void ReportExecutionCycle(const navigation2d::NavigationState& state,
+                             navigation2d::Twist2d measured_velocity) override {
     if ((now() - last_debug_publish_).seconds() >= 0.2) {
       last_debug_publish_ = now();
       PublishDebugPaths(state);
@@ -1329,63 +1248,14 @@ class AutonomousExplorer final : public rclcpp::Node,
     if (telemetry_.TakeRecoveryNotice(state.recoveries)) {
       navigation2d::exploration_ros::ReportRouteProgressRecovery(get_logger(), state, measured_velocity);
     }
-    // Dead-end tip crawl: GOAL sits in a U-alcove against the wall. The exit
-    // is open sideways/behind, but RPP keeps probing into the wall. Drop the
-    // terminal cell (lidar already saw the pocket), then turn/brief-reverse
-    // out along the driven trail instead of kissing the wall until timeout.
-    const double goal_distance_now =
-        Pose() ? std::hypot(ActiveGoal().x - Pose()->x, ActiveGoal().y - Pose()->y)
-               : std::numeric_limits<double>::infinity();
-    const BodyRanges body = ReadBodyRanges();
-    const double front_range = body.front;
-    const double side_range = body.side;
-    // Parallel room wall (front open, one flank close) is normal driving, not a
-    // U-tip. Pinch requires both axes inside the planning circle.
-    const bool forward_clearly_open = navigation2d::AxisSwingClear(front_range);
-    const bool corridor_pinch = navigation2d::HitBlocksSwing(front_range) &&
-                                 navigation2d::HitBlocksSwing(side_range);
-    // Include retreat_.active(): tip thrash used frontier_cells=0 retreat poses
-    // that were exempt from this abort, so the robot spun forever in the U.
-    const bool near_goal_alcove_crawl =
-        mission_.phase() == MissionPhase::kExploring && !return_.returning() &&
-        (goal_distance_now < navigation2d::kSwingClearance() ||
-         (state.global_path_length_m > .20 &&
-          state.path_progress_m >= .80 * state.global_path_length_m)) &&
-        goal_execution_.ProgressOlderThan(2.5, *this) &&
-        state.requested_command.linear < .06 &&
-        corridor_pinch;
-    if (near_goal_alcove_crawl) {
-      navigation2d::exploration::ExecuteAlcoveExit(
-          entry_, explorer_, tour_, retreat_, route_failures_, ActiveGoal(),
-          {*TourRobot(), goal_distance_now, front_range, side_range, state.path_progress_m,
-           state.global_path_length_m},
-          *this);
-      return;
-    }
-    if (state.status == navigation2d::NavigationStatus::kSucceeded) {
-      navigation_.Cancel();
-      if (mission_.phase() == MissionPhase::kReturning || return_.returning()) {
-        return_.CompleteArrival(MakeHomeGoal(), Pose()->x, Pose()->y, *this);
-        return;
-      } else if (mission_.phase() == MissionPhase::kCompleting) {
-        explorer_.RecordAttempt(ActiveGoal(), true);
-        FinishCompleting();
-      } else if (retreat_.active()) {
-        retreat_.Finish();
-        selection_.ResetRejected();
-        // After a trail retreat while a mouth is locked, resume that mouth.
-        if (navigation2d::exploration::ResumeEntryAfterRetreat(entry_, explorer_, *this)) return;
-        // Keep the committed tour; retreat is not a license to rebuild reverse.
-        selection_.ScheduleAt(now().nanoseconds());
-        PublishStatus("SELECTING", "left the pinched corridor");
-      } else {
-        viewpoint_arrival_.Succeeded(explorer_, entry_, tour_, ActiveGoal(), *TourRobot(), *this);
-      }
-    } else if (goal_execution_.FailureDue(
-                   state, mission_.phase() == MissionPhase::kReturning || return_.returning(),
-                   front_range, corridor_pinch, forward_clearly_open, *this)) {
-      goal_failure_.Resolve(state, front_range, side_range, *this, *this);
-    }
+  }
+  void CompleteReturnNavigation() override {
+    return_.CompleteArrival(MakeHomeGoal(), Pose()->x, Pose()->y, *this);
+  }
+  void CompleteRetreatNavigation() override { selection_.AfterRetreat(*this); }
+  void TickNavigation() override {
+    navigation_execution_.Track(navigation_, telemetry_, viewpoint_arrival_, route_failures_,
+                                  *motion_output_, *this, *this);
   }
 
   navigation2d::exploration::GoalExecutionWatch goal_execution_;
@@ -1427,7 +1297,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   navigation2d::exploration::NavigationSession navigation_;
   const navigation2d::exploration_ros::ExplorerParameters parameters_;
   navigation2d::exploration::NavigationDispatch dispatch_;
-  navigation2d::exploration::GoalFailureExecution goal_failure_;
+  navigation2d::exploration::GoalExecution navigation_execution_;
   std::unique_ptr<navigation2d::exploration::MotionOutput> motion_output_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_publisher_;
   std::unique_ptr<navigation2d::exploration_ros::DebugReportSink> debug_output_;

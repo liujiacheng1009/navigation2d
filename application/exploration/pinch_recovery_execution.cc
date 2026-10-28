@@ -1,9 +1,9 @@
 #include <cmath>
 
-#include "navigation2d/application/exploration/goal_failure_execution.h"
+#include "navigation2d/application/exploration/goal_execution.h"
 #include "navigation2d/exploration/frontier_explorer.h"
 namespace navigation2d::exploration {
-void GoalFailureExecution::LeavePinch(const char* reason, GoalFailureActions& actions) {
+void GoalExecution::LeavePinch(const char* reason, GoalFailureActions& actions) {
   actions.CoolActiveRecoveryRoute();
   actions.ReportPinchRecovery(reason);
   actions.StopSelectionMotion();

@@ -10,6 +10,7 @@
 #include "navigation2d/application/exploration/tour_execution.h"
 #include "navigation2d/application/exploration/viewpoint_rejections.h"
 #include "navigation2d/exploration/frontier_explorer.h"
+#include "navigation2d/test/entry_recovery_fixture.h"
 #include "navigation2d/test/viewpoint_selection_fixture.h"
 namespace {
 using namespace navigation2d;
@@ -138,4 +139,20 @@ int main() {
   assert(missing.actions.rescue_events.back() == "missing");
   assert(!missing.selection.RescueDistant(mission, false, "again", missing.actions));
   assert(missing.actions.builds == 1);
+  Scene retreat;
+  GoalRecoverySession retreat_budget;
+  test::EntryRecoverySpy continuation(retreat.entry, retreat_budget);
+  continuation.on_select = [&] { retreat.selection.ScheduleAt(200); };
+  retreat.selection.AfterRetreat(continuation);
+  assert((continuation.calls == std::vector<std::string>{"select", "status:SELECTING"}));
+  assert(!retreat.selection.Due(199) && retreat.selection.Due(200));
+  continuation.ResetTrace();
+  retreat.entry.Lock(GoalAt(3.), false, {});
+  continuation.probe_accepts = true;
+  retreat.selection.AfterRetreat(continuation);
+  assert(continuation.calls == std::vector<std::string>{"probe"});
+  assert(retreat.entry.pending());
+  continuation.ResetTrace();
+  retreat.selection.AfterRetreat(continuation);
+  assert((continuation.calls == std::vector<std::string>{"probe", "select", "status:SELECTING"}));
 }

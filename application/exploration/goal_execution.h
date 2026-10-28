@@ -3,21 +3,25 @@
 namespace navigation2d::exploration {
 class ExplorationMission;
 class ReturnCoordinator;
+class NavigationSession;
+class NavigationTelemetry;
+class ViewpointArrival;
+class MotionOutput;
+class GoalTrackingActions;
 class PoseMotionWatch;
 class RouteFailureHistory;
 struct ImmobilityRecoveryObservation {
   double robot_x, robot_y, path_progress_m;  // World-frame metres.
   bool entry_drive, tip_wedged;
 };
-// One failed-navigation stage. Explicit, lifetime-stable collaborators retain
+// Goal tracking and recovery stages. Explicit, lifetime-stable collaborators retain
 // their own state; this coordinator holds no mutable context or duplicate flags.
 // Returning/phase are deliberately read live after synchronous callbacks.
-class GoalFailureExecution {
+class GoalExecution {
  public:
-  GoalFailureExecution(ExplorationMission& mission, ReturnCoordinator& returning,
-                       EntryCoordinator& entry, TourExecution& tour, GoalRecoverySession& recovery,
-                       RetreatExecution& retreat, FrontierExplorer& explorer,
-                       const GoalExecutionWatch& watch)
+  GoalExecution(ExplorationMission& mission, ReturnCoordinator& returning, EntryCoordinator& entry,
+                TourExecution& tour, GoalRecoverySession& recovery, RetreatExecution& retreat,
+                FrontierExplorer& explorer, GoalExecutionWatch& watch)
       : mission_(mission),
         returning_(returning),
         entry_(entry),
@@ -26,6 +30,10 @@ class GoalFailureExecution {
         retreat_(retreat),
         explorer_(explorer),
         watch_(watch) {}
+  // One active-session tick. Dependencies are explicit synchronous role
+  // references, not a shared mutable mission context. Clock reads stay lazy.
+  void Track(NavigationSession&, NavigationTelemetry&, ViewpointArrival&, RouteFailureHistory&,
+             MotionOutput&, GoalTrackingActions&, const GoalExecutionClock&);
   // Consume two consecutive mapped-route rejects before trying local entry
   // or cooling/leaving a tip. Prepared-route acceptance resets this budget.
   bool HandleMappedThrash(RouteFailureHistory&, GoalFailureActions&);
@@ -42,6 +50,13 @@ class GoalFailureExecution {
 
  private:
   bool Returning() const;
+  bool ObserveArrival(const NavigationState&, NavigationSession&, ViewpointArrival&, MotionOutput&,
+                      GoalTrackingActions&);
+  bool GuardCorner(const NavigationState&, MotionOutput&, GoalTrackingActions&);
+  Twist2d CycleCommand(const NavigationState&, GoalTrackingActions&);
+  void FinishCycle(const NavigationState&, NavigationSession&, ViewpointArrival&,
+                   RouteFailureHistory&, GoalTrackingActions&, const GoalExecutionClock&);
+  void FinishSucceeded(NavigationSession&, ViewpointArrival&, GoalTrackingActions&);
   bool HandleMonitorStop(const NavigationState&, double front_m, double side_m,
                          const GoalExecutionClock&, GoalFailureActions&);
   bool HandleSegmentStall(const NavigationState&, bool first_segment, double front_m, double side_m,
@@ -55,6 +70,6 @@ class GoalFailureExecution {
   GoalRecoverySession& recovery_;
   RetreatExecution& retreat_;
   FrontierExplorer& explorer_;
-  const GoalExecutionWatch& watch_;
+  GoalExecutionWatch& watch_;
 };
 }  // namespace navigation2d::exploration

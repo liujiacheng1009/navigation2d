@@ -1,17 +1,16 @@
-#include "navigation2d/application/exploration/goal_failure_execution.h"
-
 #include "navigation2d/application/exploration/exploration_mission.h"
+#include "navigation2d/application/exploration/goal_execution.h"
 #include "navigation2d/application/exploration/return_coordinator.h"
 #include "navigation2d/application/navigation_failure.h"
 #include "navigation2d/exploration/frontier_explorer.h"
 #include "navigation2d/geometry/robot_geometry.h"
 namespace navigation2d::exploration {
-bool GoalFailureExecution::Returning() const {
+bool GoalExecution::Returning() const {
   return mission_.phase() == MissionPhase::kReturning || returning_.returning();
 }
-bool GoalFailureExecution::HandleMonitorStop(const NavigationState& state, double front,
-                                             double side, const GoalExecutionClock& clock,
-                                             GoalFailureActions& actions) {
+bool GoalExecution::HandleMonitorStop(const NavigationState& state, double front, double side,
+                                      const GoalExecutionClock& clock,
+                                      GoalFailureActions& actions) {
   const bool monitor_stop = state.status == NavigationStatus::kBlocked &&
                             state.collision_monitor_action == CollisionMonitorAction::kStop;
   if (mission_.phase() != MissionPhase::kExploring || returning_.returning() || !monitor_stop) {
@@ -34,9 +33,8 @@ bool GoalFailureExecution::HandleMonitorStop(const NavigationState& state, doubl
   }
   return false;
 }
-bool GoalFailureExecution::HandleSegmentStall(const NavigationState& state, bool first_segment,
-                                              double front, double side,
-                                              GoalFailureActions& actions) {
+bool GoalExecution::HandleSegmentStall(const NavigationState& state, bool first_segment,
+                                       double front, double side, GoalFailureActions& actions) {
   const bool force_return = first_segment ? actions.NoteFirstSegmentFailure(state) : false;
   if (Returning()) {
     if (actions.TryReturnSegmentFallback()) {
@@ -79,8 +77,8 @@ bool GoalFailureExecution::HandleSegmentStall(const NavigationState& state, bool
   }
   return false;
 }
-void GoalFailureExecution::FinishFailure(const NavigationState& state, bool first_segment,
-                                         bool mid_path, GoalFailureActions& actions) {
+void GoalExecution::FinishFailure(const NavigationState& state, bool first_segment, bool mid_path,
+                                  GoalFailureActions& actions) {
   if (!mid_path && !IsNoMeasuredMotion(state.execution_failure) &&
       actions.ReplanActiveGoalOnLatestMap(state.status == NavigationStatus::kBlocked
                                               ? "controller could not execute validated route"
@@ -125,8 +123,8 @@ void GoalFailureExecution::FinishFailure(const NavigationState& state, bool firs
                                                : "frontier failed; continuing committed tour"));
   }
 }
-void GoalFailureExecution::Resolve(const NavigationState& state, double front, double side,
-                                   const GoalExecutionClock& clock, GoalFailureActions& actions) {
+void GoalExecution::Resolve(const NavigationState& state, double front, double side,
+                            const GoalExecutionClock& clock, GoalFailureActions& actions) {
   const bool exploring = mission_.phase() == MissionPhase::kExploring && !returning_.returning();
   if (HandleMonitorStop(state, front, side, clock, actions)) {
     return;

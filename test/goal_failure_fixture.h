@@ -5,13 +5,14 @@
 #include <vector>
 
 #include "navigation2d/application/exploration/exploration_mission.h"
-#include "navigation2d/application/exploration/goal_failure_execution.h"
+#include "navigation2d/application/exploration/goal_execution.h"
 #include "navigation2d/application/exploration/pose_motion_watch.h"
 #include "navigation2d/application/exploration/return_coordinator.h"
 #include "navigation2d/exploration/frontier_explorer.h"
 namespace navigation2d::test {
 using namespace exploration;
-struct FailureScene : GoalFailureActions, GoalExecutionClock {
+template <class Actions>
+struct FailureSceneBase : Actions, GoalExecutionClock {
   ExplorationMission mission;
   ReturnCoordinator returning;
   EntryCoordinator entry;
@@ -20,8 +21,7 @@ struct FailureScene : GoalFailureActions, GoalExecutionClock {
   RetreatExecution retreat;
   FrontierExplorer explorer;
   GoalExecutionWatch watch;
-  GoalFailureExecution execution{mission,  returning, entry,    tour,
-                                 recovery, retreat,   explorer, watch};
+  GoalExecution execution{mission, returning, entry, tour, recovery, retreat, explorer, watch};
   PoseMotionWatch motion;
   NavigationState state;
   ExplorationGoal goal;
@@ -34,7 +34,7 @@ struct FailureScene : GoalFailureActions, GoalExecutionClock {
   std::size_t recovery_unknown = 0;
   std::function<void()> on_replan, on_peel;
   std::optional<ExplorationGoal> demoted_goal;
-  FailureScene() {
+  FailureSceneBase() {
     explorer.UpdateMap({30, 30, .1, 0., 0., std::vector<std::int8_t>(900, 0)});
     goal.x = goal.y = goal.frontier_x = goal.frontier_y = 1.;
     tour.RetryLater(goal);
@@ -116,7 +116,7 @@ struct FailureScene : GoalFailureActions, GoalExecutionClock {
   void CoolActiveRecoveryRoute() override { events.emplace_back("cool-route"); }
   bool NavigateImmobileGoal() override { return ReplanActiveGoalOnLatestMap("immobile"); }
   void DelayRecoverySelection() override { events.emplace_back("delay-selection"); }
-  void RequestImmobilityReplay() override { events.emplace_back("replay-start"); }
+  void RequestRecoveryStartReplay() override { events.emplace_back("replay-start"); }
   bool TryRescueDistantMouths(const char*) override {
     events.emplace_back("rescue");
     return rescue;
@@ -172,4 +172,5 @@ struct FailureScene : GoalFailureActions, GoalExecutionClock {
     events.emplace_back("demote");
   }
 };
+using FailureScene = FailureSceneBase<GoalFailureActions>;
 }  // namespace navigation2d::test

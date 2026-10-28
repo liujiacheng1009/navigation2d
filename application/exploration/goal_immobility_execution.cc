@@ -1,10 +1,10 @@
-#include "navigation2d/application/exploration/goal_failure_execution.h"
+#include "navigation2d/application/exploration/goal_execution.h"
 #include "navigation2d/application/exploration/pose_motion_watch.h"
 #include "navigation2d/exploration/frontier_explorer.h"
 namespace navigation2d::exploration {
-void GoalFailureExecution::RecoverImmobility(PoseMotionWatch& motion,
-                                             ImmobilityRecoveryObservation observation,
-                                             GoalFailureActions& actions) {
+void GoalExecution::RecoverImmobility(PoseMotionWatch& motion,
+                                      ImmobilityRecoveryObservation observation,
+                                      GoalFailureActions& actions) {
   if (Returning()) {
     actions.RecoverStalledReturn();
     return;
@@ -34,7 +34,7 @@ void GoalFailureExecution::RecoverImmobility(PoseMotionWatch& motion,
                        1800u);
   entry_.Clear();
   retreat_.AllowRetry();
-  actions.RequestImmobilityReplay();
+  actions.RequestRecoveryStartReplay();
   actions.DelayRecoverySelection();
   if (actions.EscapeOrShortRetreat("immobility at wall tip; peel out of inflation",
                                    "immobility at wall tip; short trail retreat")) {
