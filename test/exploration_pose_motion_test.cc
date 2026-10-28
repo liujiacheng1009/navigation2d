@@ -37,4 +37,30 @@ int main() {
   Require(open.Stalled(entry));
   entry.now_ns = 0;  // A backwards clock does not manufacture elapsed time.
   Require(!open.Stalled(entry));
+  // A nested accepted dispatch resets this budget before the caller commits
+  // its reservation. Refusal/exception must not consume that one allowance.
+  PoseMotionWatch budget;
+  int calls = 0;
+  Require(!budget.TryOpenReplan([&] {
+    ++calls;
+    return false;
+  }));
+  Require(budget.TryOpenReplan([&] {
+    ++calls;
+    budget.ResetOpenReplans();
+    return true;
+  }));
+  Require(!budget.TryOpenReplan([&] {
+    ++calls;
+    return true;
+  }));
+  Require(calls == 2);
+  budget.ResetOpenReplans();
+  try {
+    static_cast<void>(budget.TryOpenReplan([]() -> bool { throw 42; }));
+    Require(false);
+  } catch (int error) {
+    Require(error == 42);
+  }
+  Require(budget.TryOpenReplan([] { return true; }));
 }

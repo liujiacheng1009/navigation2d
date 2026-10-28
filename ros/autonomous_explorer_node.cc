@@ -92,6 +92,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::RetreatActions,
                                  private navigation2d::exploration::MissionRuntime,
                                  private navigation2d::exploration::EscapeRuntime,
+                                 private navigation2d::exploration::EntryImmobilityActions,
                                  private navigation2d::exploration::OpenForwardStopActions,
                                  private navigation2d::exploration::ForwardBlockedActions,
                                  private navigation2d::exploration::AlcoveExitActions,
@@ -266,7 +267,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     const auto goal_started = now();
     const auto goal_progress = now();
     goal_execution_.Start(goal_started.nanoseconds(), goal_progress.nanoseconds());
-    immobility_open_replans_ = 0;
+    pose_motion_.ResetOpenReplans();
     viewpoint_rejections_.ResetScrapes();
     PublishStatus(
         returning ? "RETURNING" : (goal.leftover_approach ? "COMPLETING" : "NAVIGATING"),
@@ -1078,6 +1079,10 @@ class AutonomousExplorer final : public rclcpp::Node,
     pose_motion_.Observe(Pose()->x, Pose()->y, now().nanoseconds());
   }
 
+  void PrepareImmobileEntry(bool replay_start) override {
+    if (replay_start) evidence_budget_.RequestStartReplay();
+    retreat_.AllowRetry();
+  }
   bool PoseImmobilityWatchdog(const navigation2d::NavigationState& state) {
     NotePoseMotion();
     if (!navigation_.has_session() || !Pose()) return false;
@@ -1093,12 +1098,12 @@ class AutonomousExplorer final : public rclcpp::Node,
                               entry_drive, tip_wedged, navigation2d::AxisSwingClear(body.front)})) {
       return false;
     }
-    ++immobility_recoveries_;
+    const int recoveries = pose_motion_.NoteImmobility();
     RCLCPP_WARN(get_logger(),
                 "Pose immobility watchdog: stuck=(%.2f,%.2f) recoveries=%d "
                 "returning=%s entry=%s progress=%.2f tip=%s front=%.2f",
                 Pose()->x, Pose()->y,
-                immobility_recoveries_, return_.returning() ? "yes" : "no",
+                recoveries, return_.returning() ? "yes" : "no",
                 entry_.pending() ? "yes" : "no", state.path_progress_m,
                 tip_wedged ? "yes" : "no", body.front);
     motion_output_->Send({});
@@ -1111,33 +1116,8 @@ class AutonomousExplorer final : public rclcpp::Node,
       return true;
     }
     if (entry_drive) {
-      if (!entry_.pending()) entry_.SetPending(entry_.locked());
-      // progress=0 far from the mouth: one peel, then leave the mouth. Do not
-      // trail-retreat — that drives back along the outbound path (折返).
-      const double mouth_range = std::hypot(
-          Pose()->x - entry_.pending()->frontier_x,
-          Pose()->y - entry_.pending()->frontier_y);
-      if (state.path_progress_m < .08 && mouth_range > 1.5) {
-        evidence_budget_.RequestStartReplay();
-        retreat_.AllowRetry();
-        if (EscapeOrShortRetreat(
-                "immobility far from locked mouth; peel then retry",
-                "unused"))
-          return true;
-        AbandonLockedEntryMouth(
-            "immobility far from mouth; leave and continue tour (no reverse)");
-        next_selection_ = now();
-        return true;
-      }
-      retreat_.AllowRetry();
-      if (EscapeOrShortRetreat("immobility at locked mouth; peel then retry",
-                               "unused"))
-        return true;
-      if (mouth_range <= 1.5 && entry_.attempts() < EntryAttemptBudget() && StartEntryProbe())
-        return true;
-      AbandonLockedEntryMouth(
-          "immobility exhausted locked mouth; continue tour (no reverse)");
-      next_selection_ = now();
+      navigation2d::exploration::ResolveImmobileEntry(
+          entry_, explorer_, {Pose()->x, Pose()->y, state.path_progress_m}, *this);
       return true;
     }
     // Open / non-tip stall: same-goal replan only — never peel (live: front
@@ -1145,12 +1125,11 @@ class AutonomousExplorer final : public rclcpp::Node,
     if (!tip_wedged) {
       if (last_path_signature_ != 0)
         route_failures_.Cool(last_path_signature_);
-      if (immobility_open_replans_ < 1 && StartNavigation(ActiveGoal(), false, true)) {
-        ++immobility_open_replans_;
+      if (pose_motion_.TryOpenReplan([&] { return StartNavigation(ActiveGoal(), false, true); })) {
         PublishStatus("NAVIGATING", "immobility open-front; replanned goal");
         return true;
       }
-      immobility_open_replans_ = 0;
+      pose_motion_.ResetOpenReplans();
       next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
       PublishStatus("SELECTING", "immobility open-front; reselect without peel");
       return true;
@@ -1809,8 +1788,6 @@ class AutonomousExplorer final : public rclcpp::Node,
   // Per cell of the active plan's snapshot: 1 where the planner was told free.
   navigation2d::exploration_io::PlanningMapAdapter planning_map_{"/tmp/sweepnav-navigation-map-"};
   navigation2d::exploration::PoseMotionWatch pose_motion_;
-  int immobility_recoveries_ = 0;
-  int immobility_open_replans_ = 0;
   // Soft wall-scrape rejects: rotate tour twice before RecordAttempt demote.
   navigation2d::exploration::ViewpointRejections viewpoint_rejections_;
   bool tip_rescue_attempted_ = false;

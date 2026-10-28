@@ -1,6 +1,7 @@
 #include "navigation2d/application/exploration/entry_recovery_execution.h"
 
 #include <cassert>
+#include <cmath>
 
 #include "navigation2d/exploration/frontier_explorer.h"
 namespace navigation2d::exploration {
@@ -61,5 +62,35 @@ void ResolveLockedEntryStall(EntryCoordinator& entry, const FrontierExplorer& ex
   actions.AbandonLockedEntryMouth("entry stall; leave mouth and continue tour (no reverse)");
   recovery.Clear();
   actions.SelectAfterEntry();
+}
+void ResolveImmobileEntry(EntryCoordinator& entry, const FrontierExplorer& explorer,
+                          EntryImmobilityObservation observation, EntryImmobilityActions& actions) {
+  RestorePending(entry);
+  // progress=0 far from the mouth: one peel, then leave the mouth. Do not
+  // trail-retreat — that drives back along the outbound path (折返).
+  const double mouth_range = std::hypot(observation.robot_x - entry.pending()->frontier_x,
+                                        observation.robot_y - entry.pending()->frontier_y);
+  if (observation.path_progress_m < .08 && mouth_range > 1.5) {
+    actions.PrepareImmobileEntry(true);
+    if (actions.EscapeOrShortRetreat("immobility far from locked mouth; peel then retry",
+                                     "unused")) {
+      return;
+    }
+    actions.AbandonLockedEntryMouth(
+        "immobility far from mouth; leave and continue tour (no reverse)");
+    actions.SelectAfterEntry();
+    return;
+  }
+  actions.PrepareImmobileEntry(false);
+  if (actions.EscapeOrShortRetreat("immobility at locked mouth; peel then retry", "unused")) {
+    return;
+  }
+  if (mouth_range <= 1.5 && entry.attempts() < entry.AttemptBudget(explorer) &&
+      actions.StartEntryProbe()) {
+    return;
+  }
+  actions.AbandonLockedEntryMouth("immobility exhausted locked mouth; continue tour (no reverse)");
+  actions.SelectAfterEntry();
+  return;
 }
 }  // namespace navigation2d::exploration
