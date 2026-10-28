@@ -17,6 +17,7 @@
 #include "nav_msgs/msg/odometry.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "navigation2d/application/algorithm_registry.h"
+#include "navigation2d/application/navigation_failure.h"
 #include "navigation2d/application/exploration/alcove_exit.h"
 #include "navigation2d/application/exploration/completion_execution.h"
 #include "navigation2d/application/exploration/continuous_tour_handoff.h"
@@ -1690,8 +1691,7 @@ class AutonomousExplorer final : public rclcpp::Node,
             // Accel-limited 0.05 m/s from rest never moves the base; replan
             // storms (live: 190× no-motion at one pose) made it worse. Open-
             // loop crawl toward the probe, then one bounded replan.
-            if (state.planning_failure_reason.find("no measured motion") !=
-                    std::string::npos &&
+            if (navigation2d::IsNoMeasuredMotion(state.execution_failure) &&
                 Pose()) {
               route_failures_.ClearSignatures();
               last_planning_failure_ = state.planning_failure_reason;
@@ -1730,12 +1730,12 @@ class AutonomousExplorer final : public rclcpp::Node,
         }
       }
       if (!mid_path_pinch &&
-          state.planning_failure_reason.find("no measured motion") == std::string::npos &&
+          !navigation2d::IsNoMeasuredMotion(state.execution_failure) &&
           ReplanActiveGoalOnLatestMap(
               state.status == navigation2d::NavigationStatus::kBlocked ?
                   "controller could not execute validated route" : "goal execution timed out"))
         return;
-      if (state.planning_failure_reason.find("no measured motion") != std::string::npos &&
+      if (navigation2d::IsNoMeasuredMotion(state.execution_failure) &&
           mission_.phase() != MissionPhase::kReturning && !return_.returning()) {
         // Replanning the same goal drives the chassis back into the jamb.
         navigation_.Cancel();

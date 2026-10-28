@@ -86,6 +86,7 @@ class NavigationSystem::Impl {
       algorithms.ResetController();
       state.global_planning = algorithms.PlanningDiagnostics();
       state.planning_failure_reason.clear();
+      state.execution_failure = NavigationFailure::kNone;
       state.planning_status = GlobalPlanStatus::kSuccess;
       state.route_rejection = RouteRejection::kNone;
       const double planning_elapsed =
@@ -128,6 +129,7 @@ class NavigationSystem::Impl {
     state.requested_command = {};
     state.published_command = {};
     state.controller_commanded_motion = false;
+    state.execution_failure = NavigationFailure::kNone;
     state.planning_failure_reason =
         stop == AlgorithmStop::kCancelled ? "navigation cancelled" : "navigation budget exceeded";
     if (stop == AlgorithmStop::kCancelled) {
@@ -151,6 +153,7 @@ class NavigationSystem::Impl {
     state.planning_status = status;
     state.route_rejection = rejection;
     state.planning_failure_reason = reason;
+    state.execution_failure = NavigationFailure::kNone;
     if (status == GlobalPlanStatus::kCancelled || status == GlobalPlanStatus::kBudgetExceeded) {
       StopAlgorithm(status == GlobalPlanStatus::kCancelled ? AlgorithmStop::kCancelled
                                                            : AlgorithmStop::kBudgetExceeded);
@@ -176,6 +179,7 @@ class NavigationSystem::Impl {
       return false;
     }
     const auto effects = EffectsFor(failure);
+    state.execution_failure = failure;
     if (effects.record_recovery) {
       ++state.recoveries;
     }
@@ -264,6 +268,7 @@ void NavigationSystem::SetGoal(Pose2d goal) {
   impl_->state.published_command = {};
   impl_->state.collision_monitor_action = CollisionMonitorAction::kNone;
   impl_->state.planning_failure_reason.clear();
+  impl_->state.execution_failure = NavigationFailure::kNone;
   impl_->state.path_signature = 0;
   impl_->state.planning_status = GlobalPlanStatus::kNotRun;
   impl_->state.route_rejection = RouteRejection::kNone;
@@ -339,10 +344,12 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
     impl_->state.status = NavigationStatus::kBlocked;
     impl_->state.control_status = LocalControlStatus::kInvalidInput;
     impl_->state.planning_failure_reason = "invalid navigation pose or timestamp";
+    impl_->state.execution_failure = NavigationFailure::kNone;
     return impl_->state;
   }
   if (impl_->state.planning_failure_reason == "invalid navigation pose or timestamp") {
     impl_->state.planning_failure_reason.clear();
+    impl_->state.execution_failure = NavigationFailure::kNone;
   }
   auto result = ComputeCommandCycle(pose, measured_velocity, timestamp, budget);
   if (const auto stop = budget.Check(); stop != AlgorithmStop::kNone) {
@@ -394,6 +401,7 @@ NavigationState NavigationSystem::ComputeCommandCycle(const Pose2d& pose, Twist2
     if (!PathFootprintValid(impl_->path, impl_->costmap, planning_radius)) {
       impl_->path.clear();
       impl_->state.planning_failure_reason = "active path collided with updated obstacles";
+      impl_->state.execution_failure = NavigationFailure::kNone;
       impl_->state.command = {};
       impl_->next_replan_time = 0.;
     }
@@ -514,6 +522,7 @@ NavigationState NavigationSystem::ComputeCommandCycle(const Pose2d& pose, Twist2
       impl_->algorithm_fault_latched = true;
       impl_->state.status = NavigationStatus::kBlocked;
     }
+    impl_->state.execution_failure = NavigationFailure::kNone;
     impl_->state.planning_failure_reason =
         computed.reason.empty() ? "controller produced no valid command" : computed.reason;
     return impl_->state;

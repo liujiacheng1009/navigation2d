@@ -15,6 +15,10 @@ enum class NavigationFailure {
   kPublishedFullTurn,
   kDockingTimeout
 };
+constexpr bool IsNoMeasuredMotion(NavigationFailure failure) noexcept {
+  return failure == NavigationFailure::kDockingNoMotion ||
+         failure == NavigationFailure::kControllerNoMotion;
+}
 // Legacy failure effects remain explicit: an exhausted progress budget keeps
 // its route, while a docking timeout records no additional recovery event.
 struct NavigationFailureEffects {

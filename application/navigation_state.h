@@ -4,6 +4,7 @@
 #include <string>
 
 #include "navigation2d/application/route_admission.h"
+#include "navigation2d/application/navigation_failure.h"
 #include "navigation2d/control/collision_monitor_types.h"
 #include "navigation2d/control/local_controller.h"
 #include "navigation2d/geometry/twist_2d.h"
@@ -54,6 +55,9 @@ struct NavigationState {
   // the committed route.  Callers cool a failed signature so the next plan
   // cannot replay the same in-place alignment.
   std::uint64_t path_signature = 0;
+  // Latest execution failure. New goals, planning outcomes and replacement
+  // input/backend/stop diagnostics clear it; human text is not a control API.
+  NavigationFailure execution_failure = NavigationFailure::kNone;
 };
 
 }  // namespace navigation2d
