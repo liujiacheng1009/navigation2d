@@ -4,8 +4,10 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <span>
 #include <utility>
 
+#include "navigation2d/control/acados_stage_parameters.h"
 #include "navigation2d/control/path_tracking.h"
 #include "navigation2d/control/safe_corridor.h"
 
@@ -134,86 +136,16 @@ std::optional<Twist2d> AcadosMpcBackend::Solve(
     const double reference_velocity = std::min(
         impl_->config.desired_linear_velocity,
         std::max(impl_->config.min_approach_velocity, robot_remaining * .8));
-    constexpr int corridor_slots = 8;
-    static_assert(NAVIGATION2D_MPCC_NP >= 4 + 4 * corridor_slots + 5);
-    static_assert((NAVIGATION2D_MPCC_NP - 4 - 4 * corridor_slots) % 5 == 0);
-    constexpr int obstacle_slots =
-        (NAVIGATION2D_MPCC_NP - 4 - 4 * corridor_slots) / 5;
-    std::array<double, NAVIGATION2D_MPCC_NP> parameters{};
-    parameters[0] = X(path[reference]);
-    parameters[1] = Y(path[reference]);
-    parameters[2] = reference_heading;
-    parameters[3] = reference_velocity;
-    for (int slot = 0; slot < obstacle_slots; ++slot) {
-      const int offset = 4 + slot * 5;
-      parameters[offset] = 1e6;
-      parameters[offset + 1] = 1e6;
-      parameters[offset + 2] = 1.;
-      parameters[offset + 3] = 1.;
-      parameters[offset + 4] = 0.;
-    }
-    if (!obstacles.empty()) {
-      const double time = stage * impl_->config.control_period;
-      std::vector<const PredictedObstacle*> ranked;
-      ranked.reserve(obstacles.size());
-      for (const auto& obstacle : obstacles) {
-        if (obstacle.age_s >= 0. &&
-            obstacle.age_s <= impl_->config.dynamic_prediction_timeout)
-          ranked.push_back(&obstacle);
-      }
-      std::sort(ranked.begin(), ranked.end(), [&](const auto* first, const auto* second) {
-        const auto risk = [&](const PredictedObstacle* obstacle) {
-          const double prediction_time = time + obstacle->age_s;
-          const Eigen::Vector2d relative(
-              obstacle->x + obstacle->vx * prediction_time - X(path[reference]),
-              obstacle->y + obstacle->vy * prediction_time - Y(path[reference]));
-          const Eigen::Vector2d path_velocity(
-              reference_velocity * std::cos(reference_heading),
-              reference_velocity * std::sin(reference_heading));
-          const Eigen::Vector2d relative_velocity(
-              obstacle->vx - path_velocity.x(), obstacle->vy - path_velocity.y());
-          const double speed_squared = relative_velocity.squaredNorm();
-          const double ttc = speed_squared < 1e-8 ? 1e6 :
-              std::clamp(-relative.dot(relative_velocity) / speed_squared, 0., 10.);
-          const double closest = (relative + ttc * relative_velocity).norm();
-          return std::pair<double, double>{closest, ttc};
-        };
-        return risk(first) < risk(second);
-      });
-      const int active_slots = std::min(obstacle_slots, static_cast<int>(ranked.size()));
-      for (int slot = 0; slot < active_slots; ++slot) {
-        const auto* obstacle = ranked[slot];
-        const double radius = impl_->config.robot_radius + obstacle->radius +
-                              impl_->config.mpc_dynamic_safety_margin;
-        const int offset = 4 + slot * 5;
-        const double prediction_time = time + obstacle->age_s;
-        parameters[offset] = obstacle->x + obstacle->vx * prediction_time;
-        parameters[offset + 1] = obstacle->y + obstacle->vy * prediction_time;
-        parameters[offset + 2] = radius + impl_->config.mpc_dynamic_sigma_scale * obstacle->sigma_x;
-        parameters[offset + 3] = radius + impl_->config.mpc_dynamic_sigma_scale * obstacle->sigma_y;
-        parameters[offset + 4] = 1.;
-      }
-    }
-    const int corridor_offset = 4 + obstacle_slots * 5;
-    for (int slot = 0; slot < corridor_slots; ++slot) {
-      const int offset = corridor_offset + slot * 4;
-      parameters[offset] = 0.;
-      parameters[offset + 1] = 0.;
-      parameters[offset + 2] = 0.;
-      parameters[offset + 3] = 0.;
-    }
-    if (!corridor.empty()) {
-      const auto& halfspaces = corridor[std::min(
-          static_cast<std::size_t>(stage), corridor.size() - 1)];
-      const int active = std::min(corridor_slots, static_cast<int>(halfspaces.size()));
-      for (int slot = 0; slot < active; ++slot) {
-        const int offset = corridor_offset + slot * 4;
-        parameters[offset] = halfspaces[static_cast<std::size_t>(slot)].normal.x();
-        parameters[offset + 1] = halfspaces[static_cast<std::size_t>(slot)].normal.y();
-        parameters[offset + 2] = halfspaces[static_cast<std::size_t>(slot)].bound;
-        parameters[offset + 3] = 1.;
-      }
-    }
+    const auto halfspaces = corridor.empty()
+        ? std::span<const control_internal::Halfspace2d>{}
+        : std::span<const control_internal::Halfspace2d>(
+              corridor[std::min(static_cast<std::size_t>(stage), corridor.size() - 1)]);
+    auto parameters = control_internal::BuildAcadosStageParameters<NAVIGATION2D_MPCC_NP>(
+        {path[reference].translation(), reference_heading, reference_velocity,
+         stage * impl_->config.control_period},
+        obstacles, halfspaces,
+        {impl_->config.robot_radius, impl_->config.dynamic_prediction_timeout,
+         impl_->config.mpc_dynamic_safety_margin, impl_->config.mpc_dynamic_sigma_scale});
     if (navigation2d_mpcc_acados_update_params(capsule, stage, parameters.data(),
                                                 static_cast<int>(parameters.size())) != 0)
       return std::nullopt;
