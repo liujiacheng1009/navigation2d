@@ -16,10 +16,13 @@ int main() {
   assert(handoff.events == std::vector<std::string>{"handoff"});
   assert(handoff.commands.empty() && handoff.plugin.calls.controls == prior_controls);
   TrackingScene immobile;
-  immobile.immobile = true;
+  immobile.motion.Observe(1., 1., 1000000000LL);
+  immobile.now_ns = 10000000000LL;
   immobile.RunTrack();
-  assert(immobile.events.back() == "immobility" && !Has(immobile, "capture"));
-  assert(immobile.commands.empty());
+  assert(Has(immobile, "immobility-report") && !Has(immobile, "capture"));
+  assert(immobile.commands.size() == 1 && immobile.commands.front().linear == 0. &&
+         immobile.commands.front().angular == 0.);
+  assert(!immobile.navigation.has_session() && immobile.motion.recoveries() == 1);
 
   TrackingScene normal;
   normal.RunTrack();

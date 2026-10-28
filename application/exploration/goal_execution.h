@@ -50,7 +50,15 @@ class GoalExecution {
   // One active-session tick. Dependencies are explicit synchronous role
   // references, not a shared mutable mission context. Clock reads stay lazy.
   void Track(NavigationSession&, NavigationTelemetry&, ViewpointArrival&, RouteFailureHistory&,
-             MotionOutput&, GoalTrackingActions&, const GoalExecutionClock&);
+             PoseMotionWatch&, MotionOutput&, GoalTrackingActions&, const GoalExecutionClock&);
+  // Observe accumulated world-frame motion, gate immobility, then stop/cancel
+  // and debounce before dispatching recovery. All clock reads remain lazy.
+  bool WatchImmobility(const NavigationState&, NavigationSession&, PoseMotionWatch&, MotionOutput&,
+                       GoalTrackingActions&, const GoalExecutionClock&);
+  // Discard and cool the active viewpoint; publish selection only after its
+  // entry/session/display/recovery/tour state and deadline have been committed.
+  void DemoteActive(NavigationSession&, ViewpointSelection&, const char* reason,
+                    GoalTrackingActions&);
   // Consume two consecutive mapped-route rejects before trying local entry
   // or cooling/leaving a tip. Prepared-route acceptance resets this budget.
   bool HandleMappedThrash(RouteFailureHistory&, GoalFailureActions&);

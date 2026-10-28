@@ -70,6 +70,8 @@ add_library(navigation2d_exploration_application STATIC
   application/exploration/goal_acceptance_execution.cc
   application/exploration/goal_outcome_execution.cc
   application/exploration/goal_immobility_execution.cc
+  application/exploration/goal_immobility_watch.cc
+  application/exploration/goal_demotion_execution.cc
   application/exploration/pinch_recovery_execution.cc
   application/exploration/mapped_reject_execution.cc
   application/exploration/entry_recovery_execution.cc

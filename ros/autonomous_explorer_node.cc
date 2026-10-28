@@ -855,19 +855,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   void ClearDisplayedGoal() { dispatch_.ClearGoal(); }
 
   void DemoteActiveGoal(const char* reason) override {
-    if (mission_.phase() != MissionPhase::kReturning && !return_.returning()) {
-      explorer_.RecordAttempt(entry_.pending().value_or(ActiveGoal()), false);
-      DemoteViewpointForSeconds(entry_.pending().value_or(ActiveGoal()), 8.0);
-    }
-    ClearEntryMouthLock();
-    navigation_.Cancel();
-    ClearPublishedNavPaths();
-    ClearDisplayedGoal();
-    recovery_.Clear();
-    if (!tour_.goals().empty()) tour_.Advance();
-    // Dwell before hopping mouths — immediate BuildTour caused junction thrash.
-    selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(1.5)).nanoseconds());
-    PublishStatus("SELECTING", reason);
+    navigation_execution_.DemoteActive(navigation_, selection_, reason, *this);
   }
 
   void NotePoseMotion() override {
@@ -894,35 +882,13 @@ class AutonomousExplorer final : public rclcpp::Node,
     selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.4)).nanoseconds());
   }
   void RequestRecoveryStartReplay() override { evidence_budget_.RequestStartReplay(); }
-  bool PoseImmobilityWatchdog(const navigation2d::NavigationState& state) override {
-    NotePoseMotion();
-    if (!navigation_.has_session() || !Pose()) return false;
-    const bool entry_drive = entry_.pending() || entry_.locked();
-    const BodyRanges body = ReadBodyRanges();
-    const double path_clear =
-        ActivePathMargin(state.global_planning.path_min_clearance_m);
-    const bool tip_wedged =
-        !entry_drive &&
-        IsPinchGeometryStall(path_clear, body.front, body.side);
-    if (!pose_motion_.Stalled({now().nanoseconds(), goal_execution_.started_ns(),
-                              goal_execution_.progress_ns(), state.path_progress_m,
-                              entry_drive, tip_wedged, navigation2d::AxisSwingClear(body.front)})) {
-      return false;
-    }
-    const int recoveries = pose_motion_.NoteImmobility();
+  void ReportPoseImmobility(navigation2d::exploration::PoseImmobilityNotice notice) override {
     RCLCPP_WARN(get_logger(),
                 "Pose immobility watchdog: stuck=(%.2f,%.2f) recoveries=%d "
                 "returning=%s entry=%s progress=%.2f tip=%s front=%.2f",
-                Pose()->x, Pose()->y,
-                recoveries, return_.returning() ? "yes" : "no",
-                entry_.pending() ? "yes" : "no", state.path_progress_m,
-                tip_wedged ? "yes" : "no", body.front);
-    motion_output_->Send({});
-    navigation_.Cancel();
-    pose_motion_.Debounce(now().nanoseconds());
-    navigation_execution_.RecoverImmobility(
-        pose_motion_, {Pose()->x, Pose()->y, state.path_progress_m, entry_drive, tip_wedged}, *this);
-    return true;
+                Pose()->x, Pose()->y, notice.recoveries,
+                notice.returning ? "yes" : "no", notice.entry_pending ? "yes" : "no",
+                notice.path_progress_m, notice.tip_wedged ? "yes" : "no", notice.front_m);
   }
 
   void DeferViewpointSelection(double seconds, const char* message) override {
@@ -1220,7 +1186,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   void CompleteRetreatNavigation() override { selection_.AfterRetreat(*this); }
   void TickNavigation() override {
     navigation_execution_.Track(navigation_, telemetry_, viewpoint_arrival_, route_failures_,
-                                  *motion_output_, *this, *this);
+                                  pose_motion_, *motion_output_, *this, *this);
   }
 
   navigation2d::exploration::GoalExecutionWatch goal_execution_;

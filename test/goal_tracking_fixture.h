@@ -16,9 +16,11 @@ struct TrackingScene : FailureSceneBase<GoalTrackingActions>, MotionOutput {
   ViewpointArrival arrival;
   RouteFailureHistory routes;
   Pose2d local_pose = MakePose2d(1., 1., 0.);
-  bool handoff = false, immobile = false, cut = false, cut_replan = false;
+  BodyRanges body{1., 1., 1., 1., 1.};
+  bool handoff = false, cut = false, cut_replan = false;
   std::vector<Twist2d> commands;
   std::function<void(const ExplorationGoal&, const NavigationState&)> on_accepted_report;
+  std::function<void(PoseImmobilityNotice)> on_immobility_report;
   TrackingScene() {
     goal.x = goal.frontier_x = 2.;
     // Use the exploration tolerance for the ordinary path-progress stages.
@@ -48,7 +50,9 @@ struct TrackingScene : FailureSceneBase<GoalTrackingActions>, MotionOutput {
       on_accepted_report(accepted, initial);
     }
   }
-  void RunTrack() { execution.Track(navigation, telemetry, arrival, routes, *this, *this, *this); }
+  void RunTrack() {
+    execution.Track(navigation, telemetry, arrival, routes, motion, *this, *this, *this);
+  }
   void TickIdleReturn() override { events.emplace_back("return-idle"); }
   std::int64_t SelectionDeadlineNs(double seconds) const override {
     events.emplace_back("deadline");
@@ -68,9 +72,11 @@ struct TrackingScene : FailureSceneBase<GoalTrackingActions>, MotionOutput {
     events.emplace_back("input");
     return {local_pose, {}, ExecutionNowNs() / 1e9};
   }
-  bool PoseImmobilityWatchdog(const NavigationState&) override {
-    events.emplace_back("immobility");
-    return immobile;
+  void ReportPoseImmobility(PoseImmobilityNotice notice) override {
+    events.emplace_back("immobility-report");
+    if (on_immobility_report) {
+      on_immobility_report(notice);
+    }
   }
   bool PathCutsMappedObstacle(bool tick) const override {
     assert(tick);
@@ -90,7 +96,7 @@ struct TrackingScene : FailureSceneBase<GoalTrackingActions>, MotionOutput {
   }
   BodyRanges ReadBodyRanges() const override {
     events.emplace_back("body");
-    return {1., 1., 1., 1., 1.};
+    return body;
   }
   void CaptureNavTelemetry(const NavigationState& value, const Twist2d& measured) override {
     events.emplace_back("capture");

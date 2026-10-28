@@ -67,14 +67,14 @@ Twist2d GoalExecution::CycleCommand(const NavigationState& state, GoalTrackingAc
 }
 void GoalExecution::Track(NavigationSession& navigation, NavigationTelemetry& telemetry,
                           ViewpointArrival& arrival, RouteFailureHistory& routes,
-                          MotionOutput& motion, GoalTrackingActions& actions,
-                          const GoalExecutionClock& clock) {
+                          PoseMotionWatch& pose_motion, MotionOutput& motion,
+                          GoalTrackingActions& actions, const GoalExecutionClock& clock) {
   if (actions.HandoffToNextTourGoal()) {
     return;
   }
   const auto input = actions.ReadStepInput();
   const auto state = navigation.Step(input.pose, input.measured_velocity, input.timestamp);
-  if (actions.PoseImmobilityWatchdog(state)) {
+  if (WatchImmobility(state, navigation, pose_motion, motion, actions, clock)) {
     return;
   }
   if (ObserveArrival(state, navigation, arrival, motion, actions)) {

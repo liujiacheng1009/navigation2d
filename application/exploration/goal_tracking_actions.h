@@ -13,6 +13,11 @@ struct GoalStepInput {
   Twist2d measured_velocity;
   double timestamp;  // Seconds in the mission clock domain.
 };
+struct PoseImmobilityNotice {
+  int recoveries;
+  bool returning, entry_pending, tip_wedged;
+  double path_progress_m, front_m;
+};
 // Existing child-role effects share one adapter; the execution coordinator
 // owns their ordering. ReadStepInput preserves pose->clock->velocity order.
 class GoalTrackingActions : public GoalFailureActions,
@@ -36,7 +41,7 @@ class GoalTrackingActions : public GoalFailureActions,
   virtual void SelectNextGoal() = 0;
   virtual bool HandoffToNextTourGoal() = 0;
   virtual GoalStepInput ReadStepInput() const = 0;
-  virtual bool PoseImmobilityWatchdog(const NavigationState&) = 0;
+  virtual void ReportPoseImmobility(PoseImmobilityNotice) = 0;
   virtual bool PathCutsMappedObstacle(bool execution_tick) const = 0;
   virtual void ReportCutNavigationRoute() = 0;
   virtual void ClearPublishedNavPaths() = 0;
