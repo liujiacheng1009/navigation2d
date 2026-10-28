@@ -27,7 +27,7 @@ def main():
     frozen_node = headers / 'navigation2d/ros/autonomous_explorer_node.cc'
     source = root / 'test/explorer_ros_loop_test.cc'
     fixture = root / 'test/explorer_ros_loop_scene.h'
-    before = {str(path): digest(path) for path in [source, fixture, frozen_node, args.baseline_core]}
+    before = {str(path): digest(path) for path in [source, fixture, root / 'test/ros_loop_room.h', frozen_node, args.baseline_core]}
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     adapted = source.read_text()

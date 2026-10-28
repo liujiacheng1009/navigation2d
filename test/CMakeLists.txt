@@ -13,6 +13,12 @@ function(navigation2d_assert_test name library)
   target_compile_options(${name} PRIVATE -UNDEBUG)
 endfunction()
 
+# Explicit evidence target: replacing allocation operators is intentionally
+# excluded from the normal test aggregate and from sanitizer test executables.
+add_executable(navigation_allocation_probe EXCLUDE_FROM_ALL navigation_allocation_probe.cc)
+target_link_libraries(navigation_allocation_probe PRIVATE navigation2d_core)
+
+navigation2d_assert_test(ros_loop_room_test navigation2d_values)
 navigation2d_assert_test(layered_costmap_test navigation2d_core)
 navigation2d_assert_test(costmap_parameter_snapshot_test navigation2d_core)
 navigation2d_assert_test(costmap_parameters_test navigation2d_core)

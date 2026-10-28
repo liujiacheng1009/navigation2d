@@ -17,7 +17,7 @@ exploration、configuration、algorithm_registry 与探索应用/输出已有独
 
 ## application
 
-- `navigation_system.h/.cc`：产品编排入口；拥有 costmap、目标和调度状态，组合后端会话与安全链；具体执行阶段仍待继续分离。
+- `navigation_system.h/.cc`：产品编排入口；拥有 costmap、目标和调度状态，组合后端会话与安全链；对齐、跟踪、精停、故障提交和安全处理分别由组合角色执行，facade 提交路线/目标与周期状态。
 - `navigation_algorithms.*`：独立拥有注册表、规划/控制实例与能力快照，准备路线、重置控制器及执行受校验的请求，配置只读借用。
 - `navigation_execution_options.h`：每个导航实例的局部地图帧及朝向处理策略；默认保留原前进投影，可显式保留后端车体朝向。
 - `application/navigation_config.h`：旧 include 兼容入口；值定义在 `configuration/navigation_config.h`。
@@ -41,13 +41,13 @@ exploration、configuration、algorithm_registry 与探索应用/输出已有独
 - `entry_coordinator.*`：入口锁、证据、尝试/爬行预算和入室判断；爬行返回阻塞、行驶或最后一个命令，适配器保持先发布末命令再处理退出。
 - `escape_execution.h`：脱困命令、截止时间和返航意图的单一所有者；实时雷达修正仍复用 recovery_policy。
 - `pose_motion_watch.*`：独立累计位姿运动与停滞时间窗，保留慢速入室保护，不以编码器转动代替平移进展。
-- `dispatch_policy.*`：初始路线净空验收、目标超时与三类同步递归重试作用域；快照、目标提交和调度仍由节点编排。
+- `dispatch_policy.*`：初始路线净空验收、目标超时与三类同步递归重试作用域；由 NavigationDispatch 执行准备/探测/复核/接受，GoalExecution 提交目标、预算及区域状态；ROS 端口仅提供地图快照、观测和报告适配。
 - `return_coordinator.*`：直返、空闲、路径故障和位姿停滞的返航执行顺序及预算；通过 ReturnActions 窄端口执行，不依赖 ROS 或共享任务 Context。
 - `return_geometry.*`：只读地图上的回家落点与轨迹点计算，保留原 tie-break 和返回类型；不拥有任务状态。
 - `ros/exploration/pose_feedback.*`：定位/真值反馈转换、只读当前位姿、严格超过 0.05 m 的轨迹采样与累计里程；两个订阅路径共用单一状态所有者。
 - `ros/exploration/debug_paths.*`：全局/局部/tour 消息构造和显示光标状态，不发布消息、不提交目标。
 - `ros/exploration/map_observation.*`：世界坐标线段对实时占用图的查询，同时供显示和爬行判断使用；不归调试模块拥有。
-- `ros/autonomous_explorer_node.cc`：仍承担任务/tour 编排、ROS 输入和动作执行，尚未完成薄适配验收。
+- `ros/autonomous_explorer_node.cc`：ROS 节点装配、坐标/时钟转换和各应用端口绑定。任务阶段、选点、目标跟踪/降级、恢复和返航的执行职责已由应用角色接管；节点仍有跨角色绑定及局部业务判断，尚未完成薄适配验收。
 
 ## costmap
 
@@ -519,3 +519,9 @@ flowchart LR
 `controller_solve_us` 由受校验请求边界记录的后端 hook 时间提供，独立 `Diagnostics()`
 读取和安全过滤不进入该指标。旧代码的计时包围范围更宽，不能把该口径校正当作整体性能优化；
 过程耗时、CPU 与 RSS 仍按冻结外部场景独立验收。
+
+## 显式集成与分配证据
+
+- `cmake/explorer_ros.cmake`：可选 ROS 装配的唯一源码清单，供独立工程和在线建图父工程共用；默认核心构建不依赖 ROS。
+- `test/explorer_ros_loop_test.cc`、`explorer_ros_loop_scene.h`、`ros_loop_room.h`：实际公开工厂、订阅和定时器的隔离合成闭环；探索、返航、内部绕障及扫描暂停场景。`tools/run_explorer_ros_loops.py` 创建无网络/私有 IPC 的独立容器并保存完整命令轨迹。普通 CTest 不启动该任务。
+- `test/navigation_allocation_probe.cc`、`tools/check_navigation_allocations.py`：显式构建的标量 C++ new 探针，新旧核心各保留正常/停滞 400 周期；比较命令/阶段/路线指纹和每周期分配。不是延迟门禁，也不覆盖 malloc、对齐分配、SDK 或进程 RSS。

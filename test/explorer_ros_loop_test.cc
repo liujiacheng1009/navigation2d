@@ -15,9 +15,22 @@ int main(int argc, char** argv) {
       throw std::runtime_error("use the isolated ROS loop runner: scenario planner controller");
     }
     const std::string scenario = argv[1], planner = argv[2], controller = argv[3];
-    if (scenario != "return" && scenario != "frontier") {
+    const auto kind = [&] {
+      using navigation2d::test::RosLoopScenario;
+      if (scenario == "return") {
+        return RosLoopScenario::kReturn;
+      }
+      if (scenario == "frontier") {
+        return RosLoopScenario::kFrontier;
+      }
+      if (scenario == "obstacle") {
+        return RosLoopScenario::kObstacle;
+      }
+      if (scenario == "scan_pause") {
+        return RosLoopScenario::kScanPause;
+      }
       throw std::runtime_error("unknown synthetic scenario");
-    }
+    }();
     const auto folder = std::filesystem::path("/tmp/explorer-ros-loops") /
                         (scenario + "-" + planner + "-" + controller);
     std::filesystem::create_directories(folder);
@@ -34,7 +47,7 @@ int main(int argc, char** argv) {
       options.append_parameter_override(prefix + ".local_controller", controller);
     }
     auto scene = std::make_shared<navigation2d::test::ExplorerRosLoopScene>(
-        scenario == "frontier", (folder / "commands.csv").string());
+        kind, (folder / "commands.csv").string());
     auto explorer = navigation2d::exploration_ros::MakeAutonomousExplorer(
         navigation2d::AlgorithmRegistry::Builtins(), options);
     rclcpp::executors::SingleThreadedExecutor executor;
@@ -54,11 +67,13 @@ int main(int argc, char** argv) {
         report["planning"].as<std::string>() == "navigation2d/" + planner + "+" + controller &&
         report["return_error_m"].as<double>() <= .35 && scene->home_error() <= .35 &&
         scene->returning && scene->moving_commands > 10 && scene->planned_paths > 0 &&
-        scene->driven_distance > .5 && (scenario != "frontier" || scene->map_revealed);
+        scene->driven_distance > .5 && (!scene->requires_reveal() || scene->map_revealed) &&
+        (scenario != "scan_pause" || (scene->scan_resumed && scene->pause_stopped_commands >= 3));
     std::cout << "scenario=" << scenario << " planner=" << planner << " controller=" << controller
               << " commands=" << scene->commands << " moving=" << scene->moving_commands
               << " paths=" << scene->planned_paths << " distance=" << scene->driven_distance
-              << " home_error=" << scene->home_error() << " success=" << success << '\n';
+              << " home_error=" << scene->home_error()
+              << " pause_stops=" << scene->pause_stopped_commands << " success=" << success << '\n';
     return success ? 0 : 1;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

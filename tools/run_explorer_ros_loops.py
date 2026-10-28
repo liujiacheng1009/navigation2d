@@ -29,7 +29,7 @@ def main():
     parser.add_argument('--binary', default='/workspace/artifacts/desktop-build/explorer_ros_loop_test')
     parser.add_argument('--output', type=Path, required=True, help='new evidence directory')
     parser.add_argument('--binary-provenance', type=Path, help='frozen builder manifest, when running the original node')
-    parser.add_argument('--scenarios', nargs='+', choices=['return', 'frontier'], default=['return', 'frontier'])
+    parser.add_argument('--scenarios', nargs='+', choices=['return', 'frontier', 'obstacle', 'scan_pause'], default=['return', 'frontier'])
     parser.add_argument('--planners', nargs='+', choices=['dijkstra', 'astar', 'theta_star', 'state_lattice'], default=['dijkstra', 'astar', 'theta_star', 'state_lattice'])
     parser.add_argument('--controllers', nargs='+', choices=['rpp', 'dwa', 'mppi', 'mpc'], default=['rpp', 'dwa', 'mppi', 'mpc'])
     args = parser.parse_args()
@@ -41,7 +41,7 @@ def main():
     provenance = json.loads(args.binary_provenance.read_text()) if args.binary_provenance else None
     if provenance and provenance.get('binary_sha256') != digest(binary):
         raise ValueError('copied binary does not match its supplied provenance')
-    sources = [root / 'test/explorer_ros_loop_test.cc', root / 'test/explorer_ros_loop_scene.h',
+    sources = [root / 'test/explorer_ros_loop_test.cc', root / 'test/explorer_ros_loop_scene.h', root / 'test/ros_loop_room.h',
                root / 'ros/autonomous_explorer_node.cc', root / 'config/navigation2d.yaml', Path(__file__).resolve()]
     source_digests = {str(path.relative_to(root)): digest(path) for path in sources}
     manifest = {'image': image, 'binary_sha256': digest(binary), 'sources': source_digests,

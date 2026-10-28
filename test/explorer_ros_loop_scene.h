@@ -16,6 +16,7 @@
 #include "nav_msgs/msg/odometry.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "navigation2d/geometry/robot_geometry.h"
+#include "navigation2d/test/ros_loop_room.h"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_msgs/msg/string.hpp"
@@ -25,8 +26,12 @@ namespace navigation2d::test {
 // isolated Docker runner. It never connects to a simulator or a hardware node.
 class ExplorerRosLoopScene final : public rclcpp::Node {
  public:
-  ExplorerRosLoopScene(bool frontier, const std::string& trace)
-      : Node("explorer_loop_scene"), frontier_(frontier), trace_(trace) {
+  ExplorerRosLoopScene(RosLoopScenario scenario, const std::string& trace)
+      : Node("explorer_loop_scene"),
+        scenario_(scenario),
+        room_(scenario == RosLoopScenario::kObstacle),
+        frontier_(scenario == RosLoopScenario::kFrontier || scenario == RosLoopScenario::kObstacle),
+        trace_(trace) {
     const auto durable = rclcpp::QoS(1).transient_local().reliable();
     map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>("/localization2d/map", durable);
     pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>("/localization2d/pose",
@@ -39,6 +44,7 @@ class ExplorerRosLoopScene final : public rclcpp::Node {
               std::abs(command.linear.x) > .5 || std::abs(command.angular.z) > 1.5) {
             throw std::runtime_error("non-finite or out-of-profile synthetic chassis command");
           }
+          CheckSourcePause(command);
           linear_ = command.linear.x;
           angular_ = command.angular.z;
           ++commands;
@@ -59,9 +65,9 @@ class ExplorerRosLoopScene final : public rclcpp::Node {
     map_.header.frame_id = "map";
     // A 4 x 3 m room at 2 cm exceeds the unchanged 25,000-cell
     // initial-map maturity requirement without inventing a completed goal.
-    map_.info.width = 200;
-    map_.info.height = 150;
-    map_.info.resolution = .02;
+    map_.info.width = RosLoopRoom::kWidth;
+    map_.info.height = RosLoopRoom::kHeight;
+    map_.info.resolution = RosLoopRoom::kResolution;
     map_.info.origin.orientation.w = 1.;
     BuildMap(!frontier_);
     if (!trace_) {
@@ -73,17 +79,36 @@ class ExplorerRosLoopScene final : public rclcpp::Node {
     timer_ = create_wall_timer(std::chrono::milliseconds(20), [this] { Frame(); });
   }
   double home_error() const { return std::hypot(x_ - 1.15, y_ - 1.5); }
-  int commands = 0, moving_commands = 0, planned_paths = 0;
+  bool requires_reveal() const { return frontier_; }
+  int commands = 0, moving_commands = 0, planned_paths = 0, pause_stopped_commands = 0;
+  bool scan_resumed = false;
   bool returning = false, map_revealed = false;
   double driven_distance = 0.;
 
  private:
+  void CheckSourcePause(const geometry_msgs::msg::Twist& command) {
+    if (scenario_ != RosLoopScenario::kScanPause) {
+      return;
+    }
+    const auto time = std::chrono::steady_clock::now();
+    if (!scan_pause_started_ && std::abs(command.linear.x) > .03) {
+      scan_pause_started_ = time;
+    }
+    if (scan_pause_started_) {
+      const double age = std::chrono::duration<double>(time - *scan_pause_started_).count();
+      if (age >= .55 && age <= 1.05) {
+        if (command.linear.x != 0. || command.angular.z != 0.) {
+          throw std::runtime_error("stale laser source did not hold zero velocity");
+        }
+        ++pause_stopped_commands;
+      }
+    }
+  }
   void BuildMap(bool revealed) {
-    map_.data.resize(200 * 150);
-    for (int y = 0; y < 150; ++y) {
-      for (int x = 0; x < 200; ++x) {
-        map_.data[y * 200 + x] =
-            x == 0 || y == 0 || x == 199 || y == 149 ? 100 : (!revealed && x > 137 ? -1 : 0);
+    map_.data.resize(RosLoopRoom::kWidth * RosLoopRoom::kHeight);
+    for (int y = 0; y < RosLoopRoom::kHeight; ++y) {
+      for (int x = 0; x < RosLoopRoom::kWidth; ++x) {
+        map_.data[y * RosLoopRoom::kWidth + x] = room_.Cell(x, y, revealed);
       }
     }
     map_.header.stamp = now();
@@ -111,7 +136,8 @@ class ExplorerRosLoopScene final : public rclcpp::Node {
     }
     yaw_ = std::atan2(std::sin(next_yaw), std::cos(next_yaw));
     driven_distance += std::abs(linear_) * dt;
-    if (x_ < .27 || x_ > 3.73 || y_ < .27 || y_ > 2.73) {
+    if (x_ < .27 || x_ > 3.73 || y_ < .27 || y_ > 2.73 ||
+        room_.HitsObstacle(x_, y_, kChassisRadius())) {
       throw std::runtime_error("synthetic chassis reached room collision boundary");
     }
     if (frontier_ && !map_revealed && x_ > 1.8) {
@@ -137,6 +163,12 @@ class ExplorerRosLoopScene final : public rclcpp::Node {
     odom.twist.twist.linear.x = linear_;
     odom.twist.twist.angular.z = angular_;
     odom_pub_->publish(odom);
+    if (scan_pause_started_) {
+      if (std::chrono::duration<double>(time - *scan_pause_started_).count() < 1.2) {
+        return;
+      }
+      scan_resumed = true;
+    }
     sensor_msgs::msg::LaserScan scan;
     scan.header = pose.header;
     scan.angle_min = -std::numbers::pi;
@@ -147,22 +179,16 @@ class ExplorerRosLoopScene final : public rclcpp::Node {
     const double sy = y_ + kLidarForwardOffset() * std::sin(yaw_);
     for (int i = 0; i < 180; ++i) {
       const double a = yaw_ + scan.angle_min + i * scan.angle_increment;
-      const double c = std::cos(a), s = std::sin(a);
-      double range = 8.;
-      if (std::abs(c) > 1e-9) {
-        range = std::min(range, (c > 0. ? 3.98 - sx : .02 - sx) / c);
-      }
-      if (std::abs(s) > 1e-9) {
-        range = std::min(range, (s > 0. ? 2.98 - sy : .02 - sy) / s);
-      }
-      scan.ranges.push_back(static_cast<float>(range));
+      scan.ranges.push_back(static_cast<float>(room_.Range(sx, sy, a)));
     }
     scan_pub_->publish(scan);
   }
+  RosLoopScenario scenario_;
+  RosLoopRoom room_;
   bool frontier_, relocated_ = false;
   int frames_ = 0;
   double x_ = 1.15, y_ = 1.5, yaw_ = 0., linear_ = 0., angular_ = 0.;
-  std::optional<std::chrono::steady_clock::time_point> ready_;
+  std::optional<std::chrono::steady_clock::time_point> ready_, scan_pause_started_;
   std::chrono::steady_clock::time_point previous_;
   std::ofstream trace_;
   nav_msgs::msg::OccupancyGrid map_;
