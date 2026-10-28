@@ -78,6 +78,7 @@ add_library(navigation2d_exploration_application STATIC
   application/exploration/entry_target.cc
   application/exploration/entry_coordinator.cc
   application/exploration/recovery_policy.cc
+  application/exploration/escape_execution.cc
   application/exploration/return_geometry.cc
   application/exploration/return_coordinator.cc
   application/exploration/continuous_tour_handoff.cc

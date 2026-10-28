@@ -15,8 +15,12 @@ struct EscapeExitContext {
 // Single writer for a body-frame escape's command, deadline and return intent.
 // Nanosecond stamps must use the same mission clock; zero means not scheduled.
 // The caller keeps the legacy ROS duration conversion at the adapter boundary.
+class EscapeRuntime;
+class MotionOutput;
 class EscapeExecution {
  public:
+  bool TryStart(EscapeRuntime&);
+  bool Tick(GoalRecoverySession&, MotionOutput&, EscapeRuntime&);
   enum class Phase { kInactive, kDriving, kExpired };
   bool Busy(std::int64_t now_ns) const { return now_ns < deadline_ns_; }
   bool scheduled() const { return deadline_ns_ != 0; }
