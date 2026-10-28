@@ -1,4 +1,5 @@
 #include <cassert>
+#include <chrono>
 #include <functional>
 #include <limits>
 #include <stdexcept>
@@ -12,12 +13,16 @@ class LegacyController final : public LocalController {
   mutable int calls = 0;
   bool deliberate = false;
   std::function<Twist2d()> run;
+  std::function<void()> diagnostic_action;
   Twist2d Compute(const Path&, const Pose2d&, Twist2d, const LayeredCostmap&,
                   const std::vector<PredictedObstacle>&) const override {
     ++calls;
     return run();
   }
   ControllerDiagnostics Diagnostics() const override {
+    if (diagnostic_action) {
+      diagnostic_action();
+    }
     ControllerDiagnostics d;
     d.intentional_stop = deliberate;
     return d;
@@ -96,4 +101,21 @@ int main() {
   assert(typed.ComputeWithContext(request).status == LocalControlStatus::kInvalidOutput);
   typed.result = {LocalControlStatus::kIntentionalStop, {}, "holding"};
   assert(typed.ComputeWithContext(request).status == LocalControlStatus::kIntentionalStop);
+  // A deliberately slow diagnostic read must not enter the backend-hook timer.
+  // The inequality uses observed event ordering rather than a machine speed threshold.
+  controller.deliberate = false;
+  controller.run = [] { return Twist2d{.1, 0.}; };
+  std::chrono::steady_clock::time_point diagnostic_started;
+  controller.diagnostic_action = [&] {
+    diagnostic_started = std::chrono::steady_clock::now();
+    const auto until = diagnostic_started + std::chrono::microseconds(200);
+    while (std::chrono::steady_clock::now() < until) {
+    }
+  };
+  const auto before_request = std::chrono::steady_clock::now();
+  result = controller.ComputeWithContext(request);
+  const double before_diagnostics_us =
+      std::chrono::duration<double, std::micro>(diagnostic_started - before_request).count();
+  assert(result.has_command() && result.backend_duration_us >= 0.);
+  assert(result.backend_duration_us <= before_diagnostics_us);
 }

@@ -24,6 +24,9 @@ exploration、configuration、algorithm_registry 与探索应用/输出已有独
 - `navigation_config.cc`：内置选择的兼容加载入口；分组 YAML 解析、范围检查与参数描述在 `configuration/`。
 - `typed_algorithm_registration.h`：外部算法专用配置解析/校验与工厂接入，不构建后端来验证参数。
 - `route_preparation.*`：规划回退、角点验收、签名冷却和平滑流水线，不拥有执行状态。
+- `navigation_state.h`：独立的状态/诊断值契约，旧 `navigation_system.h` 包含路径兼容；阶段模块不接收可变的导航总 Context。
+- `alignment_execution.*`、`tracking_execution.*`、`docking_execution.*`：分别执行旋转对齐、后端跟踪与精停周期。精停拥有 servo；watchdog 和安全管线仍各自拥有唯一状态，通过显式调用消费事实，协调器统一提交失败效果。
+- `navigation_motion.*`：按原顺序评估安全过滤，并集中投影请求/发布/停止标志；TTC 单独提交，避免改变跟踪提前返回时的诊断。
 - `docking_servo.*`：精停进度/姿态迟滞与速度生成，按新目标重置；安全过滤和失败提交仍由导航编排执行。
 - `command_safety_pipeline.*`：独立拥有传感器监测和动态预测；借用 Impl 内稳定寿命的配置，先动态否决后消费原始传感器观测，保留 TTC 的原调用位置。
 - `execution_watchdog.*`：路线/对齐进度、旋转、安全停止计时、零命令和每目标恢复预算；组合原 CommandStallWatch，三类重置范围保持不同。
@@ -490,3 +493,29 @@ flowchart TD
 `LayeredCostmap` 组合静态图、动态障碍层、主图和变化历史。`costmap_internal::ObstacleLayer` 只拥有动态栅格；每次同步更新借用图几何及两个观测距离限制，不保留引用。`GridChangeHistory` 只记录主图实际变化的版本及最后 64 条记录；空更新不占用版本，过旧查询返回全图，当前/未来查询为空。复制/移动这些值对象不会让它们指向另一个地图实例。
 
 有限回波、无返回清障、点云射线、未知格和膨胀规则保持原顺序；Mark/Clear 即使没有有效格也继续走原来的重新膨胀流程。公共 Cost 枚举和查询接口不变。13 个冻结快照覆盖完整主图、摘要、版本、变化集合、距离/碰撞查询、滚动窗口，以及无变化更新、历史边界和复制/移动。
+
+## 导航周期的执行边界
+
+箭头表示调用或结果提交；各阶段没有 ROS 发布或地图文件资源。
+
+```mermaid
+flowchart LR
+  C[NavigationSystem 协调器] --> A[AlignmentExecution]
+  C --> T[RunTrackingCycle]
+  C --> D[DockingExecution + Servo]
+  T --> B[NavigationAlgorithms 后端边界]
+  A --> S[安全管线]
+  T --> S
+  D --> S
+  A --> W[ExecutionWatchdog]
+  T --> W
+  D --> W
+  A --> R[阶段结果]
+  T --> R
+  D --> R
+  R --> C
+```
+
+`controller_solve_us` 由受校验请求边界记录的后端 hook 时间提供，独立 `Diagnostics()`
+读取和安全过滤不进入该指标。旧代码的计时包围范围更宽，不能把该口径校正当作整体性能优化；
+过程耗时、CPU 与 RSS 仍按冻结外部场景独立验收。

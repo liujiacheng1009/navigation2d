@@ -73,6 +73,8 @@ target_link_libraries(navigation2d_configuration PUBLIC
 navigation2d_library(navigation2d_core
   application/execution_watchdog.cc application/navigation_failure.cc application/navigation_algorithms.cc
   application/command_safety_pipeline.cc application/docking_servo.cc
+  application/navigation_motion.cc application/alignment_execution.cc
+  application/docking_execution.cc application/tracking_execution.cc
   application/command_stall_watch.cc application/route_preparation.cc
   application/navigation_system.cc)
 target_link_libraries(navigation2d_core PUBLIC navigation2d_builtin_algorithms

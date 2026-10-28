@@ -5,6 +5,18 @@
 #include <limits>
 
 namespace navigation2d::planning_internal {
+double InitialHeadingError(const Path& path, PathHeadingSemantics semantics, const Pose2d& pose) {
+  if (path.size() < 2) {
+    return 0.;
+  }
+  const auto tangent = path[1].translation() - path[0].translation();
+  const double target = semantics == PathHeadingSemantics::kBodyHeading
+                            ? Yaw(path.front())
+                            : std::atan2(tangent.y(), tangent.x());
+  const double error = target - Yaw(pose);
+  return std::atan2(std::sin(error), std::cos(error));
+}
+
 bool PathFootprintValid(const Path& path, const LayeredCostmap& costmap, double robot_radius) {
   if (path.empty()) {
     return false;

@@ -12,15 +12,18 @@
 #include <vector>
 
 #include "navigation2d/application/algorithm_registry.h"
+#include "navigation2d/application/alignment_execution.h"
 #include "navigation2d/application/command_safety_pipeline.h"
-#include "navigation2d/application/docking_servo.h"
+#include "navigation2d/application/docking_execution.h"
 #include "navigation2d/application/execution_watchdog.h"
 #include "navigation2d/application/navigation_algorithms.h"
 #include "navigation2d/application/navigation_failure.h"
+#include "navigation2d/application/navigation_motion.h"
 #include "navigation2d/application/route_preparation.h"
+#include "navigation2d/application/tracking_execution.h"
 #include "navigation2d/control/collision_monitor.h"
-#include "navigation2d/costmap/grid_2d.h"
 #include "navigation2d/costmap/coordinate_validation.h"
+#include "navigation2d/costmap/grid_2d.h"
 #include "navigation2d/costmap/layered_costmap.h"
 #include "navigation2d/planning/collision_checker.h"
 #include "navigation2d/planning/global_planner.h"
@@ -29,7 +32,6 @@
 
 namespace navigation2d {
 using planning_internal::AddPathMetrics;
-using planning_internal::DistanceToPath;
 using planning_internal::PathFootprintValid;
 using planning_internal::PathProgress;
 namespace {
@@ -57,6 +59,8 @@ class NavigationSystem::Impl {
         docking({config.goal_xy_tolerance, config.goal_yaw_tolerance,
                  config.max_linear_acceleration, config.max_angular_acceleration,
                  config.control_period}),
+        alignment({config.max_linear_acceleration, config.max_angular_acceleration,
+                   config.max_angular_velocity, config.control_period}),
         execution({config.control_period, config.progress_radius, config.progress_timeout,
                    config.max_recovery_attempts}) {
     if (std::abs(costmap.grid().resolution() - config.map_resolution) > 1e-9) {
@@ -200,7 +204,8 @@ class NavigationSystem::Impl {
   NavigationState state;
   bool observation_changed = false;
   double next_replan_time = 0.;
-  DockingServo docking;
+  DockingExecution docking;
+  AlignmentExecution alignment;
   ExecutionWatchdog execution;
   int planning_failures = 0;
   std::unordered_set<std::uint64_t> banned_path_signatures;
@@ -399,6 +404,7 @@ NavigationState NavigationSystem::ComputeCommandCycle(const Pose2d& pose, Twist2
   if (impl_->path.empty()) {
     return impl_->state;
   }
+  const NavigationCycleObservation observation{pose, measured_velocity, timestamp};
   const double goal_distance = (impl_->goal->translation() - pose.translation()).norm();
   const bool precision_goal = impl_->config.goal_xy_tolerance <= .05;
   // A centimetre-scale SE(2) docking pose is not a short global path. Switch
@@ -407,42 +413,21 @@ NavigationState NavigationSystem::ComputeCommandCycle(const Pose2d& pose, Twist2
   const bool body_heading_route = impl_->metadata.headings == PathHeadingSemantics::kBodyHeading;
   if (precision_goal && goal_distance <= .30 && !body_heading_route) {
     impl_->state.phase = NavigationPhase::kDockToGoal;
-    const auto servo =
-        impl_->docking.Advance(pose, *impl_->goal, goal_distance, impl_->state.published_command);
-    const double yaw_error = servo.yaw_error_rad;
-    impl_->execution.NoteDocking(servo.distance_progress, servo.yaw_progress, timestamp);
-    if (servo.succeeded) {
+    const auto cycle = impl_->docking.Advance(
+        impl_->execution, impl_->safety,
+        {observation, *impl_->goal, goal_distance, impl_->state.published_command});
+    if (cycle.succeeded) {
       impl_->state.command = {};
       impl_->state.published_command = {};
       impl_->state.status = NavigationStatus::kSucceeded;
       return impl_->state;
     }
-    Twist2d docking = servo.command;
-    impl_->state.requested_command = docking;
-    impl_->state.controller_commanded_motion =
-        std::abs(docking.linear) > 1e-4 || std::abs(docking.angular) > 1e-4;
-    const auto monitored = impl_->safety.Filter(pose, docking, timestamp);
-    docking = monitored.command;
-    impl_->state.published_command = docking;
-    impl_->state.collision_monitor_action = monitored.action;
-    impl_->state.safety_stopped_motion = impl_->state.controller_commanded_motion &&
-                                         std::abs(docking.linear) <= 1e-4 &&
-                                         std::abs(docking.angular) <= 1e-4;
-    impl_->state.minimum_ttc_s = monitored.time_to_collision_s;
-    const bool docking_commanded =
-        impl_->state.controller_commanded_motion &&
-        (std::abs(docking.linear) > 1e-4 || std::abs(docking.angular) > 1e-4) &&
-        !impl_->state.safety_stopped_motion;
-    if (impl_->ApplyFailure(
-            impl_->execution.ObserveStall({pose, 0., measured_velocity, yaw_error, timestamp,
-                                           docking_commanded, std::abs(docking.linear) > 1e-3},
-                                          StallMode::kDocking))) {
+    CaptureMotion(impl_->state, *cycle.motion);
+    impl_->state.minimum_ttc_s = cycle.motion->monitored.time_to_collision_s;
+    if (impl_->ApplyFailure(cycle.failure)) {
       return impl_->state;
     }
-    if (impl_->ApplyFailure(impl_->execution.DockingTimeout(timestamp))) {
-      return impl_->state;
-    }
-    impl_->state.command = docking;
+    impl_->state.command = cycle.motion->monitored.command;
     impl_->state.status = NavigationStatus::kNavigating;
     return impl_->state;
   }
@@ -471,57 +456,21 @@ NavigationState NavigationSystem::ComputeCommandCycle(const Pose2d& pose, Twist2
   const double path_progress = PathProgress(impl_->path, pose, impl_->execution.path_anchor_m());
   impl_->state.path_progress_m = path_progress;
   if (impl_->state.phase == NavigationPhase::kAlignToPath && impl_->path.size() >= 2) {
-    const auto tangent = impl_->path[1].translation() - impl_->path[0].translation();
-    const double target_heading = impl_->metadata.headings == PathHeadingSemantics::kBodyHeading
-                                      ? Yaw(impl_->path.front())
-                                      : std::atan2(tangent.y(), tangent.x());
-    const double heading_error = NormalizeAngle(target_heading - Yaw(pose));
-    const double alignment_score = std::abs(heading_error) + DistanceToPath(impl_->path, pose);
-    if (impl_->execution.ObserveAlignment(alignment_score, heading_error, path_progress,
-                                          timestamp)) {
+    const auto cycle = impl_->alignment.Advance(
+        impl_->execution, impl_->safety,
+        {observation, impl_->path, impl_->metadata, path_progress, impl_->state.published_command});
+    if (!cycle.motion) {
       impl_->state.phase = NavigationPhase::kTrackPath;
     } else {
-      // Align is a rotation-only contract.  RPP's first tracking sample from
-      // rest is accel-limited to about (0.05, 0.11); CommandStalled then
-      // treats that as a failed translation and ignores yaw, so a valid
-      // 17 m home path is torn down before the base has finished turning.
-      const double dv = impl_->config.max_linear_acceleration * impl_->config.control_period;
-      const double dw = impl_->config.max_angular_acceleration * impl_->config.control_period;
-      Twist2d align{0., std::clamp(2.2 * heading_error, -impl_->config.max_angular_velocity,
-                                   impl_->config.max_angular_velocity)};
-      align.linear = std::clamp(0., impl_->state.published_command.linear - dv,
-                                impl_->state.published_command.linear + dv);
-      align.angular = std::clamp(align.angular, impl_->state.published_command.angular - dw,
-                                 impl_->state.published_command.angular + dw);
-      impl_->state.requested_command = align;
-      impl_->state.controller_commanded_motion =
-          std::abs(align.linear) > 1e-4 || std::abs(align.angular) > 1e-4;
-      impl_->execution.ChargeRotation(align.angular);
-      const auto monitored = impl_->safety.Filter(pose, align, timestamp);
-      align = monitored.command;
-      impl_->state.published_command = align;
-      impl_->state.collision_monitor_action = monitored.action;
-      impl_->state.safety_stopped_motion = impl_->state.controller_commanded_motion &&
-                                           std::abs(align.linear) <= 1e-4 &&
-                                           std::abs(align.angular) <= 1e-4;
-      impl_->state.minimum_ttc_s = monitored.time_to_collision_s;
+      CaptureMotion(impl_->state, *cycle.motion);
+      impl_->state.minimum_ttc_s = cycle.motion->monitored.time_to_collision_s;
       impl_->state.controller_diagnostics.backend = ControllerBackend::kRpp;
       impl_->state.controller_diagnostics.maneuver = ControllerManeuver::kRotateToPath;
       impl_->state.controller_diagnostics.fallback_level = 6;
-      const bool align_commanded =
-          impl_->state.controller_commanded_motion &&
-          (std::abs(align.linear) > 1e-4 || std::abs(align.angular) > 1e-4) &&
-          !impl_->state.safety_stopped_motion;
-      if (impl_->ApplyFailure(impl_->execution.ObserveStall(
-              {pose, path_progress, measured_velocity, heading_error, timestamp, align_commanded,
-               std::abs(align.linear) > 1e-3},
-              StallMode::kAlignment))) {
+      if (impl_->ApplyFailure(cycle.failure)) {
         return impl_->state;
       }
-      if (impl_->ApplyFailure(impl_->execution.CheckRotation(RotationStage::kAlignment))) {
-        return impl_->state;
-      }
-      impl_->state.command = align;
+      impl_->state.command = cycle.motion->monitored.command;
       impl_->state.status = NavigationStatus::kNavigating;
       impl_->state.costmap_digest = impl_->costmap.digest();
       return impl_->state;
@@ -537,89 +486,44 @@ NavigationState NavigationSystem::ComputeCommandCycle(const Pose2d& pose, Twist2
     return impl_->state;
   }
 
-  Twist2d command;
-  {
-    double route_heading_error = 0.;
-    if (impl_->path.size() >= 2) {
-      const auto tangent = impl_->path[1].translation() - impl_->path[0].translation();
-      const double target_heading = impl_->metadata.headings == PathHeadingSemantics::kBodyHeading
-                                        ? Yaw(impl_->path.front())
-                                        : std::atan2(tangent.y(), tangent.x());
-      route_heading_error = NormalizeAngle(target_heading - Yaw(pose));
+  const auto cycle = RunTrackingCycle(
+      impl_->algorithms, impl_->execution, impl_->safety,
+      {observation, impl_->path, impl_->metadata, impl_->costmap, path_progress, budget});
+  const auto& computed = cycle.control;
+  impl_->state.control_status = computed.status;
+  impl_->state.controller_solve_us = computed.backend_duration_us;
+  if (!computed.has_command()) {
+    impl_->state.controller_diagnostics = computed.diagnostics.value_or(ControllerDiagnostics{});
+    if (!computed.diagnostics) {
+      impl_->state.controller_diagnostics.status = ControllerSolveStatus::kFailure;
     }
-    const auto solve_started = std::chrono::steady_clock::now();
-    auto computed =
-        impl_->algorithms.Compute({impl_->path, pose, measured_velocity, impl_->costmap,
-                                   impl_->safety.predictions(), budget, &impl_->metadata});
-    impl_->state.control_status = computed.status;
-    if (!computed.has_command()) {
-      impl_->state.controller_solve_us = std::chrono::duration<double, std::micro>(
-                                             std::chrono::steady_clock::now() - solve_started)
-                                             .count();
-      impl_->state.controller_diagnostics = computed.diagnostics.value_or(ControllerDiagnostics{});
-      if (!computed.diagnostics) {
-        impl_->state.controller_diagnostics.status = ControllerSolveStatus::kFailure;
-      }
-      impl_->state.command = {};
-      impl_->state.requested_command = {};
-      impl_->state.published_command = {};
-      impl_->state.controller_commanded_motion = false;
-      if (computed.status == LocalControlStatus::kCancelled ||
-          computed.status == LocalControlStatus::kBudgetExceeded) {
-        impl_->StopAlgorithm(computed.status == LocalControlStatus::kCancelled
-                                 ? AlgorithmStop::kCancelled
-                                 : AlgorithmStop::kBudgetExceeded);
-      } else {
-        impl_->algorithm_fault_latched = true;
-        impl_->state.status = NavigationStatus::kBlocked;
-      }
-      impl_->state.planning_failure_reason =
-          computed.reason.empty() ? "controller produced no valid command" : computed.reason;
-      return impl_->state;
+    impl_->state.command = {};
+    impl_->state.requested_command = {};
+    impl_->state.published_command = {};
+    impl_->state.controller_commanded_motion = false;
+    if (computed.status == LocalControlStatus::kCancelled ||
+        computed.status == LocalControlStatus::kBudgetExceeded) {
+      impl_->StopAlgorithm(computed.status == LocalControlStatus::kCancelled
+                               ? AlgorithmStop::kCancelled
+                               : AlgorithmStop::kBudgetExceeded);
+    } else {
+      impl_->algorithm_fault_latched = true;
+      impl_->state.status = NavigationStatus::kBlocked;
     }
-    command = computed.command;
-    impl_->state.requested_command = command;
-    impl_->state.controller_commanded_motion =
-        std::abs(command.linear) > 1e-4 || std::abs(command.angular) > 1e-4;
-    impl_->execution.ChargeController(command);
-    impl_->state.controller_solve_us =
-        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - solve_started)
-            .count();
-    impl_->state.controller_diagnostics = *computed.diagnostics;
-    if (impl_->state.controller_diagnostics.solve_us <= 0.) {
-      impl_->state.controller_diagnostics.solve_us = impl_->state.controller_solve_us;
-    }
-    const auto monitored = impl_->safety.Filter(pose, command, timestamp);
-    command = monitored.command;
-    impl_->state.published_command = command;
-    impl_->state.collision_monitor_action = monitored.action;
-    impl_->state.safety_stopped_motion = impl_->state.controller_commanded_motion &&
-                                         std::abs(command.linear) <= 1e-4 &&
-                                         std::abs(command.angular) <= 1e-4;
-    const bool command_reached_base =
-        impl_->state.controller_commanded_motion &&
-        (std::abs(command.linear) > 1e-4 || std::abs(command.angular) > 1e-4) &&
-        !impl_->state.safety_stopped_motion &&
-        !impl_->state.controller_diagnostics.intentional_stop;
-    if (impl_->ApplyFailure(impl_->execution.ObserveStall(
-            {pose, path_progress, measured_velocity, route_heading_error, timestamp,
-             command_reached_base, std::abs(command.linear) > 1e-3},
-            StallMode::kTracking))) {
-      return impl_->state;
-    }
-    if (impl_->ApplyFailure(impl_->execution.ObserveController(
-            impl_->state.controller_commanded_motion, impl_->state.safety_stopped_motion,
-            impl_->state.controller_diagnostics.intentional_stop))) {
-      return impl_->state;
-    }
-    if (impl_->ApplyFailure(impl_->execution.CheckRotation(RotationStage::kAfterController))) {
-      return impl_->state;
-    }
-    const double dynamic_ttc = impl_->safety.DynamicTtc(pose, command);
-    impl_->state.minimum_ttc_s = monitored.time_to_collision_s > 0. && dynamic_ttc > 0.
-                                     ? std::min(monitored.time_to_collision_s, dynamic_ttc)
-                                     : std::max(monitored.time_to_collision_s, dynamic_ttc);
+    impl_->state.planning_failure_reason =
+        computed.reason.empty() ? "controller produced no valid command" : computed.reason;
+    return impl_->state;
   }
+  CaptureMotion(impl_->state, *cycle.motion);
+  impl_->state.controller_diagnostics = *computed.diagnostics;
+  if (impl_->state.controller_diagnostics.solve_us <= 0.) {
+    impl_->state.controller_diagnostics.solve_us = impl_->state.controller_solve_us;
+  }
+  if (impl_->ApplyFailure(cycle.failure)) {
+    return impl_->state;
+  }
+  impl_->state.minimum_ttc_s = cycle.minimum_ttc_s.value();
+  const auto command = cycle.motion->monitored.command;
   if (command.linear == 0. && command.angular == 0. &&
       (measured_velocity.linear != 0. || measured_velocity.angular != 0.)) {
     ++impl_->state.emergency_stops;

@@ -80,6 +80,9 @@ struct LocalControlResult {
   Twist2d command;
   std::string reason;
   std::optional<ControllerDiagnostics> diagnostics{};
+  // Request hook only; excludes wrapper validation, separate Diagnostics()
+  // access and safety filtering. A hook may assemble its own diagnostics.
+  double backend_duration_us = 0.;
   // Success includes a valid zero command. IntentionalStop is an explicit
   // backend decision; Infeasible and failures must never carry executable motion.
   [[nodiscard]] bool has_command() const {
