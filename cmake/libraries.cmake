@@ -40,7 +40,8 @@ navigation2d_library(navigation2d_exploration
   exploration/free_space_distances.cc exploration/unvisited_space.cc
   exploration/mouth_goal_grouping.cc exploration/mouth_goal_placement.cc
   exploration/leftover_viewpoints.cc exploration/leftover_candidate.cc
-  exploration/frontier_components.cc
+  exploration/frontier_components.cc exploration/frontier_boundary_queries.cc
+  exploration/frontier_candidate_stage.cc exploration/frontier_debug_snapshot.cc
   exploration/frontier_approach_viewpoints.cc
   exploration/frontier_viewpoint_search.cc
   exploration/frontier_visibility.cc

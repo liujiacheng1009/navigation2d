@@ -1,5 +1,6 @@
 #pragma once
 #include <optional>
+#include <span>
 #include <vector>
 
 #include "navigation2d/exploration/frontier_types.h"
@@ -20,6 +21,11 @@ struct FrontierTravelOrigin {
 [[nodiscard]] std::optional<FrontierTravelGraph> BuildFrontierTravelGraph(
     const ExplorationGrid& planning, const ExplorationGrid& observation,
     double footprint_clearance_m, double robot_x, double robot_y);
+// Snap a world position to the nearest safe cell in the original one-metre
+// square, preserving row-major ties. Mask covers the complete valid grid.
+[[nodiscard]] int NearestSafeTravelCell(const ExplorationGrid& map,
+                                        std::span<const unsigned char> safe, double world_x,
+                                        double world_y);
 // Execution-only graph for leftover approaches: safe mask, nearest safe start,
 // four-neighbour distances. No discovery or bootstrap augmentation is applied.
 [[nodiscard]] std::optional<FrontierTravelGraph> BuildSafeFrontierTravelGraph(

@@ -164,14 +164,7 @@ class FrontierExplorer {
   void RefreshDebugFrontierCells();
 
  private:
-  bool Free(int col, int row) const;
-  bool ClearAt(int col, int row, double clearance) const;
-  bool SafeViewpoint(int col, int row) const;
-  bool HasFreeLineOfSight(int from_col, int from_row, int to_col, int to_row) const;
-  bool RawFree(int col, int row) const;
   bool RawFrontier(int col, int row) const;
-  std::size_t CountRawFrontierCells() const;
-  bool Blacklisted(double x, double y, bool boundary = false) const;
   bool PersistentlyBlacklisted(double x, double y) const;
   void RefreshPassages();
   std::vector<ExplorationGoal> StableGoals(std::vector<ExplorationGoal> goals);

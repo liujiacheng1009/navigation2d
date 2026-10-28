@@ -1,32 +1,24 @@
 #include "navigation2d/exploration/frontier_explorer.h"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <optional>
+#include <utility>
+
+#include "navigation2d/exploration/doorway_geometry.h"
+#include "navigation2d/exploration/entry_probe_search.h"
+#include "navigation2d/exploration/frontier_boundary_queries.h"
+#include "navigation2d/exploration/frontier_candidate_stage.h"
+#include "navigation2d/exploration/frontier_reachability.h"
+#include "navigation2d/exploration/frontier_travel_graph.h"
 #include "navigation2d/exploration/leftover_viewpoints.h"
 #include "navigation2d/exploration/mouth_goal_stages.h"
 #include "navigation2d/exploration/unvisited_space.h"
-#include "navigation2d/exploration/entry_probe_search.h"
-#include "navigation2d/exploration/frontier_travel_graph.h"
-#include "navigation2d/exploration/frontier_components.h"
-#include "navigation2d/exploration/frontier_viewpoint_search.h"
-#include "navigation2d/exploration/frontier_viewpoint_score.h"
-#include "navigation2d/exploration/frontier_reachability.h"
 #include "navigation2d/exploration/viewpoint_settlement.h"
-#include "navigation2d/exploration/doorway_geometry.h"
-
-#include <array>
-#include <algorithm>
-#include <cmath>
-#include <deque>
-#include <functional>
-#include <limits>
-#include <optional>
-#include <queue>
-#include <tuple>
-#include <utility>
 
 namespace navigation2d {
-using frontier_internal::OccupiedClearanceAt;
-using frontier_internal::ViewpointScore;
 using frontier_internal::CorridorMouthAt;
-using frontier_internal::UnknownRoomBeyond;
 
 FrontierExplorer::FrontierExplorer(FrontierExplorerConfig config)
     : config_(std::move(config)) {}
@@ -38,28 +30,8 @@ void FrontierExplorer::UpdateMap(ExplorationGrid map) {
   });
 }
 
-bool FrontierExplorer::Free(int col, int row) const {
-  return maps_.planning_view(config_.footprint_clearance).Free(col, row);
-}
-
-bool FrontierExplorer::RawFree(int col, int row) const {
-  return maps_.observation_view().Free(col, row);
-}
-
 bool FrontierExplorer::RawFrontier(int col, int row) const {
   return maps_.observation_view().Frontier(col, row);
-}
-
-std::size_t FrontierExplorer::CountRawFrontierCells() const {
-  return maps_.observation_view().CountFrontiers();
-}
-
-bool FrontierExplorer::ClearAt(int col, int row, double clearance) const {
-  return maps_.planning_view(config_.footprint_clearance).ClearAt(col, row, clearance);
-}
-
-bool FrontierExplorer::SafeViewpoint(int col, int row) const {
-  return maps_.planning_view(config_.footprint_clearance).SafeViewpoint(col, row);
 }
 
 std::pair<double, double> FrontierExplorer::CellCenter(int col, int row) const {
@@ -74,9 +46,6 @@ bool FrontierExplorer::InSameReachableRegion(double anchor_x, double anchor_y,
       .SameRegion(anchor_x, anchor_y, target_x, target_y, max_distance_m);
 }
 
-bool FrontierExplorer::Blacklisted(double x, double y, bool boundary) const {
-  return visits_.Contains(x, y, boundary, KnownCells());
-}
 bool FrontierExplorer::PersistentlyBlacklisted(double x, double y) const {
   return visits_.Persistent(x, y);
 }
@@ -84,45 +53,8 @@ void FrontierExplorer::ClearFailedBlacklist() {
   visits_.ClearFailures();
 }
 
-bool FrontierExplorer::HasFreeLineOfSight(
-    int from_col, int from_row, int to_col, int to_row) const {
-  return maps_.planning_view(config_.footprint_clearance).HasFreeLineOfSight(from_col, from_row, to_col, to_row);
-}
-
 void FrontierExplorer::RefreshDebugFrontierCells() {
-  const auto& observation = maps_.observation();
-  debug_snapshot_.cells.clear();
-  if (observation.resolution <= 0. || observation.width <= 2 ||
-      observation.height <= 2 ||
-      observation.cells.size() !=
-          static_cast<std::size_t>(observation.width *
-                                   observation.height))
-    return;
-  const int width = observation.width;
-  const int height = observation.height;
-  // Color live RawFrontier cells by nearest last-SelectGoals cluster goal so
-  // the FR overlay stays tied to CG markers (independent recluster ids made
-  // C# labels look unrelated to CG/SG).
-  constexpr double kAssociateM = 1.5;
-  for (int row = 0; row < height; ++row) {
-    for (int col = 0; col < width; ++col) {
-      if (!RawFrontier(col, row)) continue;
-      const double x =
-          observation.origin_x + (col + .5) * observation.resolution;
-      const double y =
-          observation.origin_y + (row + .5) * observation.resolution;
-      int best_id = 0;
-      double best_d = kAssociateM;
-      for (const auto& cg : debug_snapshot_.cluster_goals) {
-        const double d = std::hypot(cg.frontier_x - x, cg.frontier_y - y);
-        if (d < best_d) {
-          best_d = d;
-          best_id = cg.cluster_id;
-        }
-      }
-      debug_snapshot_.cells.push_back({x, y, best_id});
-    }
-  }
+  frontier_internal::RefreshFrontierDebugCells(maps_.observation(), debug_snapshot_);
 }
 
 std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
@@ -134,74 +66,16 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
   executable_frontier_goals_ = 0;
   candidate_frontier_goals_ = 0;
   debug_snapshot_ = {};
-  if (map.width <= 2 || map.height <= 2 || map.resolution <= 0. ||
-      map.cells.size() != static_cast<std::size_t>(map.width * map.height)) return {};
-  frontier_internal::FrontierComponents components(map.width, map.height);
-  const auto graph = frontier_internal::BuildFrontierTravelGraph(
-      map, observation, config_.footprint_clearance, robot_x, robot_y);
-  if (!graph) {
+  auto candidates = frontier_internal::CollectFrontierCandidates(
+      {map, observation, config_, visits_, tips_}, robot_x, robot_y);
+  debug_snapshot_ = std::move(candidates.debug);
+  raw_frontier_clusters_ = candidates.raw_frontier_clusters;
+  if (!candidates.reachable_frontier_cells) {
     return {};
   }
-  const auto& safe = graph->safe;
-  const auto& travel_cells = graph->travel_cells;
-  const auto reachable_frontier_cells = components.Discover(observation, travel_cells);
-  unresolved_frontier_cells_ = reachable_frontier_cells;
-  raw_frontier_cells_ = reachable_frontier_cells;
-  std::vector<ExplorationGoal> goals;
-  while (const auto component = components.Next()) {
-    const auto& cluster = *component;
-    ++raw_frontier_clusters_;
-    const int cluster_id = static_cast<int>(raw_frontier_clusters_);
-    // Clusters below the minimum stay out of the exploring tour unless a cell
-    // is a passable door or still has a room of unknown behind it.
-    bool cluster_is_door = false;
-    if (cluster.size() < static_cast<std::size_t>(config_.minimum_frontier_cells)) {
-      for (const int cell : cluster) {
-        const int cell_row = cell / map.width, cell_col = cell % map.width;
-        const auto [cx, cy] = CellCenter(cell_col, cell_row);
-        if (CorridorMouthAt(map, cx, cy) ||
-            UnknownRoomBeyond(map, cell_col, cell_row)) {
-          cluster_is_door = true;
-          break;
-        }
-      }
-      if (!cluster_is_door) continue;
-    }
-    const auto anchor = frontier_internal::LocateCluster(cluster, map);
-    const double frontier_x = anchor.frontier_x, frontier_y = anchor.frontier_y;
-    if (Blacklisted(frontier_x, frontier_y, true)) continue;
-    for (const int cell : cluster) {
-      const auto [cx, cy] = CellCenter(cell % map.width, cell / map.width);
-      debug_snapshot_.cells.push_back({cx, cy, cluster_id});
-    }
-    const auto best = frontier_internal::SelectComponentViewpoint(
-        {map, observation, config_, visits_, safe, travel_cells, cluster, anchor});
-    if (best) {
-      ExploringGoalFacts facts;
-      facts.frontier_cells = best->frontier_cells;
-      facts.information_gain = best->information_gain;
-      facts.cell_area = map.resolution * map.resolution;
-      facts.passable_mouth =
-          CorridorMouthAt(map, best->frontier_x, best->frontier_y);
-      const int frontier_col = static_cast<int>(std::floor(
-          (best->frontier_x - map.origin_x) / map.resolution));
-      const int frontier_row = static_cast<int>(std::floor(
-          (best->frontier_y - map.origin_y) / map.resolution));
-      facts.unentered_room =
-          UnknownRoomBeyond(map, frontier_col, frontier_row) ||
-          UnenteredRoomBeyond(*best);
-      if (!AdmitExploringGoal(facts, config_.minimum_frontier_cells) ||
-          tips_.Blocked(best->frontier_x, best->frontier_y)) {
-        continue;
-      }
-      goals.push_back(*best);
-      debug_snapshot_.cluster_goals.push_back(
-          {best->x, best->y, best->frontier_x, best->frontier_y, cluster_id,
-           best->score, best->information_gain, best->frontier_cells});
-    }
-  }
-  std::sort(goals.begin(), goals.end(),
-            [](const auto& a, const auto& b) { return a.score > b.score; });
+  unresolved_frontier_cells_ = *candidates.reachable_frontier_cells;
+  raw_frontier_cells_ = *candidates.reachable_frontier_cells;
+  auto goals = std::move(candidates.goals);
   // Stage A/B: mouth is the task unit — one goal per doorway/alcove, not per
   // frontier micro-cluster. Entry probe moves the pose into the room when the
   // planning graph already opened that corridor.
@@ -209,24 +83,7 @@ std::vector<ExplorationGoal> FrontierExplorer::SelectGoals(
   candidate_frontier_goals_ = mouths.size();
   auto stable = StableGoals(std::move(mouths));
   executable_frontier_goals_ = stable.size();
-  const auto nearest_cluster_id = [&](double fx, double fy) {
-    int best_id = -1;
-    double best_d = std::numeric_limits<double>::infinity();
-    for (const auto& cg : debug_snapshot_.cluster_goals) {
-      const double d = std::hypot(cg.frontier_x - fx, cg.frontier_y - fy);
-      if (d < best_d) {
-        best_d = d;
-        best_id = cg.cluster_id;
-      }
-    }
-    return best_id;
-  };
-  for (const auto& goal : stable) {
-    debug_snapshot_.goals.push_back(
-        {goal.x, goal.y, goal.frontier_x, goal.frontier_y,
-         nearest_cluster_id(goal.frontier_x, goal.frontier_y), goal.score,
-         goal.information_gain, goal.frontier_cells});
-  }
+  frontier_internal::AppendStableFrontierDebug(debug_snapshot_, stable);
   return stable;
 }
 
@@ -360,54 +217,17 @@ bool FrontierExplorer::ShouldPreemptForNearerMouth(
       map.cells.size() != static_cast<std::size_t>(map.width * map.height))
     return false;
 
-  std::vector<unsigned char> safe(map.cells.size(), 0);
-  for (int row = 0; row < map.height; ++row) {
-    for (int col = 0; col < map.width; ++col) {
-      safe[static_cast<std::size_t>(row) * map.width + col] = SafeViewpoint(col, row);
-    }
-  }
-  const auto nearest_safe = [&](double x, double y) -> int {
-    const int center_col = static_cast<int>(std::floor((x - map.origin_x) / map.resolution));
-    const int center_row = static_cast<int>(std::floor((y - map.origin_y) / map.resolution));
-    int best = -1;
-    double best_distance = std::numeric_limits<double>::infinity();
-    const int radius = static_cast<int>(std::ceil(1.0 / map.resolution));
-    for (int row = std::max(0, center_row - radius);
-         row <= std::min(map.height - 1, center_row + radius); ++row) {
-      for (int col = std::max(0, center_col - radius);
-           col <= std::min(map.width - 1, center_col + radius); ++col) {
-        const int index = row * map.width + col;
-        if (!safe[index]) continue;
-        const double distance = std::hypot(col - center_col, row - center_row);
-        if (distance < best_distance) { best_distance = distance; best = index; }
-      }
-    }
-    return best;
-  };
-  const int start = nearest_safe(robot_x, robot_y);
-  if (start < 0) return false;
-  std::vector<int> distance(map.cells.size(), -1);
-  std::deque<int> queue{start};
-  distance[start] = 0;
-  constexpr int dx[] = {-1, 1, 0, 0};
-  constexpr int dy[] = {0, 0, -1, 1};
-  while (!queue.empty()) {
-    const int current = queue.front();
-    queue.pop_front();
-    const int row = current / map.width, col = current % map.width;
-    for (int direction = 0; direction < 4; ++direction) {
-      const int x = col + dx[direction], y = row + dy[direction];
-      if (x < 0 || y < 0 || x >= map.width || y >= map.height) continue;
-      const int next = y * map.width + x;
-      if (!safe[next] || distance[next] >= 0) continue;
-      distance[next] = distance[current] + 1;
-      queue.push_back(next);
-    }
+  const auto graph = frontier_internal::BuildSafeFrontierTravelGraph(
+      map, maps_.observation(), config_.footprint_clearance, robot_x, robot_y);
+  if (!graph) {
+    return false;
   }
   const auto bfs_m = [&](double x, double y) -> double {
-    const int cell = nearest_safe(x, y);
-    if (cell < 0 || distance[cell] < 0) return std::numeric_limits<double>::infinity();
-    return distance[cell] * map.resolution;
+    const int cell = frontier_internal::NearestSafeTravelCell(map, graph->safe, x, y);
+    if (cell < 0 || graph->travel_cells[cell] < 0) {
+      return std::numeric_limits<double>::infinity();
+    }
+    return graph->travel_cells[cell] * map.resolution;
   };
 
   double d_far = path_remaining_m;
@@ -439,35 +259,11 @@ bool FrontierExplorer::IsCorridorMouth(double frontier_x,
   return CorridorMouthAt(map, frontier_x, frontier_y);
 }
 
-double FrontierExplorer::MouthFreeDepth(const ExplorationGoal& frontier_goal,
-                                        double robot_x, double robot_y) const {
-  const auto& map = maps_.planning();
-  if (map.resolution <= 0. || map.width <= 2 || map.height <= 2) return 0.;
-  double dir_x = frontier_goal.frontier_x - robot_x;
-  double dir_y = frontier_goal.frontier_y - robot_y;
-  double len = std::hypot(dir_x, dir_y);
-  if (len < .05) {
-    dir_x = frontier_goal.frontier_x - frontier_goal.x;
-    dir_y = frontier_goal.frontier_y - frontier_goal.y;
-    len = std::hypot(dir_x, dir_y);
-  }
-  if (len < .05) return 0.;
-  dir_x /= len;
-  dir_y /= len;
-  double depth = 0.;
-  for (double step = map.resolution; step <= 1.40 + 1e-6;
-       step += map.resolution) {
-    const double x = frontier_goal.frontier_x + step * dir_x;
-    const double y = frontier_goal.frontier_y + step * dir_y;
-    const int col =
-        static_cast<int>(std::floor((x - map.origin_x) / map.resolution));
-    const int row =
-        static_cast<int>(std::floor((y - map.origin_y) / map.resolution));
-    if (col < 0 || row < 0 || col >= map.width || row >= map.height) break;
-    if (!Free(col, row) || !ClearAt(col, row, .14)) break;
-    depth = step;
-  }
-  return depth;
+double FrontierExplorer::MouthFreeDepth(const ExplorationGoal& frontier_goal, double robot_x,
+                                        double robot_y) const {
+  return frontier_internal::MouthFreeDepthIn(maps_.planning(), maps_.observation(),
+                                             config_.footprint_clearance, frontier_goal, robot_x,
+                                             robot_y);
 }
 
 std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
@@ -479,91 +275,15 @@ std::optional<ExplorationGoal> FrontierExplorer::SelectEntryProbe(
 }
 
 bool FrontierExplorer::GoalStillFrontier(const ExplorationGoal& goal) const {
-  const auto& observation = maps_.observation();
-  if (observation.resolution <= 0. || observation.width <= 0 ||
-      observation.height <= 0) return false;
-  const int col = static_cast<int>(std::floor(
-      (goal.frontier_x - observation.origin_x) / observation.resolution));
-  const int row = static_cast<int>(std::floor(
-      (goal.frontier_y - observation.origin_y) / observation.resolution));
-  return RawFrontier(col, row);
+  return frontier_internal::GoalStillFrontierIn(maps_.observation(), goal);
 }
 
 bool FrontierExplorer::UnenteredRoomBeyond(const ExplorationGoal& goal) const {
-  const auto& observation = maps_.observation();
-  const ExplorationGrid& map = observation;
-  if (map.resolution <= 0. || map.width <= 2 || map.height <= 2 ||
-      map.cells.size() != static_cast<std::size_t>(map.width) * map.height)
-    return false;
-  const double dx = goal.frontier_x - goal.x;
-  const double dy = goal.frontier_y - goal.y;
-  const double length = std::hypot(dx, dy);
-  if (length < map.resolution) return false;
-  const double ux = dx / length;
-  const double uy = dy / length;
-  // Same distances already used to tell a room from a fringe: CorridorMouthAt's
-  // 1.4 m free-run probe, and UnknownRoomBeyond's 0.55 m unknown depth.
-  const int steps = static_cast<int>(std::ceil(1.4 / map.resolution));
-  const int need =
-      std::max(1, static_cast<int>(std::ceil(.55 / map.resolution)));
-  auto at = [&](int col, int row) -> std::int8_t {
-    if (col < 0 || row < 0 || col >= map.width || row >= map.height) return 100;
-    return map.cells[static_cast<std::size_t>(row) * map.width + col];
-  };
-  bool have_free = false;
-  double free_x = 0.;
-  double free_y = 0.;
-  int unknown_run = 0;
-  for (int step = -1; step <= steps; ++step) {
-    const double wx = goal.frontier_x + step * map.resolution * ux;
-    const double wy = goal.frontier_y + step * map.resolution * uy;
-    const int col =
-        static_cast<int>(std::floor((wx - map.origin_x) / map.resolution));
-    const int row =
-        static_cast<int>(std::floor((wy - map.origin_y) / map.resolution));
-    const auto cell = at(col, row);
-    if (cell > 0) {
-      // A jamb beside the standoff is not the room. Occupied on the
-      // into-room ray means this axis is a wall, not an entrance.
-      if (step < 0) continue;
-      return false;
-    }
-    if (cell == 0) {
-      have_free = true;
-      free_x = map.origin_x + (col + .5) * map.resolution;
-      free_y = map.origin_y + (row + .5) * map.resolution;
-      unknown_run = 0;
-      continue;
-    }
-    ++unknown_run;
-    if (have_free && unknown_run >= need &&
-        CorridorMouthAt(map, free_x, free_y))
-      return true;
-  }
-  return false;
+  return frontier_internal::UnenteredRoomBeyondIn(maps_.observation(), goal);
 }
 
 bool FrontierExplorer::GoalRegionStillFrontier(const ExplorationGoal& goal) const {
-  const auto& observation = maps_.observation();
-  if (GoalStillFrontier(goal) || observation.resolution <= 0.)
-    return GoalStillFrontier(goal);
-  const int center_col = static_cast<int>(std::floor(
-      (goal.frontier_x - observation.origin_x) / observation.resolution));
-  const int center_row = static_cast<int>(std::floor(
-      (goal.frontier_y - observation.origin_y) / observation.resolution));
-  // The association radius is deliberately smaller than the viewpoint
-  // standoff. It follows a shifted sensor boundary but cannot jump across a
-  // shelf to an unrelated frontier on its far side.
-  const int radius = static_cast<int>(std::ceil(.35 / observation.resolution));
-  for (int row = std::max(0, center_row - radius);
-       row <= std::min(observation.height - 1, center_row + radius); ++row) {
-    for (int col = std::max(0, center_col - radius);
-         col <= std::min(observation.width - 1, center_col + radius); ++col) {
-      if (std::hypot(col - center_col, row - center_row) > radius) continue;
-      if (RawFrontier(col, row)) return true;
-    }
-  }
-  return false;
+  return frontier_internal::GoalRegionStillFrontierIn(maps_.observation(), goal);
 }
 
 void FrontierExplorer::RecordAttempt(const ExplorationGoal& goal, bool succeeded,

@@ -88,6 +88,13 @@ std::vector<int> TravelDistances(const ExplorationGrid& map, std::span<const uns
   return distances;
 }
 }  // namespace
+int NearestSafeTravelCell(const ExplorationGrid& map, std::span<const unsigned char> safe,
+                          double world_x, double world_y) {
+  return NearestStart(map, safe,
+                      {static_cast<int>(std::floor((world_x - map.origin_x) / map.resolution)),
+                       static_cast<int>(std::floor((world_y - map.origin_y) / map.resolution)),
+                       static_cast<int>(std::ceil(1.0 / map.resolution))});
+}
 std::optional<FrontierTravelGraph> BuildFrontierTravelGraph(const ExplorationGrid& map,
                                                             const ExplorationGrid& observation,
                                                             double footprint_clearance_m,
