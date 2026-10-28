@@ -49,6 +49,17 @@ struct TrackingScene : FailureSceneBase<GoalTrackingActions>, MotionOutput {
     }
   }
   void RunTrack() { execution.Track(navigation, telemetry, arrival, routes, *this, *this, *this); }
+  void TickIdleReturn() override { events.emplace_back("return-idle"); }
+  std::int64_t SelectionDeadlineNs(double seconds) const override {
+    events.emplace_back("deadline");
+    return ExecutionNowNs() + static_cast<std::int64_t>(seconds * 1e9);
+  }
+  void SelectNextGoal() override { events.emplace_back("select-next"); }
+  bool CrawlSegmentCutsWall(double, double, const ExplorationGoal&) const override { return false; }
+  void PublishEntryCrawl(Twist2d command) override {
+    events.emplace_back("crawl-publish");
+    Send(command);
+  }
   bool HandoffToNextTourGoal() override {
     events.emplace_back("handoff");
     return handoff;

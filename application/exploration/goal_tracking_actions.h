@@ -1,5 +1,6 @@
 #pragma once
 #include "navigation2d/application/exploration/alcove_exit.h"
+#include "navigation2d/application/exploration/entry_crawl_executor.h"
 #include "navigation2d/application/exploration/execution_command.h"
 #include "navigation2d/application/exploration/goal_failure_actions.h"
 #include "navigation2d/application/exploration/recovery_policy.h"
@@ -17,8 +18,10 @@ struct GoalStepInput {
 class GoalTrackingActions : public GoalFailureActions,
                             public ViewpointArrivalActions,
                             public ExecutionCommandEvidence,
-                            public AlcoveExitActions {
+                            public AlcoveExitActions,
+                            public EntryCrawlActions {
  public:
+  void AcknowledgeEntry(EntryArrival) override = 0;
   void CancelRecoveryNavigation() override = 0;
   void LockEntryMouth(const ExplorationGoal&) override = 0;
   void PrepareDoorjambRetry() override = 0;
@@ -28,6 +31,9 @@ class GoalTrackingActions : public GoalFailureActions,
   void PublishStatus(const std::string&, const std::string&) override = 0;
   void AbandonLockedEntryMouth(const std::string&) override = 0;
   virtual void ReportAcceptedNavigation(const ExplorationGoal&, const NavigationState&) = 0;
+  virtual void TickIdleReturn() = 0;
+  virtual std::int64_t SelectionDeadlineNs(double seconds) const = 0;
+  virtual void SelectNextGoal() = 0;
   virtual bool HandoffToNextTourGoal() = 0;
   virtual GoalStepInput ReadStepInput() const = 0;
   virtual bool PoseImmobilityWatchdog(const NavigationState&) = 0;

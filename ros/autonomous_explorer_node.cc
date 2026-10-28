@@ -91,7 +91,6 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::ContinuousHandoffActions,
                                  private navigation2d::exploration::RoomVisitActions,
                                  private navigation2d::exploration::EntryActions,
-                                 private navigation2d::exploration::EntryCrawlActions,
                                  private navigation2d::exploration::RetreatActions,
                                  private navigation2d::exploration::MissionRuntime,
                                  private navigation2d::exploration::EscapeRuntime,
@@ -1164,32 +1163,14 @@ class AutonomousExplorer final : public rclcpp::Node,
     PublishStatus("WAITING", parameters_.pose_source + " pose ready; waiting for a stable online map");
   }
 
+  void TickIdleReturn() override {
+    return_.TickIdle(escape_.scheduled() || escape_.resume_return(), *this);
+  }
+  std::int64_t SelectionDeadlineNs(double seconds) const override {
+    return (now() + rclcpp::Duration::from_seconds(seconds)).nanoseconds();
+  }
   bool TickIdleNavigation() override {
-    if (mission_.phase() == MissionPhase::kReturning || return_.returning()) {
-      if (!navigation_.has_session()) {
-        return_.TickIdle(escape_.scheduled() || escape_.resume_return(), *this);
-        return true;
-      }
-    } else if (!navigation_.has_session()) {
-      // Continue open-loop doorway crawl across ticks (navigation_ was reset
-      // when CommandStalled fired; without this the crawl lasted one frame).
-      if (navigation2d::exploration::HasActiveEntryCrawl(entry_) && Pose()) {
-        navigation2d::exploration::ExecuteEntryCrawl(entry_, explorer_, ActiveGoal(), *TourRobot(),
-                                                     *this);
-        return true;
-      }
-      // No route and no crawl: drop the last approach command. Leaving it
-      // running while the next goal is planned rolls the chassis from the
-      // viewpoint into the planning circle (live: arrived, then
-      // "start occupied, nearest obstacle 0.19 m").
-      motion_output_->Send({});
-      if (selection_.Due(now().nanoseconds())) {
-        selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(1.0)).nanoseconds());
-        SelectNextGoal();
-      }
-      return true;
-    }
-    return false;
+    return navigation_execution_.TickIdle(navigation_, selection_, *motion_output_, *this, *this);
   }
 
   void ReportExecutionFailure(const navigation2d::NavigationState& state) override {

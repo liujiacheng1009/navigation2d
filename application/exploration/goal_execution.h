@@ -6,6 +6,7 @@ class ReturnCoordinator;
 class NavigationSession;
 class NavigationTelemetry;
 class ViewpointArrival;
+class ViewpointSelection;
 class MotionOutput;
 class GoalTrackingActions;
 class PoseMotionWatch;
@@ -40,6 +41,9 @@ class GoalExecution {
         watch_(watch) {}
   void CommitAccepted(AcceptedNavigation, PoseMotionWatch&, ViewpointRejections&,
                       GoalTrackingActions&, const GoalExecutionClock&);
+  // True means this tick is handled, including deliberate idle waiting.
+  bool TickIdle(NavigationSession&, ViewpointSelection&, MotionOutput&, GoalTrackingActions&,
+                const GoalExecutionClock&);
   // One active-session tick. Dependencies are explicit synchronous role
   // references, not a shared mutable mission context. Clock reads stay lazy.
   void Track(NavigationSession&, NavigationTelemetry&, ViewpointArrival&, RouteFailureHistory&,
