@@ -3,6 +3,11 @@
 namespace navigation2d::exploration {
 class ExplorationMission;
 class ReturnCoordinator;
+class PoseMotionWatch;
+struct ImmobilityRecoveryObservation {
+  double robot_x, robot_y, path_progress_m;  // World-frame metres.
+  bool entry_drive, tip_wedged;
+};
 // One failed-navigation stage. Explicit, lifetime-stable collaborators retain
 // their own state; this coordinator holds no mutable context or duplicate flags.
 // Returning/phase are deliberately read live after synchronous callbacks.
@@ -20,6 +25,9 @@ class GoalFailureExecution {
         retreat_(retreat),
         explorer_(explorer),
         watch_(watch) {}
+  // Caller has detected immobility, sent stop, cancelled navigation and
+  // debounced the pose watch. Branch priority is return, entry, open, tip.
+  void RecoverImmobility(PoseMotionWatch&, ImmobilityRecoveryObservation, GoalFailureActions&);
   // FailureDue was already evaluated. Body ranges are current metres; clock
   // shares the watch's mission time domain. No command precedes a stop/retry.
   void Resolve(const NavigationState&, double front_m, double side_m, const GoalExecutionClock&,

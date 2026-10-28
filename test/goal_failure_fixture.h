@@ -6,6 +6,7 @@
 
 #include "navigation2d/application/exploration/exploration_mission.h"
 #include "navigation2d/application/exploration/goal_failure_execution.h"
+#include "navigation2d/application/exploration/pose_motion_watch.h"
 #include "navigation2d/application/exploration/return_coordinator.h"
 #include "navigation2d/exploration/frontier_explorer.h"
 namespace navigation2d::test {
@@ -21,6 +22,7 @@ struct FailureScene : GoalFailureActions, GoalExecutionClock {
   GoalExecutionWatch watch;
   GoalFailureExecution execution{mission,  returning, entry,    tour,
                                  recovery, retreat,   explorer, watch};
+  PoseMotionWatch motion;
   NavigationState state;
   ExplorationGoal goal;
   mutable std::vector<std::string> events;
@@ -28,6 +30,7 @@ struct FailureScene : GoalFailureActions, GoalExecutionClock {
   std::int64_t now_ns = 2000000000LL;
   bool corner = false, pinch = false, pose = true, force_return = false;
   bool fallback = false, replan = true, escape = false, breadcrumbs = false, probe = true;
+  bool rescue = false;
   std::function<void()> on_replan;
   FailureScene() {
     explorer.UpdateMap({30, 30, .1, 0., 0., std::vector<std::int8_t>(900, 0)});
@@ -87,6 +90,16 @@ struct FailureScene : GoalFailureActions, GoalExecutionClock {
     events.emplace_back("finish");
     message = reason;
   }
+  void PrepareImmobileEntry(bool) override { events.emplace_back("prepare-entry"); }
+  void RecoverStalledReturn() override { events.emplace_back("return-stalled"); }
+  void CoolImmobileRoute() override { events.emplace_back("cool-route"); }
+  bool NavigateImmobileGoal() override { return ReplanActiveGoalOnLatestMap("immobile"); }
+  void DelayImmobilitySelection() override { events.emplace_back("delay-selection"); }
+  void RequestImmobilityReplay() override { events.emplace_back("replay-start"); }
+  bool TryRescueDistantMouths(const char*) override {
+    events.emplace_back("rescue");
+    return rescue;
+  }
   void CancelRecoveryNavigation() override { events.emplace_back("cancel"); }
   void SelectAfterEntry() override { events.emplace_back("select"); }
   void PublishStatus(const std::string& phase, const std::string& reason) override {
@@ -130,7 +143,7 @@ struct FailureScene : GoalFailureActions, GoalExecutionClock {
     return escape;
   }
   void DemoteViewpointForSeconds(const ExplorationGoal&, double seconds) override {
-    assert(seconds == 8. || seconds == 25.);
+    assert(seconds == 6. || seconds == 8. || seconds == 25.);
     events.emplace_back("demote");
   }
 };

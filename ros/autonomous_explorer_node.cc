@@ -96,7 +96,6 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::RetreatActions,
                                  private navigation2d::exploration::MissionRuntime,
                                  private navigation2d::exploration::EscapeRuntime,
-                                 private navigation2d::exploration::EntryImmobilityActions,
                                  private navigation2d::exploration::WallScrapeActions,
                                  private navigation2d::exploration::GoalFailureActions,
                                  private navigation2d::exploration::AlcoveExitActions,
@@ -948,6 +947,19 @@ class AutonomousExplorer final : public rclcpp::Node,
     if (replay_start) evidence_budget_.RequestStartReplay();
     retreat_.AllowRetry();
   }
+  void RecoverStalledReturn() override {
+    route_failures_.ClearSignatures();
+    HandleReturnRecovery(navigation2d::exploration::ReturnRecoveryMode::kImmobility,
+                         "return stalled; stopping on driven trail near home");
+  }
+  void CoolImmobileRoute() override {
+    if (last_path_signature_ != 0) route_failures_.Cool(last_path_signature_);
+  }
+  bool NavigateImmobileGoal() override { return StartNavigation(ActiveGoal(), false, true); }
+  void DelayImmobilitySelection() override {
+    selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.4)).nanoseconds());
+  }
+  void RequestImmobilityReplay() override { evidence_budget_.RequestStartReplay(); }
   bool PoseImmobilityWatchdog(const navigation2d::NavigationState& state) {
     NotePoseMotion();
     if (!navigation_.has_session() || !Pose()) return false;
@@ -974,47 +986,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     motion_output_->Send({});
     navigation_.Cancel();
     pose_motion_.Debounce(now().nanoseconds());
-    if (mission_.phase() == MissionPhase::kReturning || return_.returning()) {
-      route_failures_.ClearSignatures();
-      HandleReturnRecovery(navigation2d::exploration::ReturnRecoveryMode::kImmobility,
-                           "return stalled; stopping on driven trail near home");
-      return true;
-    }
-    if (entry_drive) {
-      navigation2d::exploration::ResolveImmobileEntry(
-          entry_, explorer_, {Pose()->x, Pose()->y, state.path_progress_m}, *this);
-      return true;
-    }
-    // Open / non-tip stall: same-goal replan only — never peel (live: front
-    // 1.96 still started body-frame escape and burned the tour).
-    if (!tip_wedged) {
-      if (last_path_signature_ != 0)
-        route_failures_.Cool(last_path_signature_);
-      if (pose_motion_.TryOpenReplan([&] { return StartNavigation(ActiveGoal(), false, true); })) {
-        PublishStatus("NAVIGATING", "immobility open-front; replanned goal");
-        return true;
-      }
-      pose_motion_.ResetOpenReplans();
-      selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.4)).nanoseconds());
-      PublishStatus("SELECTING", "immobility open-front; reselect without peel");
-      return true;
-    }
-    // True tip wedge: peel + demote after the first confirmed tip stall.
-    explorer_.RecordAttempt(ActiveGoal(), false);
-    DemoteViewpointForSeconds(ActiveGoal(), 6.0);
-    explorer_.CoolRegion(ActiveGoal().x, ActiveGoal().y, 0.80, 1800u);
-    explorer_.CoolRegion(ActiveGoal().frontier_x, ActiveGoal().frontier_y, 0.80, 1800u);
-    ClearEntryMouthLock();
-    retreat_.AllowRetry();
-    evidence_budget_.RequestStartReplay();
-    selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.4)).nanoseconds());
-    if (EscapeOrShortRetreat(
-            "immobility at wall tip; peel out of inflation",
-            "immobility at wall tip; short trail retreat"))
-      return true;
-    if (TryRescueDistantMouths("immobility tip; rescue distant mouths"))
-      return true;
-    DemoteActiveGoal("immobility tip thrash; demoting cooled viewpoint");
+    goal_failure_.RecoverImmobility(
+        pose_motion_, {Pose()->x, Pose()->y, state.path_progress_m, entry_drive, tip_wedged}, *this);
     return true;
   }
 

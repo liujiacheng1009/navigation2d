@@ -65,6 +65,7 @@ add_library(navigation2d_exploration_application STATIC
   application/exploration/retreat_execution.cc
   application/exploration/goal_execution_watch.cc
   application/exploration/goal_failure_execution.cc
+  application/exploration/goal_immobility_execution.cc
   application/exploration/entry_recovery_execution.cc
   application/exploration/open_forward_stop.cc
   application/exploration/forward_blocked.cc
