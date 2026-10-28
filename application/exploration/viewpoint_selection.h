@@ -19,6 +19,9 @@ class ViewpointSelection {
         tour_(tour),
         completion_(completion),
         viewpoint_rejections_(rejections) {}
+  // A copy would alias collaborators while duplicating the coordinating role.
+  ViewpointSelection(const ViewpointSelection&) = delete;
+  ViewpointSelection& operator=(const ViewpointSelection&) = delete;
   // Deadlines and observations use nanoseconds in the same mission clock domain.
   // Scheduling does not read the clock; paused/backward clocks defer selection.
   // Select preserves the deadline, including when a goal is accepted.

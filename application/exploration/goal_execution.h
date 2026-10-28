@@ -39,6 +39,9 @@ class GoalExecution {
         retreat_(retreat),
         explorer_(explorer),
         watch_(watch) {}
+  // A copy would alias collaborators while duplicating the coordinating role.
+  GoalExecution(const GoalExecution&) = delete;
+  GoalExecution& operator=(const GoalExecution&) = delete;
   void CommitAccepted(AcceptedNavigation, PoseMotionWatch&, ViewpointRejections&,
                       GoalTrackingActions&, const GoalExecutionClock&);
   // True means this tick is handled, including deliberate idle waiting.
