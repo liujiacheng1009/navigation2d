@@ -7,24 +7,12 @@
 #include <string>
 #include <vector>
 
+#include "navigation2d/exploration/region_identity.h"
+#include "navigation2d/exploration/region_types.h"
+
 namespace navigation2d {
 struct ExplorationGrid;
 struct ExplorationGoal;
-using RegionId = std::uint64_t;
-enum class RegionState { kPending, kActive, kWaiting, kBlocked, kComplete };
-struct RegionRecord {
-  RegionId id = 0, parent = 0;
-  RegionState state = RegionState::kPending;
-  bool visible = false;
-  // Set by the explorer when this region still has a passable door.
-  // Raw frontier_cells do not keep the room open.
-  bool passage = false;
-  std::size_t free_cells = 0, frontier_cells = 0, candidates = 0;
-  unsigned stable_empty_updates = 0;
-  std::uint64_t evidence = 0;
-  std::set<RegionId> neighbors;
-};
-
 // Mission-local topological regions, not semantic room recognition. Wide
 // connected spaces can be one region. Geometry only orders observations; it
 // never clears unknown/occupied cells or relaxes the navigation footprint.
@@ -58,16 +46,9 @@ class RegionScheduler {
   }
   std::string Audit() const;
  private:
-  int Cell(double x, double y) const;
-  int width_ = 0, height_ = 0;
-  double resolution_ = 0., origin_x_ = 0., origin_y_ = 0.;
-  RegionId next_id_ = 1, last_region_ = 0;
-  std::vector<RegionId> labels_, stack_;
+  exploration_internal::RegionIdentity identity_;
+  RegionId last_region_ = 0;
+  std::vector<RegionId> stack_;
   std::map<RegionId, RegionRecord> regions_;
-  // Last owner of a world cell survives temporary disappearance and merges.
-  struct CellHistory { RegionId owner; std::uint64_t seen; };
-  std::map<std::pair<std::int64_t, std::int64_t>, CellHistory> history_;
-  std::uint64_t revision_ = 0;
-
 };
 }  // namespace navigation2d
