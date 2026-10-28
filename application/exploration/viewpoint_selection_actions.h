@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include "navigation2d/application/exploration/entry_selection.h"
@@ -20,6 +21,14 @@ class ViewpointSelectionActions : public EntrySelectionActions,
                                   public TourConstraints {
  public:
   virtual void BuildTour() = 0;
+  virtual std::optional<TourPose> TourRobot() const = 0;
+  virtual void ReportSelectionRescue(const char* reason, bool no_distant_mouth) = 0;
+  // Cancel the route, clear its published paths/goal, then clear recovery.
+  virtual void DiscardRescueNavigation() = 0;
+  // Publish RECOVERING first, then schedule selection after the 0.6 s hold.
+  virtual void DeferRescueRecovery(const char* reason) = 0;
+  virtual void SelectNextGoal() = 0;
+  virtual bool HasRescueNavigation() const = 0;
   virtual bool NavigateViewpoint(const ExplorationGoal&) = 0;
   virtual ViewpointPlanFailure LastViewpointFailure() const = 0;
   virtual void ViewpointAccepted() = 0;

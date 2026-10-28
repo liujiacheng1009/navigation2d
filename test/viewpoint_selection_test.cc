@@ -6,6 +6,7 @@
 
 #include "navigation2d/application/exploration/completion_execution.h"
 #include "navigation2d/application/exploration/entry_coordinator.h"
+#include "navigation2d/application/exploration/exploration_mission.h"
 #include "navigation2d/application/exploration/tour_execution.h"
 #include "navigation2d/application/exploration/viewpoint_rejections.h"
 #include "navigation2d/exploration/frontier_explorer.h"
@@ -95,4 +96,46 @@ int main() {
   reverse.selection.Select({3., 1.5, 0.}, reverse.actions);
   assert(reverse.actions.planned.size() == 1 && reverse.actions.planned.front().x == 3.5);
   assert(reverse.tour.goals().size() == 2 && reverse.tour.goals().back().x == .3);
+  ExplorationMission mission;
+  Scene rescue;
+  rescue.explorer.SelectGoals(3., 1.5);
+  assert(rescue.explorer.HasExploringWork());
+  rescue.Seed();
+  mission.BeginReturning();
+  assert(!rescue.selection.RescueDistant(mission, false, "test", rescue.actions));
+  mission.ResumeExploring();
+  rescue.actions.rescue_robot.reset();
+  assert(!rescue.selection.RescueDistant(mission, false, "test", rescue.actions));
+  rescue.actions.rescue_robot = TourPose{0., 1.5, 0.};
+  assert(!rescue.selection.RescueDistant(mission, true, "test", rescue.actions));
+  assert(rescue.actions.rescue_events.empty());
+  rescue.actions.on_select = [&] { rescue.actions.rescue_navigation = true; };
+  assert(rescue.selection.RescueDistant(mission, false, "test", rescue.actions));
+  assert((rescue.actions.rescue_events ==
+          std::vector<std::string>{"report", "cooling", "discard", "build", "select"}));
+  assert(!rescue.selection.RescueDistant(mission, false, "again", rescue.actions));
+  assert(rescue.actions.builds == 1);
+
+  Scene peel;
+  peel.explorer.SelectGoals(3., 1.5);
+  assert(peel.explorer.HasExploringWork());
+  peel.actions.rescue_pinched = peel.actions.escape = true;
+  peel.entry.SetPending(GoalAt(3.));
+  assert(peel.selection.RescueDistant(mission, false, "test", peel.actions));
+  assert((peel.actions.rescue_events ==
+          std::vector<std::string>{"report", "cooling", "discard", "peel", "defer-rescue"}));
+  assert(!peel.entry.pending() && peel.actions.builds == 0);
+  assert(!peel.selection.RescueDistant(mission, false, "again", peel.actions));
+
+  Scene missing;
+  missing.explorer.SelectGoals(3., 1.5);
+  assert(missing.explorer.HasExploringWork());
+  missing.actions.on_build = [&] {
+    missing.tour.Suspend();
+    missing.explorer.UpdateMap({30, 30, .1, 0., 0., std::vector<std::int8_t>(900, 0)});
+  };
+  assert(!missing.selection.RescueDistant(mission, false, "test", missing.actions));
+  assert(missing.actions.rescue_events.back() == "missing");
+  assert(!missing.selection.RescueDistant(mission, false, "again", missing.actions));
+  assert(missing.actions.builds == 1);
 }

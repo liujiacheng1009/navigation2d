@@ -328,7 +328,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                                 [this] { return now(); });
   }
 
-  std::optional<navigation2d::exploration::TourPose> TourRobot() const {
+  std::optional<navigation2d::exploration::TourPose> TourRobot() const override {
     if (!Pose()) { return std::nullopt; }
     return navigation2d::exploration::TourPose{
         Pose()->x, Pose()->y, Pose()->yaw};
@@ -551,44 +551,28 @@ class AutonomousExplorer final : public rclcpp::Node,
            navigation2d::HitBlocksSwing(body.side);
   }
 
-  // Leave a tip pocket and re-queue far corridor mouths (kitchen) instead of
-  // PARTIAL while raw frontiers remain. One shot per mission.
   bool TryRescueDistantMouths(const char* why) override {
-    if (tip_rescue_attempted_ || return_.returning() ||
-        mission_.phase() == MissionPhase::kReturning || !Pose())
-      return false;
-    if (!explorer_.HasExploringWork()) return false;
-    tip_rescue_attempted_ = true;
-    RCLCPP_WARN(get_logger(),
-                "Tip/tour rescue (%s): peel + retry distant mouths; raw=%zu",
-                why, explorer_.raw_frontier_cells());
-    viewpoint_rejections_.ClearDemotion();
-    route_failures_.ClearSignatures();
-    explorer_.ClearFailedBlacklist();
-    completion_.ResetBudget();
-    selection_.ResetBlocked();
-    selection_.ResetRejected();
-    ClearEntryMouthLock();
+    return selection_.RescueDistant(mission_, return_.returning(), why, *this);
+  }
+  void ReportSelectionRescue(const char* reason, bool no_distant_mouth) override {
+    if (no_distant_mouth) {
+      RCLCPP_WARN(get_logger(), "Tip rescue found no distant mouth to retry");
+    } else {
+      RCLCPP_WARN(get_logger(), "Tip/tour rescue (%s): peel + retry distant mouths; raw=%zu",
+                  reason, explorer_.raw_frontier_cells());
+    }
+  }
+  void DiscardRescueNavigation() override {
     navigation_.Cancel();
     ClearPublishedNavPaths();
     ClearDisplayedGoal();
     recovery_.Clear();
-    if (TipPinchedNow() &&
-        EscapeOrShortRetreat("tip rescue; peel into free",
-                             "tip rescue; short trail retreat")) {
-      PublishStatus("RECOVERING", why);
-      selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.6)).nanoseconds());
-      return true;
-    }
-    BuildTour();
-    if (!tour_.PrioritizeDistant(explorer_, *TourRobot(), *this)) {
-      RCLCPP_WARN(get_logger(), "Tip rescue found no distant mouth to retry");
-      return false;
-    }
-    mission_.ResumeExploring();
-    SelectNextGoal();
-    return navigation_.has_session() || entry_.pending() || entry_.locked();
   }
+  void DeferRescueRecovery(const char* reason) override {
+    PublishStatus("RECOVERING", reason);
+    selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.6)).nanoseconds());
+  }
+  bool HasRescueNavigation() const override { return navigation_.has_session(); }
 
   void BeginReturnOrRescue(bool force_partial) override {
     if (force_partial && TryRescueDistantMouths("before PARTIAL return")) return;
@@ -1482,7 +1466,6 @@ class AutonomousExplorer final : public rclcpp::Node,
   navigation2d::exploration::PoseMotionWatch pose_motion_;
   // Soft wall-scrape rejects: rotate tour twice before RecordAttempt demote.
   navigation2d::exploration::ViewpointRejections viewpoint_rejections_;
-  bool tip_rescue_attempted_ = false;
   navigation2d::exploration::RoomVisitLedger room_visits_;
   navigation2d::exploration::EscapeExecution escape_;
   navigation2d::exploration::NavigationTelemetry telemetry_;

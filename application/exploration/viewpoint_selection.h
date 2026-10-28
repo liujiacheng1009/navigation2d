@@ -4,6 +4,7 @@
 #include "navigation2d/application/exploration/viewpoint_selection_actions.h"
 namespace navigation2d::exploration {
 class EntryCoordinator;
+class ExplorationMission;
 // Owns selection scheduling and rejection/empty-map budgets. Collaborators outlive this role
 // and remain single-writer mission objects; no aggregate mutable context.
 // Select consumes a stable world-frame pose snapshot after the caller has
@@ -22,6 +23,10 @@ class ViewpointSelection {
   // Select preserves the deadline, including when a goal is accepted.
   void ScheduleAt(std::int64_t deadline_ns) { next_selection_ns_ = deadline_ns; }
   bool Due(std::int64_t now_ns) const { return now_ns >= next_selection_ns_; }
+  // One rescue per mission, consumed only after pose/work/return gates pass.
+  // Pose and navigation acceptance remain lazy synchronous action observations.
+  bool RescueDistant(ExplorationMission&, bool returning, const char* reason,
+                     ViewpointSelectionActions&);
   void Select(TourPose robot, ViewpointSelectionActions&);
   void InitializeKnown(std::size_t known) { exhaustion_.InitializeKnown(known); }
   void ResetBlocked() { exhaustion_.ResetBlocked(); }
@@ -36,6 +41,7 @@ class ViewpointSelection {
   ViewpointRejections& viewpoint_rejections_;
   SelectionExhaustion exhaustion_;
   int reject_streak_ = 0;
+  bool rescue_attempted_ = false;
   std::int64_t next_selection_ns_ = 0;
 };
 }  // namespace navigation2d::exploration

@@ -1,6 +1,7 @@
 #pragma once
 #include <cassert>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -14,7 +15,30 @@ class ViewpointSelectionRecorder final : public exploration::ViewpointSelectionA
   std::string reason = "no route";
   bool accept = false, occupied = false, escape = false;
   int builds = 0, accepted = 0, prepares = 0, escapes = 0, cooled = 0, rejected = 0;
-  void BuildTour() override { ++builds; }
+  std::optional<exploration::TourPose> rescue_robot = exploration::TourPose{0., 1.5, 0.};
+  std::vector<std::string> rescue_events;
+  bool rescue_pinched = false, rescue_navigation = false;
+  std::function<void()> on_build, on_select;
+  std::optional<exploration::TourPose> TourRobot() const override { return rescue_robot; }
+  void ReportSelectionRescue(const char*, bool missing) override {
+    rescue_events.emplace_back(missing ? "missing" : "report");
+  }
+  void DiscardRescueNavigation() override { rescue_events.emplace_back("discard"); }
+  void DeferRescueRecovery(const char*) override { rescue_events.emplace_back("defer-rescue"); }
+  void SelectNextGoal() override {
+    rescue_events.emplace_back("select");
+    if (on_select) {
+      on_select();
+    }
+  }
+  bool HasRescueNavigation() const override { return rescue_navigation; }
+  void BuildTour() override {
+    ++builds;
+    rescue_events.emplace_back("build");
+    if (on_build) {
+      on_build();
+    }
+  }
   bool NavigateViewpoint(const ExplorationGoal& goal) override {
     planned.push_back(goal);
     return accept;
@@ -29,9 +53,13 @@ class ViewpointSelectionRecorder final : public exploration::ViewpointSelectionA
   }
   bool EscapeOrShortRetreat(const char*, const char*) override {
     ++escapes;
+    rescue_events.emplace_back("peel");
     return escape;
   }
-  void ClearSelectionRouteCooling() override { ++cooled; }
+  void ClearSelectionRouteCooling() override {
+    ++cooled;
+    rescue_events.emplace_back("cooling");
+  }
   void LockEntryMouth(const ExplorationGoal&) override { assert(false); }
   void DeferViewpointRetry() override { assert(false); }
   void ReportSelectionSkip(exploration::SelectionSkip, const ExplorationGoal&) override {}
@@ -56,7 +84,7 @@ class ViewpointSelectionRecorder final : public exploration::ViewpointSelectionA
   void SelectionStatus(const char* value) override { exhausted.SelectionStatus(value); }
   void ClearBlockedSelection() override { exhausted.ClearBlockedSelection(); }
   bool SelectionFrontSwingClear() const override { return exhausted.SelectionFrontSwingClear(); }
-  bool TipPinchedNow() const override { return exhausted.TipPinchedNow(); }
+  bool TipPinchedNow() const override { return rescue_pinched || exhausted.TipPinchedNow(); }
   bool TryRescueDistantMouths(const char* reason) override {
     return exhausted.TryRescueDistantMouths(reason);
   }

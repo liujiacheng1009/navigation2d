@@ -74,6 +74,7 @@ add_library(navigation2d_exploration_application STATIC
   application/exploration/entry_selection.cc
   application/exploration/selection_exhaustion.cc
   application/exploration/viewpoint_selection.cc
+  application/exploration/viewpoint_rescue.cc
   application/exploration/viewpoint_rejections.cc
   application/exploration/viewpoint_rejection_executor.cc
   application/exploration/completion_execution.cc
