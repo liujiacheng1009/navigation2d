@@ -207,6 +207,7 @@ navigation2d_assert_test(frontier_travel_graph_test navigation2d_exploration)
 navigation2d_assert_test(registry_boundary_test navigation2d_algorithm_registry)
 add_executable(configuration_boundary_test navigation_config_contract.cc)
 target_link_libraries(configuration_boundary_test PRIVATE navigation2d_configuration)
+set_property(GLOBAL APPEND PROPERTY NAVIGATION2D_TEST_TARGETS configuration_boundary_test)
 add_test(NAME configuration_boundary_test COMMAND configuration_boundary_test
   "${PROJECT_SOURCE_DIR}/config/navigation2d.yaml")
 

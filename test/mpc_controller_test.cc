@@ -100,7 +100,11 @@ int main() {
       {4.35, 2.30, .03, -.02, .18, .02, .03},
       {4.80, 2.40, 0., -.04, .20, .03, .02},
       {5.00, 2.50, 0., 0., .20, .03, .03}};
-  const auto constrained = controller.Compute(path, pose, {}, map, obstacles);
+  // Compare identical initial solver/sampler states. Reusing the controller
+  // advances MPPI's warm start and RNG, independently of distant obstacles.
+  navigation2d::MpcController constrained_controller(config);
+  constrained_controller.SetGuidanceCandidates({{7, alternate, 0.}});
+  const auto constrained = constrained_controller.Compute(path, pose, {}, map, obstacles);
   assert(constrained.linear <= command.linear);
 #ifdef NAVIGATION2D_TEST_ACADOS
   // The backend ranks/fills its fixed constraint slots per stage.

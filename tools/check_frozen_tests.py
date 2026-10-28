@@ -23,7 +23,9 @@ def main():
     parser.add_argument('--baseline-include-root', type=Path, required=True)
     parser.add_argument('--tests', nargs='+', required=True)
     parser.add_argument('--output', type=Path, required=True, help='new evidence directory')
+    parser.add_argument('--runner', default='', help='optional execution prefix, e.g. qemu-aarch64 -L /sysroot')
     args = parser.parse_args()
+    runner = shlex.split(args.runner)
     root = Path(__file__).resolve().parents[1]
     headers, header_hashes = prepare(None, args.baseline_include_root)
     args.output.mkdir(parents=True, exist_ok=False)
@@ -59,7 +61,7 @@ def main():
         subprocess.run(link, cwd=target.parent.parent, check=True)
         outcomes = []
         for label, executable in [('baseline', binary), ('candidate', args.build / name)]:
-            result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=120)
+            result = subprocess.run([*runner, str(executable)], capture_output=True, text=True, timeout=120)
             outcome = {'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr}
             (directory / (label + '.json')).write_text(json.dumps(outcome, indent=2) + '\n')
             outcomes.append(outcome)
@@ -71,7 +73,8 @@ def main():
                         'candidate_sha256': digest(args.build / name)})
     if snapshot(headers) != header_hashes or digest(args.baseline_core) != core_hash:
         raise ValueError('frozen inputs changed during verification')
-    report = {'baseline_core_sha256': core_hash, 'baseline_headers': header_hashes, 'tests': summary}
+    report = {'baseline_core_sha256': core_hash, 'baseline_headers': header_hashes, 'tests': summary,
+              'execution_prefix': runner}
     (args.output / 'summary.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(summary, indent=2))
     return 0 if all(item['equal'] for item in summary) else 1
