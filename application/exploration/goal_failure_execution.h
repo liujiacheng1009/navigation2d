@@ -25,6 +25,9 @@ class GoalFailureExecution {
         retreat_(retreat),
         explorer_(explorer),
         watch_(watch) {}
+  // Cool/demote a pinched viewpoint, discard it and continue with bounded
+  // peel, distant-mouth rescue, or delayed selection, in that priority.
+  void LeavePinch(const char* reason, GoalFailureActions&);
   // Caller has detected immobility, sent stop, cancelled navigation and
   // debounced the pose watch. Branch priority is return, entry, open, tip.
   void RecoverImmobility(PoseMotionWatch&, ImmobilityRecoveryObservation, GoalFailureActions&);

@@ -31,7 +31,8 @@ struct FailureScene : GoalFailureActions, GoalExecutionClock {
   bool corner = false, pinch = false, pose = true, force_return = false;
   bool fallback = false, replan = true, escape = false, breadcrumbs = false, probe = true;
   bool rescue = false;
-  std::function<void()> on_replan;
+  std::function<void()> on_replan, on_peel;
+  std::optional<ExplorationGoal> demoted_goal;
   FailureScene() {
     explorer.UpdateMap({30, 30, .1, 0., 0., std::vector<std::int8_t>(900, 0)});
     goal.x = goal.y = goal.frontier_x = goal.frontier_y = 1.;
@@ -90,11 +91,14 @@ struct FailureScene : GoalFailureActions, GoalExecutionClock {
     events.emplace_back("finish");
     message = reason;
   }
+  void StopSelectionMotion() override { events.emplace_back("stop"); }
+  void ReportPinchRecovery(const char*) override { events.emplace_back("report-pinch"); }
+  void ClearRecoveryDisplay() override { events.emplace_back("clear-display"); }
   void PrepareImmobileEntry(bool) override { events.emplace_back("prepare-entry"); }
   void RecoverStalledReturn() override { events.emplace_back("return-stalled"); }
-  void CoolImmobileRoute() override { events.emplace_back("cool-route"); }
+  void CoolActiveRecoveryRoute() override { events.emplace_back("cool-route"); }
   bool NavigateImmobileGoal() override { return ReplanActiveGoalOnLatestMap("immobile"); }
-  void DelayImmobilitySelection() override { events.emplace_back("delay-selection"); }
+  void DelayRecoverySelection() override { events.emplace_back("delay-selection"); }
   void RequestImmobilityReplay() override { events.emplace_back("replay-start"); }
   bool TryRescueDistantMouths(const char*) override {
     events.emplace_back("rescue");
@@ -136,14 +140,18 @@ struct FailureScene : GoalFailureActions, GoalExecutionClock {
   void DeferViewpointSelection(double, const char*) override { events.emplace_back("defer"); }
   bool EscapeOrShortRetreat(const char*, const char*) override {
     events.emplace_back("peel");
+    if (on_peel) {
+      on_peel();
+    }
     return escape;
   }
   bool TryStartEscape() override {
     events.emplace_back("escape");
     return escape;
   }
-  void DemoteViewpointForSeconds(const ExplorationGoal&, double seconds) override {
+  void DemoteViewpointForSeconds(const ExplorationGoal& value, double seconds) override {
     assert(seconds == 6. || seconds == 8. || seconds == 25.);
+    demoted_goal = value;
     events.emplace_back("demote");
   }
 };

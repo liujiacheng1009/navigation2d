@@ -632,44 +632,19 @@ class AutonomousExplorer final : public rclcpp::Node,
     return IsPinchGeometryStall(path_clearance_m, front_range, side_range);
   }
 
-  // Peel off the jamb, cool the viewpoint, pick something else. Do not
-  // replan-in-place while the chassis sits on the threshold (live: scrapes
-  // counter Cleared every tick → forever wall_scrapes=1).
   bool UnstickFromPinch(const char* reason) override {
-    if (last_path_signature_ != 0)
-      route_failures_.Cool(last_path_signature_);
+    goal_failure_.LeavePinch(reason, *this);
+    return true;
+  }
+  void ReportPinchRecovery(const char* reason) override {
     RCLCPP_WARN(get_logger(),
                 "Pinch unstick: %s clearance=%.3f scrapes=%d pose=(%.2f,%.2f)",
                 reason, active_path_min_clearance_m_, recovery_.wall_scrapes,
-                Pose() ? Pose()->x : 0.,
-                Pose() ? Pose()->y : 0.);
-    motion_output_->Send({});
-    if (mission_.phase() != MissionPhase::kReturning && !return_.returning() &&
-        std::isfinite(ActiveGoal().x) && std::isfinite(ActiveGoal().y)) {
-      explorer_.RecordAttempt(entry_.pending().value_or(ActiveGoal()), false);
-      // Short cool — 20 s kept re-queuing the same tip while kitchen waited.
-      DemoteViewpointForSeconds(entry_.pending().value_or(ActiveGoal()), 6.0);
-      explorer_.CoolRegion(ActiveGoal().x, ActiveGoal().y, 0.70, 1500u);
-      explorer_.CoolRegion(ActiveGoal().frontier_x, ActiveGoal().frontier_y, 0.70, 1500u);
-    }
-    ClearEntryMouthLock();
-    navigation_.Cancel();
+                Pose() ? Pose()->x : 0., Pose() ? Pose()->y : 0.);
+  }
+  void ClearRecoveryDisplay() override {
     ClearPublishedNavPaths();
     ClearDisplayedGoal();
-    if (!tour_.goals().empty()) tour_.Advance();
-    recovery_.Clear();
-    retreat_.AllowRetry();
-    if (EscapeOrShortRetreat("pinch unstick; peel into free",
-                             "pinch unstick; short trail retreat")) {
-      PublishStatus("RECOVERING", reason);
-      return true;
-    }
-    // After peel fails, immediately hunt a far mouth instead of SELECTING
-    // idle in the tip until completing rounds burn out.
-    if (TryRescueDistantMouths(reason)) return true;
-    selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.4)).nanoseconds());
-    PublishStatus("SELECTING", reason);
-    return true;
   }
 
   navigation2d::exploration::ScrapeRoute ReadScrapeRoute() const override {
@@ -936,11 +911,11 @@ class AutonomousExplorer final : public rclcpp::Node,
     HandleReturnRecovery(navigation2d::exploration::ReturnRecoveryMode::kImmobility,
                          "return stalled; stopping on driven trail near home");
   }
-  void CoolImmobileRoute() override {
+  void CoolActiveRecoveryRoute() override {
     if (last_path_signature_ != 0) route_failures_.Cool(last_path_signature_);
   }
   bool NavigateImmobileGoal() override { return StartNavigation(ActiveGoal(), false, true); }
-  void DelayImmobilitySelection() override {
+  void DelayRecoverySelection() override {
     selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.4)).nanoseconds());
   }
   void RequestImmobilityReplay() override { evidence_budget_.RequestStartReplay(); }

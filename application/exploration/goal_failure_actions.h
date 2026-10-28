@@ -15,11 +15,15 @@ class GoalFailureActions : public OpenForwardStopActions,
   void AbandonLockedEntryMouth(const std::string&) override = 0;
   bool StartEntryProbe() override = 0;
   bool EscapeOrShortRetreat(const char*, const char*) override = 0;
+  virtual void StopSelectionMotion() = 0;
+  virtual void ReportPinchRecovery(const char* reason) = 0;
+  // Clear published paths before the displayed target; navigation is cancelled.
+  virtual void ClearRecoveryDisplay() = 0;
   virtual void RecoverStalledReturn() = 0;
-  virtual void CoolImmobileRoute() = 0;
+  virtual void CoolActiveRecoveryRoute() = 0;
   virtual bool NavigateImmobileGoal() = 0;
   // Schedule the historical 0.4 s cooldown without publishing a status.
-  virtual void DelayImmobilitySelection() = 0;
+  virtual void DelayRecoverySelection() = 0;
   virtual void RequestImmobilityReplay() = 0;
   virtual bool TryRescueDistantMouths(const char* reason) = 0;
   virtual const ExplorationGoal& ActiveGoal() const = 0;

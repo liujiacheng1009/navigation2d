@@ -17,13 +17,13 @@ void GoalFailureExecution::RecoverImmobility(PoseMotionWatch& motion,
   }
   // Open-front stalls must not consume peel attempts or burn the tour.
   if (!observation.tip_wedged) {
-    actions.CoolImmobileRoute();
+    actions.CoolActiveRecoveryRoute();
     if (motion.TryOpenReplan([&] { return actions.NavigateImmobileGoal(); })) {
       actions.PublishStatus("NAVIGATING", "immobility open-front; replanned goal");
       return;
     }
     motion.ResetOpenReplans();
-    actions.DelayImmobilitySelection();
+    actions.DelayRecoverySelection();
     actions.PublishStatus("SELECTING", "immobility open-front; reselect without peel");
     return;
   }
@@ -35,7 +35,7 @@ void GoalFailureExecution::RecoverImmobility(PoseMotionWatch& motion,
   entry_.Clear();
   retreat_.AllowRetry();
   actions.RequestImmobilityReplay();
-  actions.DelayImmobilitySelection();
+  actions.DelayRecoverySelection();
   if (actions.EscapeOrShortRetreat("immobility at wall tip; peel out of inflation",
                                    "immobility at wall tip; short trail retreat")) {
     return;
