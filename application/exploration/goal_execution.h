@@ -9,6 +9,14 @@ class ViewpointArrival;
 class MotionOutput;
 class GoalTrackingActions;
 class PoseMotionWatch;
+class ViewpointRejections;
+// Already validated and accepted by NavigationDispatch. References are borrowed
+// only for this synchronous commit; no tentative target is committed here.
+struct AcceptedNavigation {
+  const ExplorationGoal& goal;
+  bool returning;
+  const NavigationState& initial_state;
+};
 class RouteFailureHistory;
 struct ImmobilityRecoveryObservation {
   double robot_x, robot_y, path_progress_m;  // World-frame metres.
@@ -30,6 +38,8 @@ class GoalExecution {
         retreat_(retreat),
         explorer_(explorer),
         watch_(watch) {}
+  void CommitAccepted(AcceptedNavigation, PoseMotionWatch&, ViewpointRejections&,
+                      GoalTrackingActions&, const GoalExecutionClock&);
   // One active-session tick. Dependencies are explicit synchronous role
   // references, not a shared mutable mission context. Clock reads stay lazy.
   void Track(NavigationSession&, NavigationTelemetry&, ViewpointArrival&, RouteFailureHistory&,

@@ -265,27 +265,11 @@ class AutonomousExplorer final : public rclcpp::Node,
   void SetDispatchTimeout(double seconds) override { goal_execution_.SetTimeout(seconds); }
   void CommitAcceptedNavigation(const Goal& goal, bool returning,
                                 const navigation2d::NavigationState& initial_state) override {
-    return_.AcceptNavigationMode(returning);
-    // Resume / latest-map replan of the same viewpoint must keep peel and
-    // open-replan counters; only a materially new goal opens a session.
-    recovery_.Begin(goal.x, goal.y);
-    const auto goal_started = now();
-    const auto goal_progress = now();
-    goal_execution_.Start(goal_started.nanoseconds(), goal_progress.nanoseconds());
-    pose_motion_.ResetOpenReplans();
-    viewpoint_rejections_.ResetScrapes();
-    PublishStatus(
-        returning ? "RETURNING" : (goal.leftover_approach ? "COMPLETING" : "NAVIGATING"),
-        returning ? "returning to exploration start"
-                  : (retreat_.active() ? "leaving a pinched corridor along the driven trail"
-                                       : (goal.leftover_approach
-                                              ? "one leftover approach after exploring tour emptied"
-                                              : "navigating to frontier")));
-    // Accepted dispatch commits the DFS room context. Inspecting candidates
-    // must not Enter — only a path that will actually be tracked.
-    if (!returning && !retreat_.active()) {
-      explorer_.CommitRegion(goal);
-    }
+    navigation_execution_.CommitAccepted({goal, returning, initial_state}, pose_motion_,
+                                          viewpoint_rejections_, *this, *this);
+  }
+  void ReportAcceptedNavigation(const Goal& goal,
+                                  const navigation2d::NavigationState& initial_state) override {
     RCLCPP_INFO(get_logger(),
                 "Navigation2D goal: pose=(%.2f, %.2f) goal=(%.2f, %.2f) "
                 "frontier_cells=%d region=%llu path_signature=%llu %s",

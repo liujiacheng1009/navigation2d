@@ -32,7 +32,8 @@ struct FailureSceneBase : Actions, GoalExecutionClock {
   bool fallback = false, replan = true, escape = false, breadcrumbs = false, probe = true;
   bool rescue = false;
   std::size_t recovery_unknown = 0;
-  std::function<void()> on_replan, on_peel;
+  std::function<void()> on_replan, on_peel, on_status;
+  std::function<std::int64_t()> on_clock;
   std::optional<ExplorationGoal> demoted_goal;
   FailureSceneBase() {
     explorer.UpdateMap({30, 30, .1, 0., 0., std::vector<std::int8_t>(900, 0)});
@@ -47,7 +48,7 @@ struct FailureSceneBase : Actions, GoalExecutionClock {
   }
   std::int64_t ExecutionNowNs() const override {
     events.emplace_back("clock");
-    return now_ns;
+    return on_clock ? on_clock() : now_ns;
   }
   const ExplorationGoal& ActiveGoal() const override { return goal; }
   double ActivePathMargin(double margin) const override { return margin; }
@@ -126,6 +127,9 @@ struct FailureSceneBase : Actions, GoalExecutionClock {
   void PublishStatus(const std::string& phase, const std::string& reason) override {
     events.push_back("status:" + phase);
     message = reason;
+    if (on_status) {
+      on_status();
+    }
   }
   void AbandonLockedEntryMouth(const std::string&) override {
     events.emplace_back("abandon");

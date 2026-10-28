@@ -27,6 +27,7 @@ class GoalTrackingActions : public GoalFailureActions,
   void SelectAfterEntry() override = 0;
   void PublishStatus(const std::string&, const std::string&) override = 0;
   void AbandonLockedEntryMouth(const std::string&) override = 0;
+  virtual void ReportAcceptedNavigation(const ExplorationGoal&, const NavigationState&) = 0;
   virtual bool HandoffToNextTourGoal() = 0;
   virtual GoalStepInput ReadStepInput() const = 0;
   virtual bool PoseImmobilityWatchdog(const NavigationState&) = 0;

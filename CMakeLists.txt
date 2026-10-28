@@ -66,6 +66,7 @@ add_library(navigation2d_exploration_application STATIC
   application/exploration/goal_execution_watch.cc
   application/exploration/goal_failure_execution.cc
   application/exploration/goal_tracking_execution.cc
+  application/exploration/goal_acceptance_execution.cc
   application/exploration/goal_outcome_execution.cc
   application/exploration/goal_immobility_execution.cc
   application/exploration/pinch_recovery_execution.cc

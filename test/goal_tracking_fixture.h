@@ -1,4 +1,6 @@
 #pragma once
+#include <utility>
+
 #include "navigation2d/application/exploration/goal_tracking_actions.h"
 #include "navigation2d/application/exploration/motion_output.h"
 #include "navigation2d/application/exploration/navigation_session.h"
@@ -16,6 +18,7 @@ struct TrackingScene : FailureSceneBase<GoalTrackingActions>, MotionOutput {
   Pose2d local_pose = MakePose2d(1., 1., 0.);
   bool handoff = false, immobile = false, cut = false, cut_replan = false;
   std::vector<Twist2d> commands;
+  std::function<void(const ExplorationGoal&, const NavigationState&)> on_accepted_report;
   TrackingScene() {
     goal.x = goal.frontier_x = 2.;
     // Use the exploration tolerance for the ordinary path-progress stages.
@@ -28,9 +31,22 @@ struct TrackingScene : FailureSceneBase<GoalTrackingActions>, MotionOutput {
                                 .reason = {},
                                 .diagnostics = diagnostics};
     };
-    navigation.Begin(plugin.config, plugin.map_path, MakePose2d(2., 1., 0.), {});
-    assert(navigation.Probe(local_pose, {}, 1.).has_route());
+    PrepareGoal(2.);
+  }
+  void PrepareGoal(double x) {
+    goal.x = goal.frontier_x = x;
+    navigation.Begin(plugin.config, plugin.map_path, MakePose2d(x, 1., 0.), {});
+    auto initial = navigation.Probe(local_pose, {}, 1.);
+    assert(initial.has_route());
+    state = std::move(initial.state);
     navigation.Accept();
+  }
+  void ReportAcceptedNavigation(const ExplorationGoal& accepted,
+                                const NavigationState& initial) override {
+    events.emplace_back("accepted-report");
+    if (on_accepted_report) {
+      on_accepted_report(accepted, initial);
+    }
   }
   void RunTrack() { execution.Track(navigation, telemetry, arrival, routes, *this, *this, *this); }
   bool HandoffToNextTourGoal() override {
