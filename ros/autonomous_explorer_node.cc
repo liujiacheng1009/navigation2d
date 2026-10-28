@@ -44,6 +44,7 @@
 #include "navigation2d/application/exploration/recovery_session.h"
 #include "navigation2d/application/exploration/retreat_execution.h"
 #include "navigation2d/application/exploration/return_coordinator.h"
+#include "navigation2d/application/exploration/return_mission_actions.h"
 #include "navigation2d/application/exploration/room_visit_execution.h"
 #include "navigation2d/application/exploration/room_visit_ledger.h"
 #include "navigation2d/application/exploration/route_failure_history.h"
@@ -80,7 +81,7 @@ constexpr double kExploreGoalTolerance = .18;
 using Goal = navigation2d::ExplorationGoal;
 
 class AutonomousExplorer final : public rclcpp::Node,
-                                 private navigation2d::exploration::ReturnArrivalActions,
+                                 private navigation2d::exploration::ReturnMissionActions,
                                  private navigation2d::exploration::ContinuousHandoffActions,
                                  private navigation2d::exploration::RoomVisitActions,
                                  private navigation2d::exploration::EntryActions,
@@ -256,7 +257,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   void SetDispatchTimeout(double seconds) override { goal_execution_.SetTimeout(seconds); }
   void CommitAcceptedNavigation(const Goal& goal, bool returning,
                                 const navigation2d::NavigationState& initial_state) override {
-    returning_ = returning;
+    return_.AcceptNavigationMode(returning);
     // Resume / latest-map replan of the same viewpoint must keep peel and
     // open-replan counters; only a materially new goal opens a session.
     recovery_.Begin(goal.x, goal.y);
@@ -383,7 +384,7 @@ class AutonomousExplorer final : public rclcpp::Node,
 
   // Promote only true corridor mouths into locked entry.
   bool PromotePassableMouthEntry(const char* reason) {
-    if (returning_ || retreat_.active() || mission_.phase() == MissionPhase::kReturning)
+    if (return_.returning() || retreat_.active() || mission_.phase() == MissionPhase::kReturning)
       return false;
     if (!std::isfinite(ActiveGoal().x) || !PassableMouthGoal(ActiveGoal())) {
       return false;
@@ -533,7 +534,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                   "(front=%.2f side=%.2f)", body.front, body.side);
       return false;
     }
-    const auto decision = navigation2d::exploration::SelectEscape(body, returning_);
+    const auto decision = navigation2d::exploration::SelectEscape(body, return_.returning());
     if (!decision) { return false; }
     const auto [velocity, hold_s] = *decision;
     const double front = body.front, back = body.back, left = body.left, right = body.right;
@@ -561,7 +562,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     motion_output_->Send({});
     using navigation2d::exploration::EscapeContinuation;
     const auto continuation = escape_.AfterStop(
-        recovery_, {mission_.phase(), returning_, entry_.locked() || entry_.pending()});
+        recovery_, {mission_.phase(), return_.returning(), entry_.locked() || entry_.pending()});
     switch (continuation) {
       case EscapeContinuation::kReturn:
         BeginReturn(true);
@@ -621,7 +622,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   // Leave a tip pocket and re-queue far corridor mouths (kitchen) instead of
   // PARTIAL while raw frontiers remain. One shot per mission.
   bool TryRescueDistantMouths(const char* why) override {
-    if (tip_rescue_attempted_ || returning_ ||
+    if (tip_rescue_attempted_ || return_.returning() ||
         mission_.phase() == MissionPhase::kReturning || !Pose())
       return false;
     if (!explorer_.HasExploringWork()) return false;
@@ -688,7 +689,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   // open nose is ordinary driving.
   bool IsPinchGeometryStall(double path_clearance_m, double front_range,
                             double side_range) const {
-    if (entry_.pending() || entry_.locked() || returning_ || retreat_.active())
+    if (entry_.pending() || entry_.locked() || return_.returning() || retreat_.active())
       return false;
     if (!navigation_.has_session() || navigation2d::PathClearsOpen(path_clearance_m))
       return false;
@@ -727,7 +728,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                 Pose() ? Pose()->x : 0.,
                 Pose() ? Pose()->y : 0.);
     motion_output_->Send({});
-    if (mission_.phase() != MissionPhase::kReturning && !returning_ &&
+    if (mission_.phase() != MissionPhase::kReturning && !return_.returning() &&
         std::isfinite(ActiveGoal().x) && std::isfinite(ActiveGoal().y)) {
       explorer_.RecordAttempt(entry_.pending().value_or(ActiveGoal()), false);
       // Short cool — 20 s kept re-queuing the same tip while kitchen waited.
@@ -820,7 +821,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   void SelectNextGoal() override {
-    if (mission_.phase() == MissionPhase::kReturning || returning_) {
+    if (mission_.phase() == MissionPhase::kReturning || return_.returning()) {
       BeginReturn(return_.partial());
       return;
     }
@@ -874,7 +875,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   bool HandoffToNextTourGoal() {
-    if (mission_.phase() != MissionPhase::kExploring || returning_ || !navigation_.has_session() ||
+    if (mission_.phase() != MissionPhase::kExploring || return_.returning() || !navigation_.has_session() ||
         tour_.goals().size() < 2) return false;
     return navigation2d::exploration::TryContinuousTourHandoff(tour_, explorer_, navigation_,
                                                                ActiveGoal(), *TourRobot(), *this);
@@ -901,29 +902,40 @@ class AutonomousExplorer final : public rclcpp::Node,
     const Goal home = MakeHomeGoal();
     const double rx = Pose()->x;
     const double ry = Pose()->y;
-    const double home_dist = std::hypot(rx - home.x, ry - home.y);
-    const auto next = return_.NextStep(observations_.trail(), home, rx, ry, ActiveGoal());
-    using navigation2d::exploration::ReturnStepKind;
-    if (next.kind == ReturnStepKind::kRepeated) { return false; }
-    if (next.kind == ReturnStepKind::kDirect) {
-      return_.UseBreadcrumbs(false);
-      evidence_budget_.RequestTrailReplay(80.0);
-      evidence_budget_.RequestStartReplay();
-      return StartNavigation(home, true);
+    return return_.FollowTrail(observations_.trail(), home, rx, ry, ActiveGoal(), *this);
+  }
+  void CommitReturnPhase() override { mission_.BeginReturning(); }
+  void SuspendExplorationForReturn() override {
+    tour_.Suspend();
+    ClearEntryMouthLock();
+  }
+  bool ReturnCoverageComplete() const override {
+    return explorer_.CompletionEligible(mission_.initial_known_cells());
+  }
+  void ReportReturnStart(navigation2d::exploration::ReturnStartNotice notice) override {
+    if (notice == navigation2d::exploration::ReturnStartNotice::kForcedPartial) {
+      RCLCPP_WARN(get_logger(),
+                  "No executable frontier after bounded retries; returning safely with current map");
+    } else {
+      RCLCPP_WARN(get_logger(),
+                  "No frontier survived a stable completion window; returning with reachable map coverage");
     }
-    const Goal& step = next.goal;
-    mission_.BeginReturning();
-    returning_ = true;
-    return_.UseBreadcrumbs(true);
-    route_failures_.ClearSignatures();
+  }
+  void ClearReturnRouteCooling() override { route_failures_.ClearSignatures(); }
+  void PrepareReturnEvidence(bool replay_start) override {
     evidence_budget_.RequestTrailReplay(80.0);
-    evidence_budget_.RequestStartReplay();
-    if (!StartNavigation(step, true)) return false;
+    if (replay_start) evidence_budget_.RequestStartReplay();
+  }
+  bool NavigateReturnGoal(const Goal& goal) override { return StartNavigation(goal, true); }
+  void ReportBreadcrumbHop(const Goal& step, double rx, double ry, double home_dist) override {
     RCLCPP_INFO(get_logger(),
                 "Breadcrumb return hop: pose=(%.2f,%.2f) step=(%.2f,%.2f) home_dist=%.2f",
                 rx, ry, step.x, step.y, home_dist);
     PublishStatus("RETURNING", "following driven trail breadcrumbs home");
-    return true;
+  }
+  void ResumeReturnEscape(bool replay_start) override {
+    escape_.ResumeReturn();
+    if (replay_start) evidence_budget_.RequestStartReplay();
   }
 
   // Frontiers only prove a room was seen. A door the explorer tried to cross
@@ -932,8 +944,8 @@ class AutonomousExplorer final : public rclcpp::Node,
   // count: far-but-mapped pockets of rooms already entered are not revisited.
   // Each spot gets two tries; a reached spot drops out because the trail now
   // passes it.
-  bool TryVisitUnenteredSpace() {
-    if (!Pose() || returning_ || mission_.phase() == MissionPhase::kReturning) return false;
+  bool TryVisitUnenteredSpace() override {
+    if (!Pose() || return_.returning() || mission_.phase() == MissionPhase::kReturning) return false;
     return navigation2d::exploration::TryUnenteredRoomVisits(
         room_visits_, explorer_, observations_.trail(), Pose()->x, Pose()->y, *this);
   }
@@ -955,8 +967,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     }
   }
   bool PlanDirectAfterHop(const Goal& home) override {
-    evidence_budget_.RequestTrailReplay(80.0);
-    return StartNavigation(home, true);
+    PrepareReturnEvidence(false);
+    return NavigateReturnGoal(home);
   }
   void DirectHomeAfterHopAccepted() override {
     PublishStatus("RETURNING", "direct route home available after breadcrumb hop");
@@ -968,45 +980,17 @@ class AutonomousExplorer final : public rclcpp::Node,
 
   void HandleReturnRecovery(navigation2d::exploration::ReturnRecoveryMode mode,
                             const char* unavailable_message) {
-    const auto result = return_.Recover(mode, *this);
-    if (result == navigation2d::exploration::ReturnExecutionResult::kEscaping) {
-      escape_.ResumeReturn();
-    } else if (result == navigation2d::exploration::ReturnExecutionResult::kUnavailable) {
-      Finish(true, unavailable_message);
-    }
+    return_.RecoverMission(mode, unavailable_message, *this);
   }
-
   void BeginReturn(bool force_return = false) override {
     if (!mission_.home()) return;
     if (mission_.phase() == MissionPhase::kReturning && navigation_.has_session()) return;
-    if (TryVisitUnenteredSpace()) return;
-    mission_.BeginReturning();
-    returning_ = true;
-    tour_.Suspend();
-    ClearEntryMouthLock();
-    if (force_return) {
-      return_.MarkPartial();
-      RCLCPP_WARN(get_logger(),
-                  "No executable frontier after bounded retries; returning safely with current map");
-    } else if (!explorer_.CompletionEligible(mission_.initial_known_cells()))
-      RCLCPP_WARN(get_logger(),
-                  "No frontier survived a stable completion window; returning with reachable map coverage");
-    route_failures_.ClearSignatures();
-    return_.UseBreadcrumbs(false);
-    const auto result = return_.Execute(*this);
-    if (result == navigation2d::exploration::ReturnExecutionResult::kEscaping) {
-      escape_.ResumeReturn();
-    } else if (result == navigation2d::exploration::ReturnExecutionResult::kUnavailable) {
-      Finish(false, "return path unavailable; stopping to protect localization");
-    }
+    return_.BeginMission(force_return, *this);
   }
 
   bool PlanHome(navigation2d::exploration::ReturnPlanStage stage) override {
-    evidence_budget_.RequestTrailReplay(80.0);
-    if (stage == navigation2d::exploration::ReturnPlanStage::kIdleFinal) {
-      evidence_budget_.RequestStartReplay();
-    }
-    return StartNavigation(MakeHomeGoal(), true);
+    PrepareReturnEvidence(stage == navigation2d::exploration::ReturnPlanStage::kIdleFinal);
+    return NavigateReturnGoal(MakeHomeGoal());
   }
 
   void HomeAccepted(navigation2d::exploration::ReturnPlanStage stage) override {
@@ -1018,10 +1002,10 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   bool ReplanActiveGoalOnLatestMap(const char* reason) override {
-    return dispatch_.ReplanLatest(reason, returning_, navigation_, *this);
+    return dispatch_.ReplanLatest(reason, return_.returning(), navigation_, *this);
   }
   bool ReplanAfterRouteCut() {
-    return dispatch_.ReplanAfterCut(returning_, navigation_, *this);
+    return dispatch_.ReplanAfterCut(return_.returning(), navigation_, *this);
   }
 
   const Goal& ActiveGoal() const { return dispatch_.goal(); }
@@ -1029,7 +1013,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   void ClearDisplayedGoal() { dispatch_.ClearGoal(); }
 
   void DemoteActiveGoal(const char* reason) {
-    if (mission_.phase() != MissionPhase::kReturning && !returning_) {
+    if (mission_.phase() != MissionPhase::kReturning && !return_.returning()) {
       explorer_.RecordAttempt(entry_.pending().value_or(ActiveGoal()), false);
       DemoteViewpointForSeconds(entry_.pending().value_or(ActiveGoal()), 8.0);
     }
@@ -1152,13 +1136,13 @@ class AutonomousExplorer final : public rclcpp::Node,
                 "Pose immobility watchdog: stuck=(%.2f,%.2f) recoveries=%d "
                 "returning=%s entry=%s progress=%.2f tip=%s front=%.2f",
                 Pose()->x, Pose()->y,
-                immobility_recoveries_, returning_ ? "yes" : "no",
+                immobility_recoveries_, return_.returning() ? "yes" : "no",
                 entry_.pending() ? "yes" : "no", state.path_progress_m,
                 tip_wedged ? "yes" : "no", body.front);
     motion_output_->Send({});
     navigation_.Cancel();
     pose_motion_.Debounce(now().nanoseconds());
-    if (mission_.phase() == MissionPhase::kReturning || returning_) {
+    if (mission_.phase() == MissionPhase::kReturning || return_.returning()) {
       route_failures_.ClearSignatures();
       HandleReturnRecovery(navigation2d::exploration::ReturnRecoveryMode::kImmobility,
                            "return stalled; stopping on driven trail near home");
@@ -1498,18 +1482,9 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   bool TickIdleNavigation() override {
-    if (mission_.phase() == MissionPhase::kReturning || returning_) {
+    if (mission_.phase() == MissionPhase::kReturning || return_.returning()) {
       if (!navigation_.has_session()) {
-        using navigation2d::exploration::ReturnIdleResult;
-        const auto result = return_.ContinueIdle(escape_.scheduled() || escape_.resume_return(), *this);
-        if (result == ReturnIdleResult::kEscaping) {
-          escape_.ResumeReturn();
-          evidence_budget_.RequestStartReplay();
-        } else if (result == ReturnIdleResult::kUnavailable) {
-          Finish(true, "return path unavailable; stopping to protect localization");
-        } else if (result == ReturnIdleResult::kRestart) {
-          BeginReturn(return_.partial());
-        }
+        return_.TickIdle(escape_.scheduled() || escape_.resume_return(), *this);
         return true;
       }
     } else if (!navigation_.has_session()) {
@@ -1549,14 +1524,14 @@ class AutonomousExplorer final : public rclcpp::Node,
     if (PoseImmobilityWatchdog(state)) return;
     // Mouth crossing is geometric — acknowledge once past the jambs, but keep
     // tracking the room-side probe so the chassis finishes into the pocket.
-    if (entry_.pending() && !returning_ && !retreat_.active() && Pose() &&
+    if (entry_.pending() && !return_.returning() && !retreat_.active() && Pose() &&
         EntryProbeSatisfied()) {
       AcknowledgeEntry(navigation2d::exploration::EntryArrival::kDriving);
       return;
     }
     // Goal already in the observation disk — finish it instead of sitting on
     // CARROT/GOAL with zero command (junction hesitation).
-    if (mission_.phase() == MissionPhase::kExploring && !returning_ && Pose() &&
+    if (mission_.phase() == MissionPhase::kExploring && !return_.returning() && Pose() &&
         !retreat_.active()) {
       const double goal_dist = std::hypot(ActiveGoal().x - Pose()->x, ActiveGoal().y - Pose()->y);
       if (goal_dist < .28 && state.path_progress_m >= .05) {
@@ -1572,7 +1547,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       motion_output_->Send({});
       ClearPublishedNavPaths();
       if (ReplanAfterRouteCut()) return;
-      if (mission_.phase() == MissionPhase::kReturning || returning_) {
+      if (mission_.phase() == MissionPhase::kReturning || return_.returning()) {
         navigation_.Cancel();
         route_failures_.ClearSignatures();
         evidence_budget_.RequestStartReplay();
@@ -1587,7 +1562,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     // Driving a scrape chord into a wall pocket: do not wait for monitor STOP
     // after the nose is already in the corner (live: clear=0.13, cmd still
     // 0.27 m/s into south tip).
-    if (mission_.phase() == MissionPhase::kExploring && !returning_ && !retreat_.active() &&
+    if (mission_.phase() == MissionPhase::kExploring && !return_.returning() && !retreat_.active() &&
         !entry_.pending() && !entry_.locked() && Pose()) {
       const double path_clear =
           ActivePathMargin(state.global_planning.path_min_clearance_m);
@@ -1601,7 +1576,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         return;
       }
     }
-    if (mission_.phase() == MissionPhase::kExploring && !returning_) {
+    if (mission_.phase() == MissionPhase::kExploring && !return_.returning()) {
       const double path_remaining =
           std::max(0., state.global_path_length_m - state.path_progress_m);
       if (MaybePreemptForNearerMouth(path_remaining)) return;
@@ -1648,7 +1623,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     // Include retreat_.active(): tip thrash used frontier_cells=0 retreat poses
     // that were exempt from this abort, so the robot spun forever in the U.
     const bool near_goal_alcove_crawl =
-        mission_.phase() == MissionPhase::kExploring && !returning_ &&
+        mission_.phase() == MissionPhase::kExploring && !return_.returning() &&
         (goal_distance_now < navigation2d::kSwingClearance() ||
          (state.global_path_length_m > .20 &&
           state.path_progress_m >= .80 * state.global_path_length_m)) &&
@@ -1665,7 +1640,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     }
     if (state.status == navigation2d::NavigationStatus::kSucceeded) {
       navigation_.Cancel();
-      if (mission_.phase() == MissionPhase::kReturning || returning_) {
+      if (mission_.phase() == MissionPhase::kReturning || return_.returning()) {
         return_.CompleteArrival(MakeHomeGoal(), Pose()->x, Pose()->y, *this);
         return;
       } else if (mission_.phase() == MissionPhase::kCompleting) {
@@ -1683,7 +1658,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         viewpoint_arrival_.Succeeded(explorer_, entry_, tour_, ActiveGoal(), *TourRobot(), *this);
       }
     } else if (goal_execution_.FailureDue(
-                   state, mission_.phase() == MissionPhase::kReturning || returning_,
+                   state, mission_.phase() == MissionPhase::kReturning || return_.returning(),
                    front_range, corridor_pinch, forward_clearly_open, *this)) {
       const bool monitor_stop =
           state.status == navigation2d::NavigationStatus::kBlocked &&
@@ -1692,7 +1667,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       const bool forward_blocked_close =
           navigation2d::HitInsideBody(front_range);
       const bool exploring_drive =
-          mission_.phase() == MissionPhase::kExploring && !returning_;
+          mission_.phase() == MissionPhase::kExploring && !return_.returning();
 
       // Corner-tip: both axes inside the planning circle (IsCornerTipStall).
       if (exploring_drive && monitor_stop) {
@@ -1752,7 +1727,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       if (first_segment_stall || mid_path_pinch) {
         const bool force_return =
             first_segment_stall ? NoteFirstSegmentFailure(state) : false;
-        if (mission_.phase() == MissionPhase::kReturning || returning_) {
+        if (mission_.phase() == MissionPhase::kReturning || return_.returning()) {
           // Direct home chords often fail the first segment ~3 m short.
           // Follow the outbound trail instead of finishing away from spawn.
           navigation_.Cancel();
@@ -1793,7 +1768,7 @@ class AutonomousExplorer final : public rclcpp::Node,
           DemoteViewpointForSeconds(ActiveGoal(), 25.0);
         }
         // Unified pinch exit: doorway jamb / corner tip / open wall foot.
-        if (mission_.phase() != MissionPhase::kReturning && !returning_ &&
+        if (mission_.phase() != MissionPhase::kReturning && !return_.returning() &&
             IsPinchGeometryStall(
                 ActivePathMargin(state.global_planning.path_min_clearance_m),
                 front_range, side_range)) {
@@ -1806,7 +1781,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         // drives the tail into the wall the goal was placed against. A real
         // pinch already returned through BreakWallScrapeThrash above.
         // Fall through and skip this viewpoint.
-        if (force_return && !returning_) {
+        if (force_return && !return_.returning()) {
           navigation_.Cancel();
           tour_.Suspend();
           BeginReturn(true);
@@ -1820,7 +1795,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                   "controller could not execute validated route" : "goal execution timed out"))
         return;
       if (state.planning_failure_reason.find("no measured motion") != std::string::npos &&
-          mission_.phase() != MissionPhase::kReturning && !returning_) {
+          mission_.phase() != MissionPhase::kReturning && !return_.returning()) {
         // Replanning the same goal drives the chassis back into the jamb.
         navigation_.Cancel();
         explorer_.RecordAttempt(ActiveGoal(), false);
@@ -1833,7 +1808,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       }
       navigation_.Cancel();
       recovery_.Clear();
-      if (mission_.phase() == MissionPhase::kReturning || returning_) {
+      if (mission_.phase() == MissionPhase::kReturning || return_.returning()) {
         if (StartBreadcrumbTowardHome()) return;
         // Exploration itself may have covered useful space; a blocked home
         // path is a partial mission, not a hard algorithm failure for debug UI.
@@ -1888,7 +1863,6 @@ class AutonomousExplorer final : public rclcpp::Node,
   std::uint64_t last_path_signature_ = 0;
   double active_path_min_clearance_m_ = 0.;
   navigation2d::exploration_ros::DebugReporter debug_reporter_;
-  bool returning_ = false;
   navigation2d::exploration::ReturnCoordinator return_;
   navigation2d::exploration::EntryCoordinator entry_;
   navigation2d::exploration::GoalRecoverySession recovery_;

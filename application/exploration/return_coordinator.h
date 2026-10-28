@@ -25,8 +25,20 @@ class ReturnArrivalActions : public ReturnActions {
   virtual void DirectHomeAfterHopAccepted() = 0;
   virtual void FinishReturn(bool partial) = 0;
 };
+class ReturnMissionActions;
 class ReturnCoordinator {
  public:
+  // Caller has checked mission home and that no return path is active.
+  void BeginMission(bool force_partial, ReturnMissionActions&);
+  bool FollowTrail(std::span<const std::pair<double, double>> trail, const ExplorationGoal& home,
+                   double robot_x, double robot_y, const ExplorationGoal& active_goal,
+                   ReturnMissionActions&);
+  void RecoverMission(ReturnRecoveryMode, const char* unavailable_message, ReturnMissionActions&);
+  void TickIdle(bool escape_pending, ReturnMissionActions&);
+  // Return intent can precede a route. An accepted explore/retreat route
+  // overrides this flag; it is not derived only from the displayed target.
+  void AcceptNavigationMode(bool returning) { returning_ = returning; }
+  bool returning() const { return returning_; }
   ReturnExecutionResult Execute(ReturnActions& actions);
   // Called after cancelling the reached route. Home/robot use world-frame
   // metres; direct retry precedes another breadcrumb hop and final completion.
@@ -48,6 +60,7 @@ class ReturnCoordinator {
 
  private:
   bool StartBoundedEscape(ReturnActions& actions);
+  bool returning_ = false;
   bool partial_ = false;
   bool breadcrumbs_ = false;
   int escapes_ = 0;
