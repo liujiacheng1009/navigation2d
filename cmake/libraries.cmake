@@ -72,7 +72,7 @@ target_link_libraries(navigation2d_configuration PUBLIC
 # Compatibility product facade: callers keep linking navigation2d_core. Domain
 # targets above can be built and linked without this aggregate entry point.
 navigation2d_library(navigation2d_core
-  application/execution_watchdog.cc application/navigation_failure.cc application/navigation_algorithms.cc
+  application/execution_watchdog.cc application/navigation_failure.cc application/navigation_failures.cc application/navigation_algorithms.cc
   application/command_safety_pipeline.cc application/docking_servo.cc
   application/navigation_motion.cc application/alignment_execution.cc
   application/docking_execution.cc application/tracking_execution.cc

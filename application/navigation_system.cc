@@ -18,6 +18,7 @@
 #include "navigation2d/application/execution_watchdog.h"
 #include "navigation2d/application/navigation_algorithms.h"
 #include "navigation2d/application/navigation_failure.h"
+#include "navigation2d/application/navigation_failures.h"
 #include "navigation2d/application/navigation_motion.h"
 #include "navigation2d/application/route_preparation.h"
 #include "navigation2d/application/tracking_execution.h"
@@ -62,7 +63,8 @@ class NavigationSystem::Impl {
         alignment({config.max_linear_acceleration, config.max_angular_acceleration,
                    config.max_angular_velocity, config.control_period}),
         execution({config.control_period, config.progress_radius, config.progress_timeout,
-                   config.max_recovery_attempts}) {
+                   config.max_recovery_attempts}),
+        failures(state, path, goal, execution, next_replan_time, config.max_recovery_attempts) {
     if (std::abs(costmap.grid().resolution() - config.map_resolution) > 1e-9) {
       throw std::runtime_error("map resolution does not match navigation configuration");
     }
@@ -114,90 +116,15 @@ class NavigationSystem::Impl {
       state.path_progress_m = 0.;
       state.phase = NavigationPhase::kAlignToPath;
       execution.NewRoute();
-      planning_failures = 0;
+      failures.ResetPlanningBudget();
       state.status = NavigationStatus::kNavigating;
     } catch (const RoutePlanningError& error) {
-      RejectPlanning(error.status(), error.what(), error.rejection());
+      failures.RejectPlan(error.status(), error.what(), error.rejection());
     } catch (const std::runtime_error& error) {
-      RejectPlanning(GlobalPlanStatus::kNoPath, error.what());
+      failures.RejectPlan(GlobalPlanStatus::kNoPath, error.what());
     }
   }
 
-  void StopAlgorithm(AlgorithmStop stop) {
-    state.algorithm_stop = stop;
-    state.command = {};
-    state.requested_command = {};
-    state.published_command = {};
-    state.controller_commanded_motion = false;
-    state.execution_failure = NavigationFailure::kNone;
-    state.planning_failure_reason =
-        stop == AlgorithmStop::kCancelled ? "navigation cancelled" : "navigation budget exceeded";
-    if (stop == AlgorithmStop::kCancelled) {
-      goal.reset();
-      path.clear();
-      state.path_signature = 0;
-      algorithm_fault_latched = false;
-      state.status = NavigationStatus::kIdle;
-    } else {
-      state.status = algorithm_fault_latched
-                         ? NavigationStatus::kBlocked
-                         : (goal ? NavigationStatus::kNavigating : NavigationStatus::kIdle);
-    }
-  }
-
-  void RejectPlanning(GlobalPlanStatus status, const std::string& reason,
-                      RouteRejection rejection = RouteRejection::kNone) {
-    path.clear();
-    state.command = {};
-    state.path_signature = 0;
-    state.planning_status = status;
-    state.route_rejection = rejection;
-    state.planning_failure_reason = reason;
-    state.execution_failure = NavigationFailure::kNone;
-    if (status == GlobalPlanStatus::kCancelled || status == GlobalPlanStatus::kBudgetExceeded) {
-      StopAlgorithm(status == GlobalPlanStatus::kCancelled ? AlgorithmStop::kCancelled
-                                                           : AlgorithmStop::kBudgetExceeded);
-      return;
-    }
-    if (status == GlobalPlanStatus::kInvalidInput || status == GlobalPlanStatus::kInvalidOutput ||
-        status == GlobalPlanStatus::kBackendError) {
-      algorithm_fault_latched = true;
-      state.published_command = {};
-      state.requested_command = {};
-      state.controller_commanded_motion = false;
-      state.status = NavigationStatus::kBlocked;
-      return;
-    }
-    execution.PlanningFailed();
-    ++planning_failures;
-    state.status = planning_failures > config.max_recovery_attempts ? NavigationStatus::kBlocked
-                                                                    : NavigationStatus::kNavigating;
-  }
-
-  bool ApplyFailure(NavigationFailure failure) {
-    if (failure == NavigationFailure::kNone) {
-      return false;
-    }
-    const auto effects = EffectsFor(failure);
-    state.execution_failure = failure;
-    if (effects.record_recovery) {
-      ++state.recoveries;
-    }
-    if (effects.clear_route) {
-      path.clear();
-    }
-    state.command = {};
-    if (effects.blocked) {
-      state.status = NavigationStatus::kBlocked;
-    }
-    if (effects.reset_replan_timer) {
-      next_replan_time = 0.;
-    }
-    if (!effects.message.empty()) {
-      state.planning_failure_reason = effects.message;
-    }
-    return true;
-  }
 
   NavigationConfig config;
   NavigationExecutionOptions execution_options;
@@ -206,7 +133,6 @@ class NavigationSystem::Impl {
   PlannedPathMetadata metadata;
   CommandSafetyPipeline safety;
   std::optional<Pose2d> goal;
-  bool algorithm_fault_latched = false;
   Path path;
   NavigationState state;
   bool observation_changed = false;
@@ -214,7 +140,7 @@ class NavigationSystem::Impl {
   DockingExecution docking;
   AlignmentExecution alignment;
   ExecutionWatchdog execution;
-  int planning_failures = 0;
+  NavigationFailures failures;
   std::unordered_set<std::uint64_t> banned_path_signatures;
 };
 
@@ -252,14 +178,14 @@ const std::string& NavigationSystem::controller_id() const { return impl_->confi
 
 void NavigationSystem::SetGoal(Pose2d goal) {
   impl_->goal = goal;
-  impl_->algorithm_fault_latched = false;
+  impl_->failures.ClearFault();
   impl_->path.clear();
   impl_->state.status = NavigationStatus::kNavigating;
   impl_->state.global_path_length_m = 0.;
   impl_->next_replan_time = 0.;
   impl_->execution.NewGoal();
   impl_->state.path_progress_m = 0.;
-  impl_->planning_failures = 0;
+  impl_->failures.ResetPlanningBudget();
   impl_->state.phase = NavigationPhase::kAlignToPath;
   impl_->docking.Reset();
   impl_->state.controller_commanded_motion = false;
@@ -329,10 +255,10 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
                                                  double timestamp, const AlgorithmBudget& budget) {
   impl_->state.algorithm_stop = AlgorithmStop::kNone;
   if (const auto stop = budget.Check(); stop != AlgorithmStop::kNone) {
-    impl_->StopAlgorithm(stop);
+    impl_->failures.Stop(stop);
     return impl_->state;
   }
-  if (impl_->algorithm_fault_latched) {
+  if (impl_->failures.latched()) {
     return impl_->state;
   }
   impl_->state.control_status = LocalControlStatus::kNotRun;
@@ -353,7 +279,7 @@ NavigationState NavigationSystem::ComputeCommand(const Pose2d& pose, Twist2d mea
   }
   auto result = ComputeCommandCycle(pose, measured_velocity, timestamp, budget);
   if (const auto stop = budget.Check(); stop != AlgorithmStop::kNone) {
-    impl_->StopAlgorithm(stop);
+    impl_->failures.Stop(stop);
     return impl_->state;
   }
   return result;
@@ -436,7 +362,7 @@ NavigationState NavigationSystem::ComputeCommandCycle(const Pose2d& pose, Twist2
     }
     CaptureMotion(impl_->state, *cycle.motion);
     impl_->state.minimum_ttc_s = cycle.motion->monitored.time_to_collision_s;
-    if (impl_->ApplyFailure(cycle.failure)) {
+    if (impl_->failures.Apply(cycle.failure)) {
       return impl_->state;
     }
     impl_->state.command = cycle.motion->monitored.command;
@@ -479,7 +405,7 @@ NavigationState NavigationSystem::ComputeCommandCycle(const Pose2d& pose, Twist2
       impl_->state.controller_diagnostics.backend = ControllerBackend::kRpp;
       impl_->state.controller_diagnostics.maneuver = ControllerManeuver::kRotateToPath;
       impl_->state.controller_diagnostics.fallback_level = 6;
-      if (impl_->ApplyFailure(cycle.failure)) {
+      if (impl_->failures.Apply(cycle.failure)) {
         return impl_->state;
       }
       impl_->state.command = cycle.motion->monitored.command;
@@ -488,11 +414,11 @@ NavigationState NavigationSystem::ComputeCommandCycle(const Pose2d& pose, Twist2
       return impl_->state;
     }
   }
-  if (impl_->ApplyFailure(
+  if (impl_->failures.Apply(
           impl_->execution.ObserveSafetyStop(impl_->state.safety_stopped_motion, timestamp))) {
     return impl_->state;
   }
-  if (impl_->ApplyFailure(impl_->execution.ObservePrevious(
+  if (impl_->failures.Apply(impl_->execution.ObservePrevious(
           {impl_->state.command, path_progress, timestamp, impl_->state.safety_stopped_motion,
            impl_->state.phase == NavigationPhase::kAlignToPath}))) {
     return impl_->state;
@@ -505,34 +431,16 @@ NavigationState NavigationSystem::ComputeCommandCycle(const Pose2d& pose, Twist2
   impl_->state.control_status = computed.status;
   impl_->state.controller_solve_us = computed.backend_duration_us;
   if (!computed.has_command()) {
-    impl_->state.controller_diagnostics = computed.diagnostics.value_or(ControllerDiagnostics{});
-    if (!computed.diagnostics) {
-      impl_->state.controller_diagnostics.status = ControllerSolveStatus::kFailure;
-    }
-    impl_->state.command = {};
-    impl_->state.requested_command = {};
-    impl_->state.published_command = {};
-    impl_->state.controller_commanded_motion = false;
-    if (computed.status == LocalControlStatus::kCancelled ||
-        computed.status == LocalControlStatus::kBudgetExceeded) {
-      impl_->StopAlgorithm(computed.status == LocalControlStatus::kCancelled
-                               ? AlgorithmStop::kCancelled
-                               : AlgorithmStop::kBudgetExceeded);
-    } else {
-      impl_->algorithm_fault_latched = true;
-      impl_->state.status = NavigationStatus::kBlocked;
-    }
-    impl_->state.execution_failure = NavigationFailure::kNone;
-    impl_->state.planning_failure_reason =
-        computed.reason.empty() ? "controller produced no valid command" : computed.reason;
+    impl_->failures.RejectControl(computed);
     return impl_->state;
   }
+
   CaptureMotion(impl_->state, *cycle.motion);
   impl_->state.controller_diagnostics = *computed.diagnostics;
   if (impl_->state.controller_diagnostics.solve_us <= 0.) {
     impl_->state.controller_diagnostics.solve_us = impl_->state.controller_solve_us;
   }
-  if (impl_->ApplyFailure(cycle.failure)) {
+  if (impl_->failures.Apply(cycle.failure)) {
     return impl_->state;
   }
   impl_->state.minimum_ttc_s = cycle.minimum_ttc_s.value();
