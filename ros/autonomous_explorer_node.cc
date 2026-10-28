@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -20,7 +21,7 @@
 #include "navigation2d/application/exploration/completion_execution.h"
 #include "navigation2d/application/exploration/continuous_tour_handoff.h"
 #include "navigation2d/application/exploration/debug_overlay.h"
-#include "navigation2d/application/exploration/dispatch_policy.h"
+#include "navigation2d/application/exploration/navigation_dispatch_execution.h"
 #include "navigation2d/application/exploration/entry_completion.h"
 #include "navigation2d/application/exploration/entry_coordinator.h"
 #include "navigation2d/application/exploration/entry_crawl_executor.h"
@@ -33,7 +34,6 @@
 #include "navigation2d/application/exploration/mission_lifecycle.h"
 #include "navigation2d/application/exploration/navigation_profile.h"
 #include "navigation2d/application/exploration/navigation_session.h"
-#include "navigation2d/application/exploration/navigation_target_record.h"
 #include "navigation2d/application/exploration/navigation_telemetry.h"
 #include "navigation2d/application/exploration/open_forward_stop.h"
 #include "navigation2d/application/exploration/planning_evidence_budget.h"
@@ -93,7 +93,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::ForwardBlockedActions,
                                  private navigation2d::exploration::AlcoveExitActions,
                                  private navigation2d::exploration::ViewpointSelectionActions,
-                                 private navigation2d::exploration::DispatchActions,
+                                 private navigation2d::exploration::NavigationDispatchRuntime,
                                  private navigation2d::exploration::CompletionActions,
                                  private navigation2d::exploration_ros::EntryStatusSink {
  public:
@@ -102,7 +102,8 @@ class AutonomousExplorer final : public rclcpp::Node,
         explorer_(navigation2d::exploration_ros::ReadExplorerConfig(*this)),
         selection_(explorer_, entry_, tour_, completion_, viewpoint_rejections_),
         parameters_(navigation2d::exploration_ros::ReadExplorerParameters(
-            *this, *navigation2d::AlgorithmRegistry::Builtins())) {
+            *this, *navigation2d::AlgorithmRegistry::Builtins())),
+        dispatch_(explorer_, parameters_.navigation_profiles) {
     motion_output_ = navigation2d::exploration_ros::MakeRosMotionOutput(*this);
     status_publisher_ = create_publisher<std_msgs::msg::String>(
         "/exploration/status", rclcpp::QoS(1).transient_local().reliable());
@@ -201,35 +202,29 @@ class AutonomousExplorer final : public rclcpp::Node,
     }
   }
 
-  bool StartNavigation(const Goal& requested_goal, bool returning,
-                       bool latest_map_retry = false) {
-    dispatch_.BeginNavigationAttempt(latest_map_retry);
-    start_occupied_ = false;
-    Goal goal = requested_goal;
-    if (!returning) {
-      if (const auto settled = explorer_.SettleGoal(goal)) {
-        if (std::hypot(settled->x - goal.x, settled->y - goal.y) > 1e-6)
-          RCLCPP_INFO(get_logger(),
-                      "Goal (%.2f, %.2f) too close to a mapped wall; moved to (%.2f, %.2f)",
-                      goal.x, goal.y, settled->x, settled->y);
-        goal = *settled;
-      }
-    }
-    const double trail_budget = evidence_budget_.Consume(
-        Map()->info.resolution, observations_.trail().size());
+  bool StartNavigation(const Goal& goal, bool returning, bool latest_map_retry = false) {
+    return dispatch_.Start(goal, returning, latest_map_retry, navigation_, *this);
+  }
+  void BeginNavigationPreparation() override { start_occupied_ = false; }
+  void ReportSettledGoal(const Goal& original, const Goal& settled) override {
+    RCLCPP_INFO(get_logger(), "Goal (%.2f, %.2f) too close to a mapped wall; moved to (%.2f, %.2f)",
+                original.x, original.y, settled.x, settled.y);
+  }
+  navigation2d::exploration::PreparedNavigationMap PrepareNavigationMap(const Goal& goal,
+                                                                        bool returning) override {
+    const double trail_budget =
+        evidence_budget_.Consume(Map()->info.resolution, observations_.trail().size());
     const auto entry = entry_.pending() ? entry_.pending() : entry_.locked();
     // Preserve the loader's existing diagnosis for stream failures.
     static_cast<void>(planning_map_.Prepare(
-        ObservationGrid(),
-        {.robot = navigation2d::MakePose2d(Pose()->x, Pose()->y,
-                                          Pose()->yaw),
-         .goal = goal,
-         .entry = entry,
-         .scan = ScanEvidence(),
-         .trail = observations_.trail(),
-         .trail_budget_m = trail_budget,
-         .returning = returning,
-         .map_revision = map_revision_}));
+        ObservationGrid(), {.robot = navigation2d::MakePose2d(Pose()->x, Pose()->y, Pose()->yaw),
+                            .goal = goal,
+                            .entry = entry,
+                            .scan = ScanEvidence(),
+                            .trail = observations_.trail(),
+                            .trail_budget_m = trail_budget,
+                            .returning = returning,
+                            .map_revision = map_revision_}));
     PublishPlanningDebugMap(returning);
     bool home_goal = false;
     if (returning && mission_.home()) {
@@ -237,95 +232,86 @@ class AutonomousExplorer final : public rclcpp::Node,
       home_goal = std::hypot(goal.x - home.x, goal.y - home.y) <= Map()->info.resolution;
     }
     const bool entry_drive = entry_.pending() || entry_.locked();
-    using navigation2d::exploration::NavigationPurpose;
-    const auto purpose = entry_drive ? NavigationPurpose::kEntry :
-        (returning ? NavigationPurpose::kReturn : NavigationPurpose::kExplore);
-    using navigation2d::exploration::DispatchPolicy;
-    using RetryKind = DispatchPolicy::RetryKind;
-    const bool pinch_retry = dispatch_.active(RetryKind::kPinch);
-    const bool pinch_plan = pinch_retry && !entry_drive && !returning;
-    const auto config = navigation2d::exploration::BuildNavigationProfile(
-        {.resolution = Map()->info.resolution,
-         .entry = entry_drive,
-         .pinch_retry = pinch_retry,
-         .returning = returning,
-         .home_goal = home_goal},
-        parameters_.navigation_profiles.For(purpose));
-    try {
-      navigation_.Begin(
-          config, planning_map_.path(),
-          navigation2d::MakePose2d(goal.x - planning_map_.origin_x(),
-                                   goal.y - planning_map_.origin_y(), goal.yaw),
-          route_failures_.CooledSignatures(),
-          {.heading_policy = parameters_.navigation_profiles.For(purpose).heading_policy});
-      telemetry_.BeginPreparation();
-      // Do not commit target/returning/recovery until the plan is
-      // accepted. Early assign left ghost GOALs outside painted free and kept
-      // recovery sessions alive after open-area plan rejects (stuck mid-room).
-      if (Scan()) FeedScan();
-      const auto initial_time = now();
-      const auto probe = navigation_.Probe(
-          LocalPose(*Pose()), FreshVelocity(initial_time), initial_time.seconds());
-      const auto& initial_state = probe.state;
-      const auto verdict = dispatch_.Evaluate(
-          goal, {.entry = entry_drive,
-                 .returning = returning,
-                 .retreat = retreat_.active(),
-                 .pinch = pinch_plan},
-          latest_map_retry, probe, *this);
-      using navigation2d::exploration::DispatchVerdict;
-      if (verdict != DispatchVerdict::kAcceptPrepared) {
-        return verdict == DispatchVerdict::kAcceptedRetry;
-      }
-      // Do not classify a frontier from the controller's first sample. At a
-      // continuous goal handoff the measured velocity still belongs to the
-      // previous route, so acceleration and collision constraints may
-      // correctly emit one zero command before tracking starts. Executability
-      // is a temporal property owned by NavigationSystem's progress and
-      // bounded-rotation state machines, not a one-frame threshold.
-      // RPP slows in curves and near occupied space. Exploration goals get a
-      // tighter budget so a mid-doorway crawl cannot burn 2+ minutes; return
-      // home keeps the longer travel allowance.
-      goal_execution_.SetTimeout(DispatchPolicy::GoalTimeout(returning, initial_state.global_path_length_m));
-      navigation_target_.Accept(navigation_, goal, parameters_.navigation_profiles.For(purpose));
-      returning_ = returning;
-      // Resume / latest-map replan of the same viewpoint must keep peel and
-      // open-replan counters; only a materially new goal opens a session.
-      recovery_.Begin(goal.x, goal.y);
-      const auto goal_started = now();
-      const auto goal_progress = now();
-      goal_execution_.Start(goal_started.nanoseconds(), goal_progress.nanoseconds());
-      immobility_open_replans_ = 0;
-      viewpoint_rejections_.ResetScrapes();
-      PublishStatus(returning ? "RETURNING" :
-                        (goal.leftover_approach ? "COMPLETING" : "NAVIGATING"),
-                    returning ? "returning to exploration start" :
-                        (retreat_.active() ? "leaving a pinched corridor along the driven trail" :
-                        (goal.leftover_approach
-                             ? "one leftover approach after exploring tour emptied"
-                             : "navigating to frontier")));
-      // Accepted dispatch commits the DFS room context. Inspecting candidates
-      // must not Enter — only a path that will actually be tracked.
-      if (!returning && !retreat_.active()) explorer_.CommitRegion(goal);
-      RCLCPP_INFO(get_logger(),
-                  "Navigation2D goal: pose=(%.2f, %.2f) goal=(%.2f, %.2f) "
-                  "frontier_cells=%d region=%llu path_signature=%llu %s",
-                  Pose()->x, Pose()->y, goal.x, goal.y,
-                  goal.frontier_cells,
-                  static_cast<unsigned long long>(goal.region_id),
-                  static_cast<unsigned long long>(initial_state.path_signature),
-                  explorer_.RegionAudit().c_str());
-      return true;
-    } catch (const std::exception& error) {
-      last_planning_failure_ = error.what();
-      RCLCPP_WARN(get_logger(), "Navigation2D rejected goal: %s", error.what());
-      navigation_.Cancel();
-      return false;
+    return {planning_map_.path(),
+            planning_map_.origin_x(),
+            planning_map_.origin_y(),
+            Map()->info.resolution,
+            entry_drive,
+            home_goal};
+  }
+  std::vector<std::uint64_t> CooledNavigationSignatures() const override {
+    return route_failures_.CooledSignatures();
+  }
+  void ObservePreparedNavigation() override {
+    telemetry_.BeginPreparation();
+    if (Scan()) {
+      FeedScan();
+    }
+  }
+  navigation2d::exploration::NavigationProbeInput ReadNavigationProbe() const override {
+    const auto initial_time = now();
+    return {LocalPose(*Pose()), FreshVelocity(initial_time), initial_time.seconds()};
+  }
+  bool DispatchRetreating() const override { return retreat_.active(); }
+  void SetDispatchTimeout(double seconds) override { goal_execution_.SetTimeout(seconds); }
+  void CommitAcceptedNavigation(const Goal& goal, bool returning,
+                                const navigation2d::NavigationState& initial_state) override {
+    returning_ = returning;
+    // Resume / latest-map replan of the same viewpoint must keep peel and
+    // open-replan counters; only a materially new goal opens a session.
+    recovery_.Begin(goal.x, goal.y);
+    const auto goal_started = now();
+    const auto goal_progress = now();
+    goal_execution_.Start(goal_started.nanoseconds(), goal_progress.nanoseconds());
+    immobility_open_replans_ = 0;
+    viewpoint_rejections_.ResetScrapes();
+    PublishStatus(
+        returning ? "RETURNING" : (goal.leftover_approach ? "COMPLETING" : "NAVIGATING"),
+        returning ? "returning to exploration start"
+                  : (retreat_.active() ? "leaving a pinched corridor along the driven trail"
+                                       : (goal.leftover_approach
+                                              ? "one leftover approach after exploring tour emptied"
+                                              : "navigating to frontier")));
+    // Accepted dispatch commits the DFS room context. Inspecting candidates
+    // must not Enter — only a path that will actually be tracked.
+    if (!returning && !retreat_.active()) {
+      explorer_.CommitRegion(goal);
+    }
+    RCLCPP_INFO(get_logger(),
+                "Navigation2D goal: pose=(%.2f, %.2f) goal=(%.2f, %.2f) "
+                "frontier_cells=%d region=%llu path_signature=%llu %s",
+                Pose()->x, Pose()->y, goal.x, goal.y, goal.frontier_cells,
+                static_cast<unsigned long long>(goal.region_id),
+                static_cast<unsigned long long>(initial_state.path_signature),
+                explorer_.RegionAudit().c_str());
+  }
+  void RecordNavigationException(std::string_view reason) override {
+    last_planning_failure_ = reason;
+    RCLCPP_WARN(get_logger(), "Navigation2D rejected goal: %s", last_planning_failure_.c_str());
+  }
+  void ResumePreparedTrailReplay() override {
+    if (planning_map_.snapshot().trail_budget_m > 0.) {
+      evidence_budget_.ResumeTrailReplay();
+    }
+  }
+  void ReportDispatchReplan(navigation2d::exploration::DispatchReplanNotice notice) override {
+    using Kind = navigation2d::exploration::DispatchReplanNotice::Kind;
+    if (notice.kind == Kind::kLatestMap) {
+      RCLCPP_WARN(get_logger(), "%s; replanning active %s goal on latest online map (%d/%d)",
+                  notice.reason, notice.returning ? "return" : "frontier", notice.number,
+                  notice.limit);
+    } else {
+      RCLCPP_WARN(
+          get_logger(),
+          "Route cut by newly mapped obstacle; replanning same %s goal on latest map (%d/%d)",
+          notice.returning ? "return" : "frontier", notice.number, notice.limit);
     }
   }
 
   void PublishPlanningDebugMap(bool returning) {
-    if (!Map() || !Pose()) return;
+    if (!Map() || !Pose()) {
+      return;
+    }
     (void)returning;
     debug_reporter_.PlanningMap(*debug_output_, *Map(), LocalPose(*Pose()),
                                 [this] { return now(); });
@@ -1032,40 +1018,15 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   bool ReplanActiveGoalOnLatestMap(const char* reason) override {
-    // Each attempt rebuilds NavigationSystem from the newest mapper output
-    // and the robot's current true pose. It cannot replay or bias toward the
-    // historical trajectory. Bound the loop so a genuinely disconnected
-    // frontier/return reports failure instead of churning forever.
-    return dispatch_.ReplanOnLatestMap([&](auto attempt) {
-      navigation_.Cancel();
-      RCLCPP_WARN(get_logger(),
-                  "%s; replanning active %s goal on latest online map (%d/%d)",
-                  reason, returning_ ? "return" : "frontier", attempt.number, attempt.limit);
-      return StartNavigation(ActiveGoal(), returning_, true);
-    });
+    return dispatch_.ReplanLatest(reason, returning_, navigation_, *this);
   }
-
-  // A route cut while driving means the map changed, not that the goal is
-  // bad: plan the same goal again on the newest map, painted the way the cut
-  // route was, before any failure bookkeeping (reject counts, signature
-  // cooling, breadcrumbs). The new snapshot contains the new obstacle, so the
-  // planner routes around it or reports no route.
   bool ReplanAfterRouteCut() {
-    return dispatch_.ReplanAfterRouteCut([&](auto attempt) {
-      navigation_.Cancel();
-      if (planning_map_.snapshot().trail_budget_m > 0.) {
-        evidence_budget_.ResumeTrailReplay();
-      }
-      RCLCPP_WARN(get_logger(),
-                  "Route cut by newly mapped obstacle; replanning same %s goal on latest map (%d/%d)",
-                  returning_ ? "return" : "frontier", attempt.number, attempt.limit);
-      return StartNavigation(ActiveGoal(), returning_, true);
-    });
+    return dispatch_.ReplanAfterCut(returning_, navigation_, *this);
   }
 
-  const Goal& ActiveGoal() const { return navigation_target_.legacy_goal(); }
+  const Goal& ActiveGoal() const { return dispatch_.goal(); }
 
-  void ClearDisplayedGoal() { navigation_target_.Clear(); }
+  void ClearDisplayedGoal() { dispatch_.ClearGoal(); }
 
   void DemoteActiveGoal(const char* reason) {
     if (mission_.phase() != MissionPhase::kReturning && !returning_) {
@@ -1347,8 +1308,8 @@ class AutonomousExplorer final : public rclcpp::Node,
          .message = final_message,
          .pose_source = parameters_.pose_source,
          .backend = telemetry_.state().backend,
-         .global_planner = navigation_target_.algorithms().global,
-         .local_controller = navigation_target_.algorithms().local,
+         .global_planner = dispatch_.algorithms().global,
+         .local_controller = dispatch_.algorithms().local,
          .mppi_commands = telemetry_.command_counts().mppi,
          .rpp_commands = telemetry_.command_counts().rpp,
          .total_distance_m = observations_.distance_m(),
@@ -1902,7 +1863,6 @@ class AutonomousExplorer final : public rclcpp::Node,
   navigation2d::exploration::CompletionExecution completion_;
   navigation2d::exploration::RouteFailureHistory route_failures_;
   int mapped_obstacle_rejects_ = 0;
-  navigation2d::exploration::DispatchPolicy dispatch_;
   bool reject_pose_valid_ = false;
   int reject_cell_x_ = 0;
   int reject_cell_y_ = 0;
@@ -1929,7 +1889,6 @@ class AutonomousExplorer final : public rclcpp::Node,
   double active_path_min_clearance_m_ = 0.;
   navigation2d::exploration_ros::DebugReporter debug_reporter_;
   bool returning_ = false;
-  navigation2d::exploration::NavigationTargetRecord navigation_target_;
   navigation2d::exploration::ReturnCoordinator return_;
   navigation2d::exploration::EntryCoordinator entry_;
   navigation2d::exploration::GoalRecoverySession recovery_;
@@ -1941,6 +1900,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   navigation2d::exploration::ViewpointSelection selection_;
   navigation2d::exploration::NavigationSession navigation_;
   const navigation2d::exploration_ros::ExplorerParameters parameters_;
+  navigation2d::exploration::NavigationDispatch dispatch_;
   std::unique_ptr<navigation2d::exploration::MotionOutput> motion_output_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_publisher_;
   std::unique_ptr<navigation2d::exploration_ros::DebugReportSink> debug_output_;
