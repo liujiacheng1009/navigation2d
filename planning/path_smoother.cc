@@ -5,8 +5,24 @@
 #include <vector>
 
 #include "navigation2d/planning/collision_checker.h"
+#include "navigation2d/configuration/navigation_config.h"
 
 namespace navigation2d::planning_internal {
+SmootherParameters SmootherParametersFrom(const NavigationConfig& config) {
+  return {config.smoother_enabled,
+          config.smoother_max_iterations,
+          config.smoother_data_weight,
+          config.smoother_smooth_weight,
+          config.smoother_obstacle_weight,
+          config.smoother_min_clearance,
+          config.smoother_max_deviation,
+          config.smoother_max_curvature,
+          config.smoother_max_step,
+          config.smoother_tolerance};
+}
+ConstrainedPathSmoother::ConstrainedPathSmoother(const NavigationConfig& config)
+    : ConstrainedPathSmoother(SmootherParametersFrom(config)) {}
+
 namespace {
 double Curvature(const Eigen::Vector2d& first, const Eigen::Vector2d& middle,
                  const Eigen::Vector2d& last) {

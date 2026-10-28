@@ -3,7 +3,7 @@
 #include <optional>
 #include <memory>
 
-#include "navigation2d/configuration/navigation_config.h"
+#include "navigation2d/planning/state_lattice_parameters.h"
 #include "navigation2d/planning/global_planner.h"
 #include "navigation2d/planning/obstacle_heuristic.h"
 #include "navigation2d/planning/collision_checker.h"
@@ -17,14 +17,15 @@ class StateLatticePlanner final : public GlobalPlanner {
   PathHeadingSemantics HeadingSemantics() const noexcept override {
     return PathHeadingSemantics::kBodyHeading;
   }
-  explicit StateLatticePlanner(NavigationConfig config) : config_(std::move(config)) {}
+  explicit StateLatticePlanner(const NavigationConfig& config);
+  explicit StateLatticePlanner(StateLatticeParameters config) : config_(std::move(config)) {}
   ~StateLatticePlanner() override = default;
   Path Plan(const LayeredCostmap& costmap, const Pose2d& start,
             const Pose2d& goal) const override;
   GlobalPlanningDiagnostics Diagnostics() const override { return diagnostics_; }
 
  private:
-  NavigationConfig config_;
+  StateLatticeParameters config_;
   mutable std::optional<planning_internal::ObstacleHeuristic> obstacle_heuristic_;
   mutable GlobalPlanningDiagnostics diagnostics_;
   mutable const LayeredCostmap* active_costmap_ = nullptr;

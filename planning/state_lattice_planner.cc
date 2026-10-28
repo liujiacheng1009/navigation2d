@@ -5,9 +5,28 @@
 #include <stdexcept>
 
 #include "navigation2d/planning/astar_planner.h"
+#include "navigation2d/configuration/navigation_config.h"
 #include "navigation2d/planning/path_smoother.h"
 
 namespace navigation2d {
+StateLatticeParameters StateLatticeParametersFrom(const NavigationConfig& config) {
+  return {config.robot_radius,
+          config.footprint,
+          config.lattice_yaw_bins,
+          config.lattice_primitive_length,
+          config.lattice_allow_reverse,
+          config.lattice_reverse_penalty,
+          config.lattice_rotation_cost,
+          config.lattice_cost_penalty,
+          config.lattice_max_expansions,
+          config.lattice_max_planning_time,
+          config.lattice_initial_heuristic_weight,
+          config.lattice_heuristic_weight_decrement,
+          planning_internal::SmootherParametersFrom(config)};
+}
+StateLatticePlanner::StateLatticePlanner(const NavigationConfig& config)
+    : StateLatticePlanner(StateLatticeParametersFrom(config)) {}
+
 namespace {
 int YawBin(double yaw, int bins) {
   const double normalized = std::fmod(std::fmod(yaw, 2. * M_PI) + 2. * M_PI, 2. * M_PI);
@@ -224,7 +243,7 @@ Path StateLatticePlanner::Plan(const LayeredCostmap& costmap, const Pose2d& star
   }
   path.back() = goal;
   if (!config_.footprint.empty()) return path;
-  return planning_internal::ConstrainedPathSmoother(config_).Smooth(path, costmap, config_.robot_radius);
+  return planning_internal::ConstrainedPathSmoother(config_.smoothing).Smooth(path, costmap, config_.robot_radius);
 }
 
 }  // namespace navigation2d
