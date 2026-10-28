@@ -366,7 +366,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     DemoteViewpointForSeconds(mouth, 8.0);
     ClearEntryMouthLock();
     tour_.AfterMouthFailure(explorer_, mouth, TourRobot(), *this);
-    next_selection_ = now();
+    selection_.ScheduleAt(now().nanoseconds());
     PublishStatus("SELECTING", reason);
   }
 
@@ -383,7 +383,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   int EntryAttemptBudget() const { return entry_.AttemptBudget(explorer_); }
 
   void DeferEntrySelection(navigation2d::exploration::EntrySelectionDelay delay) override {
-    next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+    selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.4)).nanoseconds());
     PublishStatus("COMPLETING",
         delay == navigation2d::exploration::EntrySelectionDelay::kWideMouthCrawl
             ? "wide mouth blocked; crawling mid-gap instead of abandon"
@@ -431,7 +431,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     navigation2d::exploration::CompleteEntryArrival(entry_, explorer_, room_visits_, *this,
         arrival, Pose()->x, Pose()->y);
   }
-  void SelectAfterEntry() override { next_selection_ = now(); }
+  void SelectAfterEntry() override { selection_.ScheduleAt(now().nanoseconds()); }
   void EntryStatus(const char* phase, const char* reason) override { PublishStatus(phase, reason); }
   void ReportEntry(const navigation2d::exploration::EntryNotice& notice) override {
     navigation2d::exploration_ros::ReportEntry(get_logger(), notice, last_planning_failure_, *this);
@@ -559,7 +559,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   void EscapeGoalResumed() override {
     PublishStatus("NAVIGATING", "resumed goal after open-space peel");
   }
-  void SelectAfterEscape() override { next_selection_ = now(); }
+  void SelectAfterEscape() override { selection_.ScheduleAt(now().nanoseconds()); }
 
   void ClearCompletionRouteCooling() override { route_failures_.ClearSignatures(); }
   bool NavigateCompletionGoal(const Goal& goal) override { return StartNavigation(goal, false); }
@@ -613,7 +613,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         EscapeOrShortRetreat("tip rescue; peel into free",
                              "tip rescue; short trail retreat")) {
       PublishStatus("RECOVERING", why);
-      next_selection_ = now() + rclcpp::Duration::from_seconds(0.6);
+      selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.6)).nanoseconds());
       return true;
     }
     BuildTour();
@@ -719,7 +719,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     // After peel fails, immediately hunt a far mouth instead of SELECTING
     // idle in the tip until completing rounds burn out.
     if (TryRescueDistantMouths(reason)) return true;
-    next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+    selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.4)).nanoseconds());
     PublishStatus("SELECTING", reason);
     return true;
   }
@@ -815,7 +815,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
   void ClearSelectionRouteCooling() override { route_failures_.ClearSignatures(); }
   void DeferViewpointRetry() override {
-    next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+    selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.4)).nanoseconds());
   }
   void ReportSelectionSkip(navigation2d::exploration::SelectionSkip kind,
                            const Goal& goal) override {
@@ -830,7 +830,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     motion_output_->Send({});
   }
   void DeferBlockedSelection(const char* message) override {
-    next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+    selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.4)).nanoseconds());
     SelectionStatus(message);
   }
   void SelectionStatus(const char* message) override { PublishStatus("SELECTING", message); }
@@ -992,7 +992,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     recovery_.Clear();
     if (!tour_.goals().empty()) tour_.Advance();
     // Dwell before hopping mouths — immediate BuildTour caused junction thrash.
-    next_selection_ = now() + rclcpp::Duration::from_seconds(1.5);
+    selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(1.5)).nanoseconds());
     PublishStatus("SELECTING", reason);
   }
 
@@ -1014,7 +1014,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     dispatch_.ResetLatestMapReplans();
     mapped_obstacle_rejects_ = 0;
     retreat_.AllowRetry();
-    next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
+    selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(1.0)).nanoseconds());
     PublishStatus("SELECTING", reason);
     if (EscapeOrShortRetreat("leaving wall tip after path-cut thrash; peel",
                              "leaving wall tip after path-cut thrash; short retreat"))
@@ -1050,7 +1050,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         // left the room after attempt 2 of 6.
         if (entry_.attempts() > before_attempts &&
             entry_.attempts() < EntryAttemptBudget()) {
-          next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+          selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.4)).nanoseconds());
           PublishStatus("COMPLETING",
                         "path cut; entry budget remains");
           return true;
@@ -1135,7 +1135,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         return true;
       }
       pose_motion_.ResetOpenReplans();
-      next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+      selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.4)).nanoseconds());
       PublishStatus("SELECTING", "immobility open-front; reselect without peel");
       return true;
     }
@@ -1147,7 +1147,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     ClearEntryMouthLock();
     retreat_.AllowRetry();
     evidence_budget_.RequestStartReplay();
-    next_selection_ = now() + rclcpp::Duration::from_seconds(0.4);
+    selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.4)).nanoseconds());
     if (EscapeOrShortRetreat(
             "immobility at wall tip; peel out of inflation",
             "immobility at wall tip; short trail retreat"))
@@ -1159,7 +1159,8 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   void DeferViewpointSelection(double seconds, const char* message) override {
-    next_selection_ = seconds == 0. ? now() : now() + rclcpp::Duration::from_seconds(seconds);
+    selection_.ScheduleAt(
+        (seconds == 0. ? now() : now() + rclcpp::Duration::from_seconds(seconds)).nanoseconds());
     PublishStatus("SELECTING", message);
   }
   void ReportViewpointArrival(navigation2d::exploration::ViewpointArrivalNotice kind,
@@ -1326,7 +1327,7 @@ class AutonomousExplorer final : public rclcpp::Node,
               "mapped-obstacle thrash; peel then retry local pocket",
               "mapped-obstacle thrash; short retreat then retry local pocket"))
         return true;
-      next_selection_ = now();
+      selection_.ScheduleAt(now().nanoseconds());
       PublishStatus("SELECTING", "mapped-obstacle thrash; local pocket kept");
       return true;
     }
@@ -1346,7 +1347,7 @@ class AutonomousExplorer final : public rclcpp::Node,
             "leaving pinch after mapped-obstacle rejects; peel",
             "leaving pinch after mapped-obstacle rejects; short retreat"))
       return true;
-    next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
+    selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(1.0)).nanoseconds());
     return true;
   }
 
@@ -1423,7 +1424,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   void MissionBootstrapScheduled(std::int64_t deadline_ns) override {
-    next_selection_ = rclcpp::Time(deadline_ns, RCL_ROS_TIME);
+    selection_.ScheduleAt(rclcpp::Time(deadline_ns, RCL_ROS_TIME).nanoseconds());
     PublishStatus("WAITING", parameters_.pose_source + " pose ready; waiting for a stable online map");
   }
 
@@ -1446,8 +1447,8 @@ class AutonomousExplorer final : public rclcpp::Node,
       // viewpoint into the planning circle (live: arrived, then
       // "start occupied, nearest obstacle 0.19 m").
       motion_output_->Send({});
-      if (now() >= next_selection_) {
-        next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
+      if (selection_.Due(now().nanoseconds())) {
+        selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(1.0)).nanoseconds());
         SelectNextGoal();
       }
       return true;
@@ -1598,7 +1599,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         // After a trail retreat while a mouth is locked, resume that mouth.
         if (navigation2d::exploration::ResumeEntryAfterRetreat(entry_, explorer_, *this)) return;
         // Keep the committed tour; retreat is not a license to rebuild reverse.
-        next_selection_ = now();
+        selection_.ScheduleAt(now().nanoseconds());
         PublishStatus("SELECTING", "left the pinched corridor");
       } else {
         viewpoint_arrival_.Succeeded(explorer_, entry_, tour_, ActiveGoal(), *TourRobot(), *this);
@@ -1736,7 +1737,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         DemoteViewpointForSeconds(ActiveGoal(), 25.0);
         if (!tour_.goals().empty()) tour_.Advance();
         if (TryStartEscape()) return;
-        next_selection_ = now();
+        selection_.ScheduleAt(now().nanoseconds());
         PublishStatus("SELECTING", "no motion against the jamb; leaving this route");
         return;
       }
@@ -1753,7 +1754,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         FinishCompleting();
       } else {
         if (!tour_.goals().empty()) tour_.Advance();
-        next_selection_ = now();
+        selection_.ScheduleAt(now().nanoseconds());
         PublishStatus("SELECTING", first_segment_stall ?
             "first-segment failed; skipping cooled viewpoint" :
             (mid_path_pinch ? "mid-path pinch stall; skipping viewpoint" :
@@ -1799,7 +1800,6 @@ class AutonomousExplorer final : public rclcpp::Node,
   navigation2d::exploration::EntryCoordinator entry_;
   navigation2d::exploration::GoalRecoverySession recovery_;
   navigation2d::exploration::TourExecution tour_;
-  rclcpp::Time next_selection_{0, 0, RCL_ROS_TIME};
   rclcpp::Time last_debug_publish_{0, 0, RCL_ROS_TIME};
   navigation2d::exploration_ros::ExplorerObservations observations_;
   navigation2d::FrontierExplorer explorer_;

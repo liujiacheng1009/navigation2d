@@ -58,11 +58,21 @@ int main() {
 
   Scene accepted;
   accepted.Seed();
+  assert(accepted.selection.Due(0));
+  accepted.selection.ScheduleAt(2000000000);
+  assert(!accepted.selection.Due(1999999999));
+  assert(accepted.selection.Due(2000000000));
+  assert(accepted.selection.Due(2000000001));
   accepted.actions.accept = true;
   accepted.selection.Select({3., 1.5, 0.}, accepted.actions);
   assert(accepted.actions.planned.size() == 1 && accepted.actions.accepted == 1);
   assert(accepted.tour.goals().size() == 5 && accepted.selection.blocked_cycles() == 0);
   assert(accepted.actions.exhausted.events.empty());
+  // Accepting a goal cannot erase the cooldown; a paused/backward mission clock
+  // must wait until the existing deadline is reached again.
+  assert(!accepted.selection.Due(1999999999));
+  assert(!accepted.selection.Due(0));
+  assert(accepted.selection.Due(2000000000));
 
   Scene pinched;
   pinched.Seed();
