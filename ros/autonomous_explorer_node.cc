@@ -836,10 +836,11 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   void HomeAccepted(navigation2d::exploration::ReturnPlanStage stage) override {
-    RCLCPP_INFO(get_logger(), "%s",
+    RCLCPP_INFO(get_logger(), "%s; tracking with %s",
                 stage == navigation2d::exploration::ReturnPlanStage::kInitial
-                    ? "Final online-map return path accepted; tracking with RPP"
-                    : "Final online-map return path accepted after escape; tracking with RPP");
+                    ? "Final online-map return path accepted"
+                    : "Final online-map return path accepted after escape",
+                dispatch_.algorithms().local == "rpp" ? "RPP" : dispatch_.algorithms().local.c_str());
     PublishStatus("RETURNING", "tracking shortest route home on final observed map");
   }
 
