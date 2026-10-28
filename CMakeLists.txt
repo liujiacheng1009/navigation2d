@@ -42,6 +42,7 @@ enable_testing()
 add_library(navigation2d_exploration_application STATIC
   application/exploration/debug_overlay.cc
   application/exploration/navigation_session.cc
+  application/exploration/navigation_target_record.cc
   application/exploration/navigation_profile.cc
   application/exploration/planning_snapshot.cc
   application/exploration/route_validator.cc
