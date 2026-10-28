@@ -74,6 +74,15 @@ const char* MonitorActionName(navigation2d::CollisionMonitorAction action) {
 }
 
 }  // namespace
+void NavigationTelemetry::NoteCommandBackend(ControllerBackend backend) {
+  switch (backend) {
+    case ControllerBackend::kAcados: ++command_counts_.acados; break;
+    case ControllerBackend::kMppi: ++command_counts_.mppi; break;
+    case ControllerBackend::kRpp: ++command_counts_.rpp; break;
+    case ControllerBackend::kDwa:
+    case ControllerBackend::kNone: break;
+  }
+}
 void NavigationTelemetry::Capture(const navigation2d::NavigationState& state,
                                   const navigation2d::Twist2d& measured_velocity) {
   state_.backend = BackendName(state.controller_diagnostics.backend);

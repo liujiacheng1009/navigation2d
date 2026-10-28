@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <string>
 
 #include "navigation2d/application/navigation_system.h"
@@ -33,12 +34,29 @@ struct NavigationTelemetryState {
   int fallback_level = 0;
   int planner_expansions = 0;
 };
+struct ControllerCommandCounts {
+  std::uint64_t acados = 0, mppi = 0, rpp = 0;
+};
 class NavigationTelemetry {
  public:
+  // Capture is observational. Count only when execution reaches the command
+  // stage; early preemption and preparation must not count a command.
+  void NoteCommandBackend(ControllerBackend backend);
+  const ControllerCommandCounts& command_counts() const { return command_counts_; }
+  void BeginPreparation() { reported_recoveries_ = 0; }
+  bool TakeRecoveryNotice(int recoveries) {
+    if (recoveries <= reported_recoveries_) {
+      return false;
+    }
+    reported_recoveries_ = recoveries;
+    return true;
+  }
   void Capture(const NavigationState& state, const Twist2d& measured_velocity);
   const NavigationTelemetryState& state() const { return state_; }
 
  private:
   NavigationTelemetryState state_;
+  ControllerCommandCounts command_counts_;
+  int reported_recoveries_ = 0;
 };
 }  // namespace navigation2d::exploration

@@ -65,6 +65,7 @@
 #include "navigation2d/ros/exploration/explorer_subscriptions.h"
 #include "navigation2d/ros/exploration/map_observation.h"
 #include "navigation2d/ros/exploration/motion_output.h"
+#include "navigation2d/ros/exploration/navigation_reporter.h"
 #include "navigation2d/ros/exploration/planning_map_adapter.h"
 #include "navigation2d/ros/exploration/scan_observation.h"
 #include "rclcpp/rclcpp.hpp"
@@ -262,7 +263,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                                    goal.y - planning_map_.origin_y(), goal.yaw),
           route_failures_.CooledSignatures(),
           {.heading_policy = parameters_.navigation_profiles.For(purpose).heading_policy});
-      reported_recoveries_ = 0;
+      telemetry_.BeginPreparation();
       // Do not commit target/returning/recovery until the plan is
       // accepted. Early assign left ghost GOALs outside painted free and kept
       // recovery sessions alive after open-area plan rejects (stuck mid-room).
@@ -1435,8 +1436,8 @@ class AutonomousExplorer final : public rclcpp::Node,
          .backend = telemetry_.state().backend,
          .global_planner = navigation_target_.algorithms().global,
          .local_controller = navigation_target_.algorithms().local,
-         .mppi_commands = mppi_commands_,
-         .rpp_commands = rpp_commands_,
+         .mppi_commands = telemetry_.command_counts().mppi,
+         .rpp_commands = telemetry_.command_counts().rpp,
          .total_distance_m = observations_.distance_m(),
          .known_cells = KnownCells(),
          .completed_goals = explorer_.completed_goals(),
@@ -1731,12 +1732,7 @@ class AutonomousExplorer final : public rclcpp::Node,
           std::max(0., state.global_path_length_m - state.path_progress_m);
       if (MaybePreemptForNearerMouth(path_remaining)) return;
     }
-    if (state.controller_diagnostics.backend == navigation2d::ControllerBackend::kAcados)
-      ++acados_commands_;
-    else if (state.controller_diagnostics.backend == navigation2d::ControllerBackend::kMppi)
-      ++mppi_commands_;
-    else if (state.controller_diagnostics.backend == navigation2d::ControllerBackend::kRpp)
-      ++rpp_commands_;
+    telemetry_.NoteCommandBackend(state.controller_diagnostics.backend);
     const bool safety_held =
         state.safety_stopped_motion ||
         state.collision_monitor_action == navigation2d::CollisionMonitorAction::kStop ||
@@ -1757,24 +1753,8 @@ class AutonomousExplorer final : public rclcpp::Node,
       PublishStatus(last_state_.empty() ? "NAVIGATING" : last_state_,
                     last_message_.empty() ? "navigating" : last_message_);
     }
-    if (state.recoveries > reported_recoveries_) {
-      reported_recoveries_ = state.recoveries;
-      RCLCPP_WARN(get_logger(),
-                  "Route progress recovery: phase=%d arc=%.2f/%.2f requested=(%.3f,%.3f) published=(%.3f,%.3f) controller_motion=%s safety_stop=%s rpp_stage=%d controller_maneuver=%d intentional_stop=%s monitor_action=%d ttc=%.3f velocity=(%.3f,%.3f) path_signature=%llu planner_error=%s",
-                  static_cast<int>(state.phase),
-                  state.path_progress_m, state.global_path_length_m,
-                  state.requested_command.linear, state.requested_command.angular,
-                  state.published_command.linear, state.published_command.angular,
-                  state.controller_commanded_motion ? "yes" : "no",
-                  state.safety_stopped_motion ? "yes" : "no",
-                  state.controller_diagnostics.fallback_level,
-                  static_cast<int>(state.controller_diagnostics.maneuver),
-                  state.controller_diagnostics.intentional_stop ? "yes" : "no",
-                  static_cast<int>(state.collision_monitor_action), state.minimum_ttc_s,
-                  measured_velocity.linear, measured_velocity.angular,
-                  static_cast<unsigned long long>(state.path_signature),
-                  state.planning_failure_reason.empty() ? "none" :
-                      state.planning_failure_reason.c_str());
+    if (telemetry_.TakeRecoveryNotice(state.recoveries)) {
+      navigation2d::exploration_ros::ReportRouteProgressRecovery(get_logger(), state, measured_velocity);
     }
     // Dead-end tip crawl: GOAL sits in a U-alcove against the wall. The exit
     // is open sideways/behind, but RPP keeps probing into the wall. Drop the
@@ -2028,9 +2008,6 @@ class AutonomousExplorer final : public rclcpp::Node,
   bool tip_rescue_attempted_ = false;
   navigation2d::exploration::RoomVisitLedger room_visits_;
   navigation2d::exploration::EscapeExecution escape_;
-  int reported_recoveries_ = 0;
-  std::uint64_t acados_commands_ = 0;
-  std::uint64_t mppi_commands_ = 0, rpp_commands_ = 0;
   navigation2d::exploration::NavigationTelemetry telemetry_;
   std::string last_state_;
   std::string last_message_;
