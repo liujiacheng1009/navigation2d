@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <memory>
 
-#include "navigation2d/configuration/navigation_config.h"
+#include "navigation2d/control/mppi_parameters.h"
 #include "navigation2d/control/local_controller.h"
 
 namespace navigation2d {
@@ -14,7 +14,8 @@ namespace control_internal { class Nav2MppiCore; }
 // nav2_mppi_controller optimizer and critic architecture.
 class MppiController final : public LocalController {
  public:
-  explicit MppiController(NavigationConfig config);
+  explicit MppiController(const NavigationConfig& config);
+  explicit MppiController(MppiParameters config);
   ~MppiController() override;
   Twist2d Compute(const Path& path, const Pose2d& pose, Twist2d current,
                   const LayeredCostmap& costmap,
@@ -24,7 +25,7 @@ class MppiController final : public LocalController {
   ControllerDiagnostics Diagnostics() const override { return diagnostics_; }
 
  private:
-  NavigationConfig config_;
+  MppiParameters config_;
   mutable std::unique_ptr<control_internal::Nav2MppiCore> core_;
   mutable ControllerDiagnostics diagnostics_;
   // Progress is monotone along one global path. This prevents a closest-point

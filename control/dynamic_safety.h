@@ -2,7 +2,7 @@
 
 #include <vector>
 
-#include "navigation2d/configuration/navigation_config.h"
+#include "navigation2d/control/dynamic_safety_parameters.h"
 #include "navigation2d/control/local_controller.h"
 
 namespace navigation2d {
@@ -19,5 +19,17 @@ bool DynamicCollisionAt(const Pose2d& pose, double time,
 double MinimumDynamicTtc(const Pose2d& pose, Twist2d command,
                          const std::vector<PredictedObstacle>& obstacles,
                          const NavigationConfig& config);
+
+// Typed inputs for algorithms that do not own the shared configuration.
+bool DynamicCollisionImminent(const Pose2d& pose, Twist2d command,
+                              const std::vector<PredictedObstacle>& obstacles,
+                              const DynamicSafetyParameters& config);
+
+bool DynamicCollisionAt(const Pose2d& pose, double time,
+                        const std::vector<PredictedObstacle>& obstacles,
+                        const DynamicSafetyParameters& config);
+double MinimumDynamicTtc(const Pose2d& pose, Twist2d command,
+                         const std::vector<PredictedObstacle>& obstacles,
+                         const DynamicSafetyParameters& config);
 
 }  // namespace navigation2d

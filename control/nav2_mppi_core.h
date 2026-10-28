@@ -5,7 +5,7 @@
 
 #include <Eigen/Core>
 
-#include "navigation2d/configuration/navigation_config.h"
+#include "navigation2d/control/mppi_parameters.h"
 #include "navigation2d/control/local_controller.h"
 
 namespace navigation2d::control_internal {
@@ -22,6 +22,7 @@ struct MppiRollouts {
 class Nav2MppiCore {
  public:
   explicit Nav2MppiCore(const NavigationConfig& config);
+  explicit Nav2MppiCore(MppiRolloutParameters config);
   // A warm start belongs to exactly one geometric reference path. Retaining
   // it across a replan injects steering commands for an unrelated route.
   void Reset();
@@ -31,7 +32,7 @@ class Nav2MppiCore {
   Twist2d Command(Twist2d current);
 
  private:
-  NavigationConfig config_;
+  MppiRolloutParameters config_;
   Eigen::ArrayXd sequence_velocity_, sequence_angular_;
   std::array<Twist2d, 4> history_{};
   std::mt19937 random_;
