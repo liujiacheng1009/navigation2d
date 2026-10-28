@@ -106,4 +106,13 @@ target_compile_features(navigation2d_exploration_io PUBLIC cxx_std_20)
 target_link_libraries(navigation2d_exploration_io PUBLIC navigation2d_exploration_application)
 target_compile_options(navigation2d_exploration_io PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
+# Superbuilds assemble ROS at their own directory to retain existing artifact
+# locations. Standalone core builds retain their ROS-free default.
+option(NAVIGATION2D_BUILD_ROS "Build standalone ROS 2 explorer and integration probes" OFF)
+if(NAVIGATION2D_BUILD_ROS AND "${CMAKE_CURRENT_SOURCE_DIR}" STREQUAL "${CMAKE_SOURCE_DIR}")
+  include(cmake/explorer_ros.cmake)
+  navigation2d_add_explorer_ros("${PROJECT_SOURCE_DIR}")
+  navigation2d_add_explorer_ros_tests("${PROJECT_SOURCE_DIR}")
+endif()
+
 add_subdirectory(test)
