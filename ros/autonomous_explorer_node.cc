@@ -372,17 +372,9 @@ class AutonomousExplorer final : public rclcpp::Node,
     PublishStatus("SELECTING", reason);
   }
 
-  bool SameEntryMouth(const Goal& a, const Goal& b) const {
-    return navigation2d::exploration::EntryCoordinator::SameMouth(a, b);
-  }
-
-  bool EasyLockedMouth() const { return entry_.EasyNow(explorer_); }
-
   bool PassableMouthGoal(const Goal& goal) const override {
     return navigation2d::exploration::EntryCoordinator::Passable(goal, explorer_);
   }
-
-  int EntryAttemptBudget() const { return entry_.AttemptBudget(explorer_); }
 
   void DeferEntrySelection(navigation2d::exploration::EntrySelectionDelay delay) override {
     selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.4)).nanoseconds());
@@ -390,33 +382,6 @@ class AutonomousExplorer final : public rclcpp::Node,
         delay == navigation2d::exploration::EntrySelectionDelay::kWideMouthCrawl
             ? "wide mouth blocked; crawling mid-gap instead of abandon"
             : "entry plan rejected; budget remains");
-  }
-
-  // Promote only true corridor mouths into locked entry.
-  bool PromotePassableMouthEntry(const char* reason) {
-    if (return_.returning() || retreat_.active() || mission_.phase() == MissionPhase::kReturning)
-      return false;
-    if (!std::isfinite(ActiveGoal().x) || !PassableMouthGoal(ActiveGoal())) {
-      return false;
-    }
-    if (entry_.locked() && !SameEntryMouth(*entry_.locked(), ActiveGoal())) {
-      return false;
-    }
-    RCLCPP_WARN(get_logger(), "Passable-mouth promote: %s gap=%.2f", reason,
-                explorer_.MouthGapWidth(ActiveGoal().frontier_x, ActiveGoal().frontier_y));
-    LockEntryMouth(ActiveGoal());
-    evidence_budget_.RequestTrailReplay(8.0);
-    route_failures_.ClearSignatures();
-    if (StartEntryProbe()) {
-      PublishStatus("COMPLETING", reason);
-      return true;
-    }
-    if (EasyLockedMouth() && entry_.crawl_ticks() == 0) {
-      entry_.StartCrawl();
-      PublishStatus("COMPLETING", "passable mouth; mid-gap crawl");
-      return true;
-    }
-    return false;
   }
 
   bool EntryMouthCooling(const Goal& mouth) override { return RecentlyDemoted(mouth); }
@@ -497,9 +462,6 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   using BodyRanges = navigation2d::exploration::BodyRanges;
-  double SectorMinRange(double center_angle, double half_width) const {
-    return navigation2d::exploration::SectorMinRange(ScanEvidence(), center_angle, half_width);
-  }
   BodyRanges ReadBodyRanges() const {
     return navigation2d::exploration::ReadBodyRanges(ScanEvidence());
   }
@@ -838,13 +800,6 @@ class AutonomousExplorer final : public rclcpp::Node,
     PublishStatus("NAVIGATING", "continuous handoff to next frontier viewpoint");
   }
 
-  bool MaybePreemptForNearerMouth(double /*path_remaining_m*/) {
-    // Mid-drive preempt yanked Navigation2D onto another mouth and caused
-    // goal flicker / crossed paths — wasted meters. Region-ordered tours
-    // already finish the active room; keep the committed transit.
-    return false;
-  }
-
   Goal MakeHomeGoal() const {
     return return_.Home(Map() ? &ObservationGrid() : nullptr,
         {mission_.home()->x, mission_.home()->y, mission_.home()->yaw});
@@ -979,87 +934,6 @@ class AutonomousExplorer final : public rclcpp::Node,
     // Dwell before hopping mouths — immediate BuildTour caused junction thrash.
     selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(1.5)).nanoseconds());
     PublishStatus("SELECTING", reason);
-  }
-
-  bool AbandonWallTipAfterPathCut(const char* reason) {
-    // Log showed: tip (-4.79,-2.22) path-cut → CoolRegion(robot, 1.5 m) froze
-    // every local mouth → BuildTour hopped to (-0.33,4.13) across the map.
-    // Cool only the tip itself; keep nearby unfinished siblings on the tour.
-    RCLCPP_WARN(get_logger(), "%s", reason);
-    const Goal tip = ActiveGoal();
-    explorer_.RecordAttempt(tip, false);
-    DemoteViewpointForSeconds(tip, 10.0);
-    explorer_.CoolRegion(tip.x, tip.y, 0.80, 1800u);
-    explorer_.CoolRegion(tip.frontier_x, tip.frontier_y, 0.80, 1800u);
-    ClearEntryMouthLock();
-    navigation_.Cancel();
-    recovery_.Clear();
-    tour_.AfterWallTip(explorer_, tip, TourRobot(), *this);
-    route_failures_.ClearSignatures();
-    dispatch_.ResetLatestMapReplans();
-    mapped_obstacle_rejects_ = 0;
-    retreat_.AllowRetry();
-    selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(1.0)).nanoseconds());
-    PublishStatus("SELECTING", reason);
-    if (EscapeOrShortRetreat("leaving wall tip after path-cut thrash; peel",
-                             "leaving wall tip after path-cut thrash; short retreat"))
-      return true;
-    return true;
-  }
-
-  bool HandlePathCutsWhileExploring(const navigation2d::NavigationState& state) {
-    NoteMappedObstacleReject(ActiveGoal());
-    navigation_.Cancel();
-    // Locked mouth owns the junction. Live lidar often thickens jamb speckles
-    // after the plan was accepted; cooling the throat signature then burning
-    // deeper probes produced start→cut→start in <200 ms and room_entered=0.
-    // Replan the SAME probe on the latest opened grid first; only deepen when
-    // that fails. Do not cool entry chords — the doorway path is the mission.
-    if (entry_.locked() || entry_.pending()) {
-      if (!entry_.pending()) entry_.SetPending(entry_.locked());
-      dispatch_.ResetLatestMapReplans();
-      if (!dispatch_.HasRouteCutReplans() &&
-          ReplanActiveGoalOnLatestMap("path cut at locked mouth; replan entry")) {
-        PublishStatus("COMPLETING",
-                      "path cut; replanning locked mouth on latest map");
-        return true;
-      }
-      if (entry_.attempts() < EntryAttemptBudget()) {
-        const int before_attempts = entry_.attempts();
-        if (StartEntryProbe()) {
-          PublishStatus("COMPLETING",
-                        "path cut; retrying locked mouth at deeper probe");
-          return true;
-        }
-        // One rejected plan is not the whole mouth budget. Abandoning here
-        // left the room after attempt 2 of 6.
-        if (entry_.attempts() > before_attempts &&
-            entry_.attempts() < EntryAttemptBudget()) {
-          selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(0.4)).nanoseconds());
-          PublishStatus("COMPLETING",
-                        "path cut; entry budget remains");
-          return true;
-        }
-      }
-      AbandonLockedEntryMouth("locked mouth path cut exhausted; leaving mouth");
-      return true;
-    }
-    if (state.path_signature != 0) route_failures_.Cool(state.path_signature);
-    const double clearance =
-        ActivePathMargin(state.global_planning.path_min_clearance_m);
-    // Wall-tip chords: replan-once just rebuilds another illegal tip graze and
-    // the robot pause→drop→replan→pause in place (red-box tip thrash).
-    if (navigation2d::PreferTipAbandonAfterPathCut(mapped_obstacle_rejects_,
-                                                   clearance)) {
-      return AbandonWallTipAfterPathCut(
-          "path cut at low-clearance wall tip; leaving tip pocket");
-    }
-    if (!dispatch_.HasRouteCutReplans() &&
-        ReplanActiveGoalOnLatestMap("path cut mapped obstacle; replan once"))
-      return true;
-    DemoteActiveGoal("path intersected mapped obstacles");
-    if (BreakMappedObstacleThrash()) return true;
-    return true;
   }
 
   void NotePoseMotion() override {
@@ -1508,11 +1382,8 @@ class AutonomousExplorer final : public rclcpp::Node,
         return;
       }
     }
-    if (mission_.phase() == MissionPhase::kExploring && !return_.returning()) {
-      const double path_remaining =
-          std::max(0., state.global_path_length_m - state.path_progress_m);
-      if (MaybePreemptForNearerMouth(path_remaining)) return;
-    }
+    // Keep the committed region-ordered transit; selecting another mouth here
+    // previously caused goal flicker and crossed paths.
     telemetry_.NoteCommandBackend(state.controller_diagnostics.backend);
     const bool safety_held =
         state.safety_stopped_motion ||
