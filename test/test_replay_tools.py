@@ -58,6 +58,18 @@ class ReplayContract(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn('differ from calibration', result.stderr)
 
+    def test_explicit_factory_and_legacy_entry_forms(self):
+        source = (ROOT / 'ros/autonomous_explorer_node.cc').read_text()
+        self.assertNotIn('int main(int argc, char** argv)', source)
+        self.assertIn('MakeAutonomousExplorer(', builder.adapt(source, 'factory'))
+        legacy = source + '\nint main(int argc, char** argv) { return 0; }\n'
+        self.assertIn('int OriginalMain(', builder.adapt(legacy, 'legacy'))
+        with self.assertRaisesRegex(ValueError, 'unsupported node main/factory'):
+            builder.adapt(legacy + '\nint main(int argc, char** argv) { return 0; }', 'bad')
+        unrelated = source.replace('#include "navigation2d/ros/exploration/explorer_node.h"', '')
+        with self.assertRaisesRegex(ValueError, 'unsupported node main/factory'):
+            builder.adapt(unrelated, 'bad')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -2,9 +2,12 @@
 
 
 def without_endpoints(source):
-    constructor = 'Node("sweepnav_autonomous_explorer")'
-    if source.count(constructor) != 1:
+    forms = ['Node("sweepnav_autonomous_explorer")',
+             'Node("sweepnav_autonomous_explorer", options)']
+    matches = [form for form in forms if source.count(form)]
+    if len(matches) != 1 or source.count(matches[0]) != 1:
         raise ValueError('unsupported node constructor for logic replay')
+    constructor = matches[0]
     markers = ['    command_publisher_ =', '    motion_output_ =']
     found = [source.index(marker) for marker in markers if marker in source]
     if len(found) != 1:
@@ -17,6 +20,7 @@ def without_endpoints(source):
     if 'create_subscription' not in setup and 'MakeExplorerSubscriptions(' not in setup:
         raise ValueError('unsupported subscription setup for logic replay')
     source = source[:begin] + source[end:]
-    options = ('rclcpp::NodeOptions().enable_rosout(false).start_parameter_services(false)'
+    initial = 'options' if constructor == forms[1] else ''
+    options = (f'rclcpp::NodeOptions({initial}).enable_rosout(false).start_parameter_services(false)'
                '.start_parameter_event_publisher(false)')
     return source.replace(constructor, f'Node("sweepnav_autonomous_explorer", {options})')

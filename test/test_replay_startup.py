@@ -18,13 +18,21 @@ class ReplayStartup(unittest.TestCase):
         self.assertIn('ReadExplorerParameters(', result)
         self.assertIn('PublishStatus("WAITING", "waiting for "', result)
         self.assertIn('start_parameter_event_publisher(false)', result)
+        self.assertIn('rclcpp::NodeOptions(options)', result)
         self.assertIn('void Tick()', result)
         self.assertNotIn('MakeRosMotionOutput(*this)', result)
         self.assertNotIn('MakeExplorerSubscriptions(', result)
         with self.assertRaisesRegex(ValueError, 'constructor'):
-            module.without_endpoints(source.replace('Node("sweepnav_autonomous_explorer")', 'Node("other")'))
+            module.without_endpoints(source.replace('Node("sweepnav_autonomous_explorer", options)', 'Node("other")'))
         with self.assertRaisesRegex(ValueError, 'communication setup'):
             module.without_endpoints(source.replace('create_wall_timer', 'other_timer'))
+
+    def test_legacy_constructor_is_still_supported(self):
+        source = (ROOT / 'ros/autonomous_explorer_node.cc').read_text().replace(
+            'Node("sweepnav_autonomous_explorer", options)', 'Node("sweepnav_autonomous_explorer")')
+        result = module.without_endpoints(source)
+        self.assertIn('rclcpp::NodeOptions().enable_rosout(false)', result)
+        self.assertNotIn('create_wall_timer(', result)
 
 
 if __name__ == '__main__':

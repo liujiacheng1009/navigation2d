@@ -35,6 +35,36 @@ class ReplayLink(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'inputs changed'):
                 module.link_replay(command, root)
 
+    def test_binds_only_one_registered_old_or_new_entry(self):
+        for name in ['autonomous_explorer_node.cc.o', 'autonomous_explorer_main.cc.o']:
+            command = ['c++', '/objects/' + name, 'helper.cc.o', 'library.a']
+            self.assertEqual(module.replace_node_entry_object(command, Path('/tmp/probe.o')),
+                             ['c++', '/tmp/probe.o', 'helper.cc.o', 'library.a'])
+            self.assertEqual(command[1], '/objects/' + name)
+        for objects in [[], ['helper.cc.o'], ['autonomous_explorer_node.cc.o',
+                                             'autonomous_explorer_main.cc.o']]:
+            with self.assertRaisesRegex(ValueError, 'one registered'):
+                module.replace_node_entry_object(['c++', *objects], 'probe.o')
+
+    def test_node_compile_flags_follow_producer_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old = root / 'CMakeFiles/sweepnav_autonomous_explorer.dir'
+            new = root / 'CMakeFiles/navigation2d_explorer_ros.dir'
+            for target in [old, new]:
+                target.mkdir(parents=True)
+                (target / 'flags.make').write_text('CXX_FLAGS = -std=c++20')
+            legacy = 'int main(int argc, char** argv) {}'
+            factory = ('#include "navigation2d/ros/exploration/explorer_node.h"\n'
+                       'void MakeAutonomousExplorer() {}')
+            self.assertEqual(module.node_compile_directory(root, legacy), old)
+            self.assertEqual(module.node_compile_directory(root, factory), new)
+            (new / 'flags.make').unlink()
+            with self.assertRaises(FileNotFoundError):
+                module.node_compile_directory(root, factory)
+            with self.assertRaisesRegex(ValueError, 'unsupported node main/factory'):
+                module.node_compile_directory(root, 'void unrelated() {}')
+
 
 if __name__ == '__main__':
     unittest.main()

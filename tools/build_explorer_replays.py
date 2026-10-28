@@ -20,8 +20,8 @@ def digest(path):
 
 
 def adapt(source, label):
-    if source.count('int main(int argc, char** argv)') != 1:
-        raise ValueError('unsupported node main; update the explicit replay adapter')
+    from replay_link import node_entry_form
+    node_entry_form(source)
     source = '#include "navigation2d/test/replay/ros_capture.h"\n' + source
     source = source.replace(' private:', ' public:')
     source = source.replace('int main(int argc, char** argv)',
@@ -136,8 +136,11 @@ def main():
         parser.error('baseline and candidate core must be independently frozen builds')
     output.mkdir(parents=True, exist_ok=True)
     target = build / 'CMakeFiles/sweepnav_autonomous_explorer.dir'
+    current_source = (root / 'ros/autonomous_explorer_node.cc').read_text()
+    from replay_link import node_compile_directory
+    compile_target = node_compile_directory(build, current_source)
     flags = []
-    for line in (target / 'flags.make').read_text().splitlines():
+    for line in (compile_target / 'flags.make').read_text().splitlines():
         if line.startswith(('CXX_DEFINES =', 'CXX_INCLUDES =', 'CXX_FLAGS =')):
             flags.extend(shlex.split(line.split('=', 1)[1]))
     link_template = shlex.split((target / 'link.txt').read_text())
@@ -166,7 +169,7 @@ def main():
     if headers:
         manifest['baseline_headers'] = {'root': str(headers[0]), 'sha256': headers[1]}
     for label, source in [('baseline', baseline),
-                          ('candidate', (root / 'ros/autonomous_explorer_node.cc').read_text())]:
+                          ('candidate', current_source)]:
         if label == 'baseline' and args.baseline_bundle:
             artifact, provenance = reuse_baseline(args.baseline_bundle, output, manifest)
             manifest['artifacts'][label] = artifact
@@ -178,10 +181,8 @@ def main():
         compilation = compile_cached(link_template[0], selected_flags, cpp, obj, args.no_object_cache)
         link = link_template.copy()
         link[link.index('-o') + 1] = str(executable)
-        objects = [i for i, value in enumerate(link) if value.endswith('autonomous_explorer_node.cc.o')]
-        if len(objects) != 1:
-            raise ValueError('unexpected explorer target object list')
-        link[objects[0]] = str(obj)
+        from replay_link import replace_node_entry_object
+        link = replace_node_entry_object(link, obj)
         if label == 'baseline':
             link = baseline_link(link, obj, baseline_core)
         from replay_motion_output import without_unused_motion_object

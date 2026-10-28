@@ -66,6 +66,7 @@
 #include "navigation2d/ros/exploration/debug_reporter.h"
 #include "navigation2d/ros/exploration/entry_reporter.h"
 #include "navigation2d/ros/exploration/explorer_parameters.h"
+#include "navigation2d/ros/exploration/explorer_node.h"
 #include "navigation2d/ros/exploration/explorer_subscriptions.h"
 #include "navigation2d/ros/exploration/map_observation.h"
 #include "navigation2d/ros/exploration/motion_output.h"
@@ -102,12 +103,15 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::CompletionActions,
                                  private navigation2d::exploration_ros::EntryStatusSink {
  public:
-  AutonomousExplorer()
-      : Node("sweepnav_autonomous_explorer"),
+  explicit AutonomousExplorer(
+      std::shared_ptr<const navigation2d::AlgorithmRegistry> algorithms =
+          navigation2d::AlgorithmRegistry::Builtins(),
+      const rclcpp::NodeOptions& options = rclcpp::NodeOptions{})
+      : Node("sweepnav_autonomous_explorer", options),
         explorer_(navigation2d::exploration_ros::ReadExplorerConfig(*this)),
         selection_(explorer_, entry_, tour_, completion_, viewpoint_rejections_),
-        parameters_(navigation2d::exploration_ros::ReadExplorerParameters(
-            *this, *navigation2d::AlgorithmRegistry::Builtins())),
+        navigation_(algorithms),
+        parameters_(navigation2d::exploration_ros::ReadExplorerParameters(*this, *algorithms)),
         dispatch_(explorer_, parameters_.navigation_profiles) {
     motion_output_ = navigation2d::exploration_ros::MakeRosMotionOutput(*this);
     status_publisher_ = create_publisher<std_msgs::msg::String>(
@@ -1812,15 +1816,9 @@ class AutonomousExplorer final : public rclcpp::Node,
 
 }  // namespace
 
-int main(int argc, char** argv) {
-  rclcpp::init(argc, argv);
-  try {
-    rclcpp::spin(std::make_shared<AutonomousExplorer>());
-  } catch (const std::exception& error) {
-    std::fprintf(stderr, "autonomous explorer failed: %s\n", error.what());
-    rclcpp::shutdown();
-    return 1;
-  }
-  rclcpp::shutdown();
-  return 0;
+namespace navigation2d::exploration_ros {
+std::shared_ptr<rclcpp::Node> MakeAutonomousExplorer(
+    std::shared_ptr<const AlgorithmRegistry> algorithms, const rclcpp::NodeOptions& options) {
+  return std::make_shared<AutonomousExplorer>(std::move(algorithms), options);
 }
+}  // namespace navigation2d::exploration_ros

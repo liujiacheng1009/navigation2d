@@ -56,8 +56,11 @@ def main():
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     target = build / 'CMakeFiles/sweepnav_autonomous_explorer.dir'
+    current_source = (root / 'ros/autonomous_explorer_node.cc').read_text()
+    from replay_link import node_compile_directory
+    compile_target = node_compile_directory(build, current_source)
     flags = []
-    for line in (target / 'flags.make').read_text().splitlines():
+    for line in (compile_target / 'flags.make').read_text().splitlines():
         if line.startswith(('CXX_DEFINES =', 'CXX_INCLUDES =', 'CXX_FLAGS =')):
             flags.extend(shlex.split(line.split('=', 1)[1]))
     template = shlex.split((target / 'link.txt').read_text())
@@ -77,10 +80,8 @@ def main():
         selected = ['-I' + str(headers[0]), *flags] if label == 'baseline' else flags
         compilation = compile_cached(template[0], selected, cpp, obj)
         link = template.copy()
-        objects = [i for i, value in enumerate(link) if value.endswith('autonomous_explorer_node.cc.o')]
-        if len(objects) != 1:
-            raise ValueError('unexpected explorer target objects')
-        link[objects[0]] = str(obj)
+        from replay_link import replace_node_entry_object
+        link = replace_node_entry_object(link, obj)
         link[link.index('-o') + 1] = str(binary)
         if label == 'baseline':
             link = baseline_link(link, obj, core)
