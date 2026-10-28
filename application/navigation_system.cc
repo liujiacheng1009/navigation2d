@@ -54,7 +54,7 @@ class NavigationSystem::Impl {
        std::shared_ptr<const AlgorithmRegistry> registry, NavigationExecutionOptions options)
       : config(std::move(value)),
         execution_options(std::move(options)),
-        costmap(Grid2d::Load(map_path), config),
+        costmap(LayeredCostmap::WithParameters(Grid2d::Load(map_path), CostmapParametersFrom(config))),
         algorithms(config, std::move(registry)),
         safety(config),
         docking({config.goal_xy_tolerance, config.goal_yaw_tolerance,

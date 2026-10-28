@@ -7,7 +7,7 @@ function(navigation2d_library name)
 endfunction()
 
 navigation2d_library(navigation2d_costmap costmap/grid_2d.cc costmap/layered_costmap.cc
-  costmap/obstacle_layer.cc costmap/grid_change_history.cc)
+  costmap/obstacle_layer.cc costmap/grid_change_history.cc costmap/costmap_parameters.cc)
 target_link_libraries(navigation2d_costmap PUBLIC navigation2d_geometry)
 
 navigation2d_library(navigation2d_planning

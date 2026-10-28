@@ -14,6 +14,8 @@ function(navigation2d_assert_test name library)
 endfunction()
 
 navigation2d_assert_test(layered_costmap_test navigation2d_core)
+navigation2d_assert_test(costmap_parameter_snapshot_test navigation2d_core)
+navigation2d_assert_test(costmap_parameters_test navigation2d_core)
 navigation2d_assert_test(mppi_controller_test navigation2d_core)
 navigation2d_assert_test(mppi_configuration_test navigation2d_core)
 navigation2d_assert_test(dwa_configuration_test navigation2d_core)

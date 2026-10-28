@@ -8,8 +8,15 @@
 namespace navigation2d {
 
 LayeredCostmap::LayeredCostmap(Grid2d map, NavigationConfig config)
+    : LayeredCostmap(std::move(map), CostmapParametersFrom(config), ParametersTag{}) {}
+
+LayeredCostmap LayeredCostmap::WithParameters(Grid2d map, CostmapParameters parameters) {
+  return LayeredCostmap(std::move(map), parameters, ParametersTag{});
+}
+
+LayeredCostmap::LayeredCostmap(Grid2d&& map, CostmapParameters parameters, ParametersTag)
     : static_map_(std::move(map)),
-      config_(config),
+      config_(parameters),
       obstacles_(static_map_.width() * static_map_.height()),
       master_(static_map_.width() * static_map_.height(), kFree) {
   Reinflate();

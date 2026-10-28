@@ -5,6 +5,7 @@
 
 #include "navigation2d/configuration/navigation_config.h"
 #include "navigation2d/costmap/cost_values.h"
+#include "navigation2d/costmap/costmap_parameters.h"
 #include "navigation2d/costmap/grid_2d.h"
 #include "navigation2d/costmap/grid_change_history.h"
 #include "navigation2d/costmap/obstacle_layer.h"
@@ -15,7 +16,9 @@ namespace navigation2d {
 
 class LayeredCostmap {
  public:
+  // Legacy entry point remains source compatible; configuration is snapshotted.
   LayeredCostmap(Grid2d static_map, NavigationConfig config);
+  static LayeredCostmap WithParameters(Grid2d static_map, CostmapParameters parameters);
   void UpdateObstacleLayer(const Pose2d& sensor_pose, const LaserScan& scan);
   void UpdateObstacleLayer(const Pose2d& sensor_pose, const PointCloud2d& cloud);
   void MarkObstacle(double x, double y);
@@ -31,9 +34,11 @@ class LayeredCostmap {
   std::vector<int> ChangedCellsSince(std::uint64_t revision) const;
 
  private:
+  struct ParametersTag {};
+  LayeredCostmap(Grid2d&& static_map, CostmapParameters parameters, ParametersTag);
   void Reinflate();
   Grid2d static_map_;
-  NavigationConfig config_;
+  CostmapParameters config_;
   costmap_internal::ObstacleLayer obstacles_;
   std::vector<std::uint8_t> master_;
   costmap_internal::GridChangeHistory changes_;
