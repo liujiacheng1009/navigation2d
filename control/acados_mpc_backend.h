@@ -4,7 +4,7 @@
 #include <optional>
 #include <vector>
 
-#include "navigation2d/configuration/navigation_config.h"
+#include "navigation2d/control/acados_parameters.h"
 #include "navigation2d/control/local_controller.h"
 
 namespace navigation2d {
@@ -12,6 +12,7 @@ namespace navigation2d {
 class AcadosMpcBackend {
  public:
   explicit AcadosMpcBackend(const NavigationConfig& config);
+  explicit AcadosMpcBackend(AcadosParameters config);
   ~AcadosMpcBackend();
   AcadosMpcBackend(const AcadosMpcBackend&) = delete;
   AcadosMpcBackend& operator=(const AcadosMpcBackend&) = delete;

@@ -3,7 +3,7 @@
 #include <memory>
 #include <vector>
 
-#include "navigation2d/configuration/navigation_config.h"
+#include "navigation2d/control/mpc_parameters.h"
 #include "navigation2d/control/local_controller.h"
 
 namespace navigation2d {
@@ -16,7 +16,7 @@ class RegulatedPurePursuit;
 // regulated pursuit or a stop. It owns no ROS dependency.
 class MpcController final : public LocalController {
  public:
-  explicit MpcController(NavigationConfig config);
+  explicit MpcController(const NavigationConfig& config);
   ~MpcController() override;
   Twist2d Compute(const Path& path, const Pose2d& pose, Twist2d current,
                   const LayeredCostmap& costmap,
@@ -27,7 +27,7 @@ class MpcController final : public LocalController {
   void SetGuidanceCandidates(std::vector<GuidanceCandidate> candidates) override;
 
  private:
-  NavigationConfig config_;
+  MpcParameters config_;
   mutable std::unique_ptr<AcadosMpcBackend> acados_;
   mutable std::vector<std::unique_ptr<AcadosMpcBackend>> additional_acados_;
   mutable std::unique_ptr<MppiController> mppi_;

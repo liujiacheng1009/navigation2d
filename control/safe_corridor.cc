@@ -6,10 +6,16 @@
 
 #include <decomp_util/ellipsoid_decomp.h>
 
+namespace navigation2d {
+CorridorParameters CorridorParametersFrom(const NavigationConfig& config) {
+  return {config.robot_radius, config.footprint, config.local_window_width, config.local_window_height};
+}
+}  // namespace navigation2d
+
 namespace navigation2d::control_internal {
 namespace {
 
-double FootprintSupport(const NavigationConfig& config, const Eigen::Vector2d& normal,
+double FootprintSupport(const CorridorParameters& config, const Eigen::Vector2d& normal,
                         double yaw) {
   if (config.footprint.empty()) return config.robot_radius * normal.norm();
   const double cosine = std::cos(yaw), sine = std::sin(yaw);
@@ -25,7 +31,7 @@ double FootprintSupport(const NavigationConfig& config, const Eigen::Vector2d& n
 }  // namespace
 
 ConvexCorridor BuildSafeCorridor(const Path& path, const LayeredCostmap& costmap,
-                                 const NavigationConfig& config) {
+                                 const CorridorParameters& config) {
   if (path.size() < 2) return {};
   vec_Vec2f reference;
   reference.reserve(path.size());
@@ -78,6 +84,11 @@ ConvexCorridor BuildSafeCorridor(const Path& path, const LayeredCostmap& costmap
     corridor.push_back(std::move(halfspaces));
   }
   return corridor;
+}
+
+ConvexCorridor BuildSafeCorridor(const Path& path, const LayeredCostmap& costmap,
+                                 const NavigationConfig& config) {
+  return BuildSafeCorridor(path, costmap, CorridorParametersFrom(config));
 }
 
 }  // namespace navigation2d::control_internal

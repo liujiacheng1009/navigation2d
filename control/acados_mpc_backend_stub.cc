@@ -4,7 +4,9 @@ namespace navigation2d {
 
 struct AcadosMpcBackend::Impl {};
 
-AcadosMpcBackend::AcadosMpcBackend(const NavigationConfig&)
+AcadosMpcBackend::AcadosMpcBackend(const NavigationConfig& config)
+    : AcadosMpcBackend(AcadosParametersFrom(config)) {}
+AcadosMpcBackend::AcadosMpcBackend(AcadosParameters)
     : impl_(std::make_unique<Impl>()) {}
 AcadosMpcBackend::~AcadosMpcBackend() = default;
 

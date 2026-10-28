@@ -54,13 +54,13 @@ bool MakesProgress(const Path& path, const Pose2d& pose, const Twist2d& command)
 
 }  // namespace
 
-MpcController::MpcController(NavigationConfig config)
-    : config_(std::move(config)),
-      acados_(std::make_unique<AcadosMpcBackend>(config_)),
-      mppi_(std::make_unique<MppiController>(config_)),
-      rpp_(std::make_unique<RegulatedPurePursuit>(config_)) {
+MpcController::MpcController(const NavigationConfig& config)
+    : config_(MpcParametersFrom(config)),
+      acados_(std::make_unique<AcadosMpcBackend>(config)),
+      mppi_(std::make_unique<MppiController>(config)),
+      rpp_(std::make_unique<RegulatedPurePursuit>(config)) {
   for (int index = 1; index < config_.guidance_max_candidates; ++index)
-    additional_acados_.push_back(std::make_unique<AcadosMpcBackend>(config_));
+    additional_acados_.push_back(std::make_unique<AcadosMpcBackend>(config));
 }
 MpcController::~MpcController() = default;
 
@@ -129,7 +129,7 @@ Twist2d MpcController::Compute(const Path& path, const Pose2d& pose, Twist2d cur
       if (result.command && !result.diagnostics.deadline_miss &&
           MakesProgress(path, pose, *result.command) &&
           !CollisionImminent(pose, *result.command, costmap) &&
-          !DynamicCollisionImminent(pose, *result.command, dynamic_obstacles, config_)) {
+          !DynamicCollisionImminent(pose, *result.command, dynamic_obstacles, config_.safety)) {
         diagnostics_ = result.diagnostics;
         return finish(ControllerBackend::kAcados, ControllerSolveStatus::kSuccess,
                       0, *result.command);
@@ -141,12 +141,12 @@ Twist2d MpcController::Compute(const Path& path, const Pose2d& pose, Twist2d cur
   const Twist2d sampled = mppi_->Compute(path, pose, current, costmap, dynamic_obstacles);
   if (!IsStop(sampled) && MakesProgress(path, pose, sampled) &&
       !CollisionImminent(pose, sampled, costmap) &&
-      !DynamicCollisionImminent(pose, sampled, dynamic_obstacles, config_))
+      !DynamicCollisionImminent(pose, sampled, dynamic_obstacles, config_.safety))
     return finish(ControllerBackend::kMppi, ControllerSolveStatus::kSuccess, 1, sampled);
 
   const Twist2d regulated = rpp_->Compute(path, pose, current, costmap, dynamic_obstacles);
   if (!IsStop(regulated) && !CollisionImminent(pose, regulated, costmap) &&
-      !DynamicCollisionImminent(pose, regulated, dynamic_obstacles, config_))
+      !DynamicCollisionImminent(pose, regulated, dynamic_obstacles, config_.safety))
     return finish(ControllerBackend::kRpp, ControllerSolveStatus::kSuccess, 2, regulated);
 
   // Last-resort local topology search.  A safety filter may reject the
@@ -174,7 +174,7 @@ Twist2d MpcController::Compute(const Path& path, const Pose2d& pose, Twist2d cur
   for (const auto& candidate : recovery) {
     if ((candidate.linear > 0. && std::abs(heading_error) > 1.2) ||
         CollisionImminent(pose, candidate, costmap) ||
-        DynamicCollisionImminent(pose, candidate, dynamic_obstacles, config_))
+        DynamicCollisionImminent(pose, candidate, dynamic_obstacles, config_.safety))
       continue;
     if (candidate.linear > 0. && !MakesProgress(path, pose, candidate)) continue;
     diagnostics_.backend = ControllerBackend::kDwa;
@@ -192,10 +192,10 @@ bool MpcController::CollisionImminent(const Pose2d& pose, Twist2d command,
   // The global planner/path validator owns the rasterization margin.  Keep
   // the local controller's swept check on the declared physical footprint so
   // a legal narrow-gate turn is not rejected twice.
-  const double collision_radius = config_.robot_radius;
+  const double collision_radius = config_.safety.robot_radius;
   Pose2d projected = pose;
-  for (double time = 0.; time < config_.collision_horizon; time += config_.control_period) {
-    projected = Integrate(projected, command, config_.control_period);
+  for (double time = 0.; time < config_.safety.collision_horizon; time += config_.safety.control_period) {
+    projected = Integrate(projected, command, config_.safety.control_period);
     if (costmap.lethal(X(projected), Y(projected), collision_radius)) return true;
   }
   return false;

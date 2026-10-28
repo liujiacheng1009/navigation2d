@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <utility>
 
 #include "navigation2d/control/path_tracking.h"
 #include "navigation2d/control/safe_corridor.h"
@@ -34,7 +35,7 @@ std::size_t AdvancePath(const Path& path, std::size_t start, double distance) {
 }
 
 struct AcadosMpcBackend::Impl {
-  explicit Impl(const NavigationConfig& value) : config(value) {
+  explicit Impl(AcadosParameters value) : config(std::move(value)) {
     capsule = navigation2d_mpcc_acados_create_capsule();
     ready = capsule != nullptr && navigation2d_mpcc_acados_create(capsule) == 0;
   }
@@ -44,7 +45,7 @@ struct AcadosMpcBackend::Impl {
       navigation2d_mpcc_acados_free_capsule(capsule);
     }
   }
-  NavigationConfig config;
+  AcadosParameters config;
   bool ready = false;
   navigation2d_mpcc_solver_capsule* capsule = nullptr;
   bool has_warm_start = false;
@@ -59,7 +60,9 @@ struct AcadosMpcBackend::Impl {
 };
 
 AcadosMpcBackend::AcadosMpcBackend(const NavigationConfig& config)
-    : impl_(std::make_unique<Impl>(config)) {}
+    : AcadosMpcBackend(AcadosParametersFrom(config)) {}
+AcadosMpcBackend::AcadosMpcBackend(AcadosParameters config)
+    : impl_(std::make_unique<Impl>(std::move(config))) {}
 AcadosMpcBackend::~AcadosMpcBackend() = default;
 bool AcadosMpcBackend::available() const { return impl_->ready; }
 ControllerDiagnostics AcadosMpcBackend::Diagnostics() const { return impl_->diagnostics; }
@@ -109,7 +112,7 @@ std::optional<Twist2d> AcadosMpcBackend::Solve(
   }
   if (robot_remaining < .5) corridor_reference = {pose, path.back()};
   const auto corridor = control_internal::BuildSafeCorridor(
-      corridor_reference, costmap, impl_->config);
+      corridor_reference, costmap, impl_->config.corridor);
   if (impl_->has_warm_start) {
     for (int stage = 0; stage <= horizon; ++stage) {
       const int source = std::min(stage + 1, horizon);

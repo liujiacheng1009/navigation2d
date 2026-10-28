@@ -4,7 +4,7 @@
 
 #include <Eigen/Core>
 
-#include "navigation2d/configuration/navigation_config.h"
+#include "navigation2d/control/corridor_parameters.h"
 #include "navigation2d/costmap/layered_costmap.h"
 #include "navigation2d/geometry/path_2d.h"
 
@@ -21,5 +21,8 @@ using ConvexCorridor = std::vector<std::vector<Halfspace2d>>;
 // as n.dot(robot_center) <= bound after footprint support-function shrinking.
 ConvexCorridor BuildSafeCorridor(const Path& path, const LayeredCostmap& costmap,
                                  const NavigationConfig& config);
+
+ConvexCorridor BuildSafeCorridor(const Path& path, const LayeredCostmap& costmap,
+                                 const CorridorParameters& config);
 
 }  // namespace navigation2d::control_internal
