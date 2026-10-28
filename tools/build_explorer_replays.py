@@ -80,6 +80,8 @@ def adapt(source, label):
   bool ReplayHasNavigation() const {{ return {navigation}; }}
 '''
     source = source[:start] + capture + source[start:]
+    from replay_debug_output import adapt_debug_output
+    source, _ = adapt_debug_output(source)
     from replay_motion_output import adapt_motion_output
     source, planar_commands = adapt_motion_output(source)
     source, commands = re.subn(r'command_publisher_->publish\(([^;]+)\);',

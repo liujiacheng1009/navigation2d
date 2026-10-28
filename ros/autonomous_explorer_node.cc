@@ -12,60 +12,60 @@
 
 #include "geometry_msgs/msg/pose_array.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
-#include "navigation2d/ros/exploration/motion_output.h"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "nav_msgs/msg/path.hpp"
-#include "navigation2d/application/exploration/navigation_session.h"
+#include "navigation2d/application/algorithm_registry.h"
+#include "navigation2d/application/exploration/alcove_exit.h"
+#include "navigation2d/application/exploration/completion_execution.h"
+#include "navigation2d/application/exploration/continuous_tour_handoff.h"
 #include "navigation2d/application/exploration/debug_overlay.h"
-#include "navigation2d/ros/exploration/debug_paths.h"
-#include "navigation2d/ros/exploration/explorer_subscriptions.h"
-#include "navigation2d/application/exploration/pose_observation.h"
-#include "navigation2d/ros/exploration/explorer_parameters.h"
-#include "navigation2d/ros/exploration/map_observation.h"
-#include "navigation2d/ros/exploration/scan_observation.h"
-#include "navigation2d/ros/exploration/artifact_writer.h"
-#include "navigation2d/ros/exploration/planning_map_adapter.h"
-#include "navigation2d/application/exploration/return_coordinator.h"
-#include "navigation2d/application/exploration/recovery_policy.h"
-#include "navigation2d/application/exploration/escape_execution.h"
-#include "navigation2d/application/exploration/pose_motion_watch.h"
 #include "navigation2d/application/exploration/dispatch_policy.h"
-#include "navigation2d/application/exploration/mission_lifecycle.h"
-#include "navigation2d/application/exploration/recovery_session.h"
+#include "navigation2d/application/exploration/entry_completion.h"
 #include "navigation2d/application/exploration/entry_coordinator.h"
+#include "navigation2d/application/exploration/entry_crawl_executor.h"
 #include "navigation2d/application/exploration/entry_probe_executor.h"
 #include "navigation2d/application/exploration/entry_selection.h"
-#include "navigation2d/application/exploration/entry_crawl_executor.h"
+#include "navigation2d/application/exploration/escape_execution.h"
 #include "navigation2d/application/exploration/execution_command.h"
-#include "navigation2d/application/exploration/viewpoint_arrival.h"
-#include "navigation2d/application/exploration/retreat_execution.h"
-#include "navigation2d/application/exploration/goal_execution_watch.h"
-#include "navigation2d/application/exploration/open_forward_stop.h"
 #include "navigation2d/application/exploration/forward_blocked.h"
-#include "navigation2d/application/exploration/alcove_exit.h"
+#include "navigation2d/application/exploration/goal_execution_watch.h"
+#include "navigation2d/application/exploration/mission_lifecycle.h"
+#include "navigation2d/application/exploration/navigation_profile.h"
+#include "navigation2d/application/exploration/navigation_session.h"
+#include "navigation2d/application/exploration/navigation_telemetry.h"
+#include "navigation2d/application/exploration/open_forward_stop.h"
+#include "navigation2d/application/exploration/planning_evidence_budget.h"
+#include "navigation2d/application/exploration/planning_snapshot.h"
+#include "navigation2d/application/exploration/pose_motion_watch.h"
+#include "navigation2d/application/exploration/pose_observation.h"
+#include "navigation2d/application/exploration/recovery_policy.h"
+#include "navigation2d/application/exploration/recovery_session.h"
+#include "navigation2d/application/exploration/retreat_execution.h"
+#include "navigation2d/application/exploration/return_coordinator.h"
+#include "navigation2d/application/exploration/room_visit_execution.h"
+#include "navigation2d/application/exploration/room_visit_ledger.h"
 #include "navigation2d/application/exploration/route_failure_history.h"
+#include "navigation2d/application/exploration/route_validator.h"
 #include "navigation2d/application/exploration/selection_exhaustion.h"
+#include "navigation2d/application/exploration/status_serializer.h"
+#include "navigation2d/application/exploration/tour_execution.h"
+#include "navigation2d/application/exploration/viewpoint_arrival.h"
 #include "navigation2d/application/exploration/viewpoint_rejection_executor.h"
 #include "navigation2d/application/exploration/viewpoint_rejections.h"
-#include "navigation2d/application/exploration/entry_completion.h"
-#include "navigation2d/application/exploration/tour_execution.h"
-#include "navigation2d/application/exploration/continuous_tour_handoff.h"
-#include "navigation2d/application/exploration/room_visit_execution.h"
-#include "navigation2d/ros/exploration/entry_reporter.h"
-#include "navigation2d/application/exploration/status_serializer.h"
-#include "navigation2d/application/exploration/room_visit_ledger.h"
-#include "navigation2d/application/exploration/navigation_telemetry.h"
-#include "navigation2d/application/exploration/route_validator.h"
-#include "navigation2d/application/exploration/planning_snapshot.h"
-#include "navigation2d/application/exploration/planning_evidence_budget.h"
-#include "navigation2d/application/algorithm_registry.h"
-#include "navigation2d/application/exploration/navigation_profile.h"
-#include "navigation2d/exploration/frontier_explorer.h"
-#include "navigation2d/application/exploration/completion_execution.h"
-#include "navigation2d/ros/exploration/completion_reporter.h"
-#include "navigation2d/geometry/robot_geometry.h"
 #include "navigation2d/configuration/vehicle_config.h"
+#include "navigation2d/exploration/frontier_explorer.h"
+#include "navigation2d/geometry/robot_geometry.h"
+#include "navigation2d/ros/exploration/artifact_writer.h"
+#include "navigation2d/ros/exploration/completion_reporter.h"
+#include "navigation2d/ros/exploration/debug_reporter.h"
+#include "navigation2d/ros/exploration/entry_reporter.h"
+#include "navigation2d/ros/exploration/explorer_parameters.h"
+#include "navigation2d/ros/exploration/explorer_subscriptions.h"
+#include "navigation2d/ros/exploration/map_observation.h"
+#include "navigation2d/ros/exploration/motion_output.h"
+#include "navigation2d/ros/exploration/planning_map_adapter.h"
+#include "navigation2d/ros/exploration/scan_observation.h"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_msgs/msg/string.hpp"
@@ -109,22 +109,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     motion_output_ = navigation2d::exploration_ros::MakeRosMotionOutput(*this);
     status_publisher_ = create_publisher<std_msgs::msg::String>(
         "/exploration/status", rclcpp::QoS(1).transient_local().reliable());
-    path_publisher_ = create_publisher<nav_msgs::msg::Path>(
-        "/navigation/path", rclcpp::QoS(1).transient_local().reliable());
-    local_trajectory_publisher_ = create_publisher<nav_msgs::msg::Path>(
-        "/navigation/local_trajectory", rclcpp::QoS(1).transient_local().reliable());
-    tour_publisher_ = create_publisher<nav_msgs::msg::Path>(
-        "/navigation/tour", rclcpp::QoS(1).transient_local().reliable());
-    carrot_publisher_ = create_publisher<geometry_msgs::msg::PoseStamped>(
-        "/navigation/carrot", rclcpp::QoS(1).transient_local().reliable());
-    frontiers_publisher_ = create_publisher<geometry_msgs::msg::PoseArray>(
-        "/exploration/frontier_goals", rclcpp::QoS(1).transient_local().reliable());
-    frontier_debug_publisher_ = create_publisher<std_msgs::msg::String>(
-        "/exploration/frontier_debug", rclcpp::QoS(1).transient_local().reliable());
-    planning_input_publisher_ = create_publisher<nav_msgs::msg::OccupancyGrid>(
-        "/exploration/global_planning_input", rclcpp::QoS(1).transient_local().reliable());
-    inflated_costmap_publisher_ = create_publisher<nav_msgs::msg::OccupancyGrid>(
-        "/exploration/global_costmap_inflated", rclcpp::QoS(1).transient_local().reliable());
+    debug_output_ = navigation2d::exploration_ros::MakeRosDebugOutput(*this);
     subscriptions_ = navigation2d::exploration_ros::MakeExplorerSubscriptions(
         *this, parameters_.pose_source, observations_,
         [this](const nav_msgs::msg::OccupancyGrid& value) {
@@ -350,28 +335,8 @@ class AutonomousExplorer final : public rclcpp::Node,
   void PublishPlanningDebugMap(bool returning) {
     if (!Map() || !Pose()) return;
     (void)returning;
-    // Mirror LayeredCostmap::Reinflate for the UI: unknown is not a wall and
-    // must not be painted by inflation (max keeps 255 over inscribed). Only
-    // free cells receive inscribed/soft cost. The previous debug path dilated
-    // into unknown and sealed passable doors in the overlay.
-    navigation2d::ExplorationGrid planning_grid;
-    planning_grid.width = static_cast<int>(Map()->info.width);
-    planning_grid.height = static_cast<int>(Map()->info.height);
-    planning_grid.resolution = Map()->info.resolution;
-    planning_grid.origin_x = Map()->info.origin.position.x;
-    planning_grid.origin_y = Map()->info.origin.position.y;
-    planning_grid.cells.assign(Map()->data.begin(), Map()->data.end());
-
-    nav_msgs::msg::OccupancyGrid input = *Map();
-    input.header.stamp = now();
-    input.header.frame_id = "map";
-    navigation2d::exploration::PaintPlanningDebugInput(
-        planning_grid, LocalPose(*Pose()), input.data);
-    planning_input_publisher_->publish(input);
-
-    nav_msgs::msg::OccupancyGrid inflated = input;
-    navigation2d::exploration::PaintInflatedDebugMap(planning_grid, input.data, inflated.data);
-    inflated_costmap_publisher_->publish(inflated);
+    debug_reporter_.PlanningMap(*debug_output_, *Map(), LocalPose(*Pose()),
+                                [this] { return now(); });
   }
 
   std::optional<navigation2d::exploration::TourPose> TourRobot() const {
@@ -390,17 +355,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                 tour_.goals().size(), explorer_.RegionAudit().c_str());
   }
 
-  void PublishFrontierDebug() {
-    // Rebuild FR cells from the live map every publish. SelectGoals snapshots
-    // go stale while navigating (unknown→free), which left the overlay empty
-    // after prune-only. CG/SG markers still come from the last SelectGoals.
-    explorer_.RefreshDebugFrontierCells();
-    const auto& snap = explorer_.debug_snapshot();
-    std::string json = navigation2d::exploration::SerializeFrontierDebug(snap);
-    std_msgs::msg::String msg;
-    msg.data = std::move(json);
-    frontier_debug_publisher_->publish(msg);
-  }
+  void PublishFrontierDebug() { debug_reporter_.Frontiers(*debug_output_, explorer_); }
 
   void LockEntryMouth(const Goal& mouth) override {
     entry_.LockObserved(mouth, explorer_, {KnownCells(), map_revision_});
@@ -1515,27 +1470,28 @@ class AutonomousExplorer final : public rclcpp::Node,
     last_state_ = state;
     last_message_ = message;
     std_msgs::msg::String status;
-    status.data = navigation2d::exploration::SerializeExplorationStatus({
-        .state = state,
-        .message = message,
-        .phase = mission_.phase() == MissionPhase::kCompleting ? "completing" :
-            mission_.phase() == MissionPhase::kReturning ? "returning" : "exploring",
-        .known_cells = KnownCells(),
-        .completed_goals = explorer_.completed_goals(),
-        .failed_goals = explorer_.failed_goals(),
-        .raw_frontier_cells = explorer_.raw_frontier_cells(),
-        .unresolved_frontier_cells = explorer_.unresolved_frontier_cells(),
-        .candidates = explorer_.candidate_frontier_goals(),
-        .tour = tour_.goals(),
-        .active_goal = active_goal_,
-        .navigation = telemetry_.state(),
-        .planning_failure = last_planning_failure_,
-        .path_min_clearance_m = active_path_min_clearance_m_,
-        .carrot_x = debug_paths_.x(),
-        .carrot_y = debug_paths_.y(),
-        .carrot_yaw = debug_paths_.yaw(),
-        .carrot_valid = debug_paths_.valid(),
-        .pose_source = parameters_.pose_source});
+    status.data = navigation2d::exploration::SerializeExplorationStatus(
+        {.state = state,
+         .message = message,
+         .phase = mission_.phase() == MissionPhase::kCompleting  ? "completing"
+                  : mission_.phase() == MissionPhase::kReturning ? "returning"
+                                                                 : "exploring",
+         .known_cells = KnownCells(),
+         .completed_goals = explorer_.completed_goals(),
+         .failed_goals = explorer_.failed_goals(),
+         .raw_frontier_cells = explorer_.raw_frontier_cells(),
+         .unresolved_frontier_cells = explorer_.unresolved_frontier_cells(),
+         .candidates = explorer_.candidate_frontier_goals(),
+         .tour = tour_.goals(),
+         .active_goal = active_goal_,
+         .navigation = telemetry_.state(),
+         .planning_failure = last_planning_failure_,
+         .path_min_clearance_m = active_path_min_clearance_m_,
+         .carrot_x = debug_reporter_.cursor().x(),
+         .carrot_y = debug_reporter_.cursor().y(),
+         .carrot_yaw = debug_reporter_.cursor().yaw(),
+         .carrot_valid = debug_reporter_.cursor().valid(),
+         .pose_source = parameters_.pose_source});
     status_publisher_->publish(status);
   }
 
@@ -1639,13 +1595,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   void ClearPublishedNavPaths() {
-    nav_msgs::msg::Path empty;
-    empty.header.stamp = now();
-    empty.header.frame_id = "map";
-    path_publisher_->publish(empty);
-    local_trajectory_publisher_->publish(empty);
-    tour_publisher_->publish(empty);
-    debug_paths_.Clear();
+    debug_reporter_.ClearPaths(*debug_output_, [this] { return now(); });
   }
 
   void PublishDebugPaths(const navigation2d::NavigationState& state) {
@@ -1653,18 +1603,12 @@ class AutonomousExplorer final : public rclcpp::Node,
       ClearPublishedNavPaths();
       return;
     }
-    const auto global = debug_paths_.Global(navigation_.path(), planning_map_.origin_x(),
-                                            planning_map_.origin_y(), now());
-    path_publisher_->publish(global);
-    const auto local = debug_paths_.Local(global, state.path_progress_m);
-    local_trajectory_publisher_->publish(local);
-    const auto carrot = debug_paths_.Carrot(global.header);
-    carrot_publisher_->publish(carrot);
-    const auto [tour, frontiers] = debug_paths_.Tour(
-        global.header, Map() ? &*Map() : nullptr, Pose()->x,
-        Pose()->y, active_goal_, tour_.goals());
-    tour_publisher_->publish(tour);
-    frontiers_publisher_->publish(frontiers);
+    debug_reporter_.Paths(
+        *debug_output_,
+        {navigation_.path(), planning_map_.origin_x(), planning_map_.origin_y(),
+         state.path_progress_m},
+        {Map() ? &*Map() : nullptr, Pose()->x, Pose()->y, active_goal_, tour_.goals()},
+        [this] { return now(); });
     PublishFrontierDebug();
   }
 
@@ -2118,7 +2062,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   bool start_occupied_ = false;
   std::uint64_t last_path_signature_ = 0;
   double active_path_min_clearance_m_ = 0.;
-  navigation2d::exploration_ros::DebugPaths debug_paths_;
+  navigation2d::exploration_ros::DebugReporter debug_reporter_;
   bool returning_ = false;
   Goal active_goal_;
   navigation2d::exploration::ReturnCoordinator return_;
@@ -2134,14 +2078,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   const navigation2d::exploration_ros::ExplorerParameters parameters_;
   std::unique_ptr<navigation2d::exploration::MotionOutput> motion_output_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_publisher_;
-  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;
-  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr local_trajectory_publisher_;
-  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr tour_publisher_;
-  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr carrot_publisher_;
-  rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr frontiers_publisher_;
-  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr frontier_debug_publisher_;
-  rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr planning_input_publisher_;
-  rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr inflated_costmap_publisher_;
+  std::unique_ptr<navigation2d::exploration_ros::DebugReportSink> debug_output_;
   std::unique_ptr<navigation2d::exploration_ros::ExplorerSubscriptions> subscriptions_;
   rclcpp::TimerBase::SharedPtr timer_;
 };

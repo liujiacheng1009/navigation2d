@@ -38,7 +38,8 @@ def without_unused_motion_object(command, source, logic_only):
         return list(command)
     unused = []
     for factory, filename in [('MakeRosMotionOutput', 'motion_output.cc.o'),
-                              ('MakeExplorerSubscriptions', 'explorer_subscriptions.cc.o')]:
+                              ('MakeExplorerSubscriptions', 'explorer_subscriptions.cc.o'),
+                              ('MakeRosDebugOutput', 'debug_output.cc.o')]:
         if re.search(r'\b' + factory + r'\s*\(', source):
             raise ValueError('logic replay still constructs an endpoint: ' + factory)
         objects = [arg for arg in command if arg.endswith('/' + filename)]
