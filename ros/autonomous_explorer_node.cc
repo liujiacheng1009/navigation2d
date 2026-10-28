@@ -1639,19 +1639,8 @@ class AutonomousExplorer final : public rclcpp::Node,
         return;
       }
 
-      RCLCPP_WARN(get_logger(),
-                  "Navigation2D frontier failed: status=%s phase=%d elapsed=%.1f replans=%d path=%.2f requested=(%.3f,%.3f) published=(%.3f,%.3f) controller_maneuver=%d intentional_stop=%s monitor_action=%d ttc=%.3f path_signature=%llu planner_error=%s",
-                  state.status == navigation2d::NavigationStatus::kBlocked ? "blocked" : "timeout",
-                  static_cast<int>(state.phase), goal_execution_.Elapsed(*this), state.replans,
-                  state.global_path_length_m,
-                  state.requested_command.linear, state.requested_command.angular,
-                  state.published_command.linear, state.published_command.angular,
-                  static_cast<int>(state.controller_diagnostics.maneuver),
-                  state.controller_diagnostics.intentional_stop ? "yes" : "no",
-                  static_cast<int>(state.collision_monitor_action), state.minimum_ttc_s,
-                  static_cast<unsigned long long>(state.path_signature),
-                  state.planning_failure_reason.empty() ? "none" :
-                      state.planning_failure_reason.c_str());
+      navigation2d::exploration_ros::ReportNavigationFailure(
+          get_logger(), state, goal_execution_, *this);
       const bool first_segment_stall = state.path_progress_m < .05;
       const bool mid_path_pinch =
           state.path_progress_m >= .05 &&
