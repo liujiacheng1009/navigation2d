@@ -207,10 +207,7 @@ class AutonomousExplorer final : public rclcpp::Node,
 
   bool StartNavigation(const Goal& requested_goal, bool returning,
                        bool latest_map_retry = false) {
-    if (!latest_map_retry) {
-      latest_map_replans_ = 0;
-      cut_replans_ = 0;
-    }
+    dispatch_.BeginNavigationAttempt(latest_map_retry);
     start_occupied_ = false;
     Goal goal = requested_goal;
     if (!returning) {
@@ -792,7 +789,7 @@ class AutonomousExplorer final : public rclcpp::Node,
         !navigation2d::PathClearsPinch(active_path_min_clearance_m_)) {
       return UnstickFromPinch(reason);
     }
-    latest_map_replans_ = 0;
+    dispatch_.ResetLatestMapReplans();
     const int scrapes = recovery_.wall_scrapes;
     if (StartNavigation(ActiveGoal(), false, true)) {
       recovery_.wall_scrapes = scrapes;  // Begin must not erase the budget
@@ -1125,15 +1122,13 @@ class AutonomousExplorer final : public rclcpp::Node,
     // and the robot's current true pose. It cannot replay or bias toward the
     // historical trajectory. Bound the loop so a genuinely disconnected
     // frontier/return reports failure instead of churning forever.
-    constexpr int kMaximumLatestMapReplans = 2;
-    if (latest_map_replans_ >= kMaximumLatestMapReplans) return false;
-    ++latest_map_replans_;
-    navigation_.Cancel();
-    RCLCPP_WARN(get_logger(),
-                "%s; replanning active %s goal on latest online map (%d/%d)",
-                reason, returning_ ? "return" : "frontier", latest_map_replans_,
-                kMaximumLatestMapReplans);
-    return StartNavigation(ActiveGoal(), returning_, true);
+    return dispatch_.ReplanOnLatestMap([&](auto attempt) {
+      navigation_.Cancel();
+      RCLCPP_WARN(get_logger(),
+                  "%s; replanning active %s goal on latest online map (%d/%d)",
+                  reason, returning_ ? "return" : "frontier", attempt.number, attempt.limit);
+      return StartNavigation(ActiveGoal(), returning_, true);
+    });
   }
 
   // A route cut while driving means the map changed, not that the goal is
@@ -1142,20 +1137,16 @@ class AutonomousExplorer final : public rclcpp::Node,
   // cooling, breadcrumbs). The new snapshot contains the new obstacle, so the
   // planner routes around it or reports no route.
   bool ReplanAfterRouteCut() {
-    constexpr int kMaxCutReplans = 3;
-    if (cut_replans_ >= kMaxCutReplans) return false;
-    ++cut_replans_;
-    navigation_.Cancel();
-    if (planning_map_.snapshot().trail_budget_m > 0.) {
-      evidence_budget_.ResumeTrailReplay();
-    }
-    RCLCPP_WARN(get_logger(),
-                "Route cut by newly mapped obstacle; replanning same %s goal on latest map (%d/%d)",
-                returning_ ? "return" : "frontier", cut_replans_, kMaxCutReplans);
-    const int cut_replans = cut_replans_;
-    const bool accepted = StartNavigation(ActiveGoal(), returning_, true);
-    cut_replans_ = cut_replans;
-    return accepted;
+    return dispatch_.ReplanAfterRouteCut([&](auto attempt) {
+      navigation_.Cancel();
+      if (planning_map_.snapshot().trail_budget_m > 0.) {
+        evidence_budget_.ResumeTrailReplay();
+      }
+      RCLCPP_WARN(get_logger(),
+                  "Route cut by newly mapped obstacle; replanning same %s goal on latest map (%d/%d)",
+                  returning_ ? "return" : "frontier", attempt.number, attempt.limit);
+      return StartNavigation(ActiveGoal(), returning_, true);
+    });
   }
 
   const Goal& ActiveGoal() const { return navigation_target_.legacy_goal(); }
@@ -1193,7 +1184,7 @@ class AutonomousExplorer final : public rclcpp::Node,
     recovery_.Clear();
     tour_.AfterWallTip(explorer_, tip, TourRobot(), *this);
     route_failures_.ClearSignatures();
-    latest_map_replans_ = 0;
+    dispatch_.ResetLatestMapReplans();
     mapped_obstacle_rejects_ = 0;
     retreat_.AllowRetry();
     next_selection_ = now() + rclcpp::Duration::from_seconds(1.0);
@@ -1214,8 +1205,8 @@ class AutonomousExplorer final : public rclcpp::Node,
     // that fails. Do not cool entry chords — the doorway path is the mission.
     if (entry_.locked() || entry_.pending()) {
       if (!entry_.pending()) entry_.SetPending(entry_.locked());
-      latest_map_replans_ = 0;
-      if (cut_replans_ == 0 &&
+      dispatch_.ResetLatestMapReplans();
+      if (!dispatch_.HasRouteCutReplans() &&
           ReplanActiveGoalOnLatestMap("path cut at locked mouth; replan entry")) {
         PublishStatus("COMPLETING",
                       "path cut; replanning locked mouth on latest map");
@@ -1251,7 +1242,7 @@ class AutonomousExplorer final : public rclcpp::Node,
       return AbandonWallTipAfterPathCut(
           "path cut at low-clearance wall tip; leaving tip pocket");
     }
-    if (cut_replans_ == 0 &&
+    if (!dispatch_.HasRouteCutReplans() &&
         ReplanActiveGoalOnLatestMap("path cut mapped obstacle; replan once"))
       return true;
     DemoteActiveGoal("path intersected mapped obstacles");
@@ -2011,8 +2002,6 @@ class AutonomousExplorer final : public rclcpp::Node,
   navigation2d::exploration::GoalExecutionWatch goal_execution_;
   std::uint64_t map_revision_ = 0;
   navigation2d::exploration::SelectionExhaustion selection_exhaustion_;
-  int latest_map_replans_ = 0;
-  int cut_replans_ = 0;
   navigation2d::exploration::ViewpointArrival viewpoint_arrival_;
   std::size_t last_progress_known_cells_ = 0;
   rclcpp::Time last_progress_time_{0, 0, RCL_ROS_TIME};

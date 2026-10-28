@@ -32,6 +32,39 @@ int main() {
   } catch (const std::runtime_error&) {
   }
   Require(!policy.active(Kind::kOpenScrape));
+  policy.BeginNavigationAttempt(false);
+  for (int number = 1; number <= 2; ++number) {
+    Require(policy.ReplanOnLatestMap([&](auto attempt) {
+      Require(attempt.number == number && attempt.limit == 2);
+      policy.BeginNavigationAttempt(true);
+      return true;
+    }));
+  }
+  Require(!policy.ReplanOnLatestMap([](auto) {
+    throw std::runtime_error("exhausted");
+    return true;
+  }));
+  policy.ResetLatestMapReplans();
+  Require(policy.ReplanOnLatestMap([](auto attempt) { return attempt.number == 1; }));
+  Require(!policy.HasRouteCutReplans());
+  for (int number = 1; number <= 3; ++number) {
+    Require(!policy.ReplanAfterRouteCut([&](auto attempt) {
+      Require(attempt.number == number && attempt.limit == 3);
+      policy.BeginNavigationAttempt(false);
+      return false;
+    }));
+    Require(policy.HasRouteCutReplans());
+  }
+  Require(!policy.ReplanAfterRouteCut([](auto) {
+    throw std::runtime_error("exhausted");
+    return true;
+  }));
+  Require(policy.Retry(Kind::kMappedWall, [&] {
+    policy.BeginNavigationAttempt(false);
+    Require(policy.active(Kind::kMappedWall));
+    Require(!policy.HasRouteCutReplans());
+    return true;
+  }));
   Require(DispatchPolicy::PinchWorthy("no route", false));
   Require(!DispatchPolicy::PinchWorthy("goal occupied; no route", true));
   Require(!DispatchPolicy::PinchWorthy("first-segment replay", false));
