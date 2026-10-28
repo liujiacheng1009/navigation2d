@@ -4,7 +4,28 @@
 #include <cmath>
 #include <limits>
 
+#include "navigation2d/configuration/navigation_config.h"
+
 namespace navigation2d {
+DwaParameters DwaParametersFrom(const NavigationConfig& config) {
+  return {config.robot_radius,
+          config.desired_linear_velocity,
+          config.max_angular_velocity,
+          config.max_linear_acceleration,
+          config.max_angular_acceleration,
+          config.collision_horizon,
+          config.control_period,
+          config.dwa_horizon,
+          config.dwa_linear_samples,
+          config.dwa_angular_samples,
+          config.dwa_path_weight,
+          config.dwa_goal_weight,
+          config.dwa_obstacle_weight,
+          config.dwa_velocity_weight};
+}
+DwaController::DwaController(const NavigationConfig& config)
+    : DwaController(DwaParametersFrom(config)) {}
+
 namespace {
 double NormalizeAngle(double value) { return std::atan2(std::sin(value), std::cos(value)); }
 Pose2d Step(const Pose2d& pose, Twist2d velocity, double dt) {

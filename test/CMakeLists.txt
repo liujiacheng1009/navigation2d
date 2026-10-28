@@ -15,6 +15,7 @@ endfunction()
 
 navigation2d_assert_test(layered_costmap_test navigation2d_core)
 navigation2d_assert_test(mppi_controller_test navigation2d_core)
+navigation2d_assert_test(dwa_configuration_test navigation2d_core)
 navigation2d_assert_test(mpc_controller_test navigation2d_core)
 if(NAVIGATION2D_ACADOS_GENERATED_DIR)
   target_compile_definitions(mpc_controller_test PRIVATE NAVIGATION2D_TEST_ACADOS=1)
