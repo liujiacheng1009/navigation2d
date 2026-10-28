@@ -193,7 +193,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   bool PreparedRouteCutsWall() const override { return PathCutsMappedObstacle(); }
   void CoolRouteSignature(std::uint64_t signature) override { route_failures_.Cool(signature); }
   void ObservePreparedRoute(std::uint64_t signature, double margin_m) override {
-    mapped_obstacle_rejects_ = 0;
+    route_failures_.ResetMappedRejects();
     last_path_signature_ = signature;
     active_path_min_clearance_m_ = margin_m;
   }
@@ -1085,7 +1085,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   void NoteMappedObstacleReject(const Goal& goal) override {
-    ++mapped_obstacle_rejects_;
+    route_failures_.NoteMappedReject();
     // Cool only the failed viewpoint briefly. Cooling the whole mouth/room
     // (1.8 m / 4000 cells) hid kitchen and bedroom frontiers while the robot
     // kept reworking living-room crumbs.
@@ -1093,54 +1093,22 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   bool BreakMappedObstacleThrash() override {
-    if (mapped_obstacle_rejects_ < 2) return false;
-    mapped_obstacle_rejects_ = 0;
-    navigation_.Cancel();
-    recovery_.Clear();
-    route_failures_.ClearSignatures();
-    const std::size_t local_unknown =
-        Pose() ? explorer_.ReachableUnknownCells(Pose()->x,
-                                                Pose()->y)
-              : 0;
-    // Unfinished pockets: try room-side entry before cooling/fleeing.
-    if (local_unknown > 80 && Pose()) {
+    return goal_failure_.HandleMappedThrash(route_failures_, *this);
+  }
+  std::size_t ReachableUnknownForRecovery() const override {
+    return Pose() ? explorer_.ReachableUnknownCells(Pose()->x, Pose()->y) : 0;
+  }
+  void ReportMappedRejectThrash(std::size_t local_unknown) override {
+    if (local_unknown > 80) {
       RCLCPP_WARN(get_logger(),
                   "mapped-obstacle reject thrash with local unknown=%zu; "
-                  "trying entry before retreat",
-                  local_unknown);
-      LockEntryMouth(ActiveGoal());
-      evidence_budget_.RequestTrailReplay(8.0);
-      if (StartEntryProbe()) return true;
-      explorer_.RecordAttempt(ActiveGoal(), false);
-      ClearEntryMouthLock();
-      if (!tour_.goals().empty()) tour_.Advance();
-      retreat_.AllowRetry();
-      if (EscapeOrShortRetreat(
-              "mapped-obstacle thrash; peel then retry local pocket",
-              "mapped-obstacle thrash; short retreat then retry local pocket"))
-        return true;
-      selection_.ScheduleAt(now().nanoseconds());
-      PublishStatus("SELECTING", "mapped-obstacle thrash; local pocket kept");
-      return true;
+                  "trying entry before retreat", local_unknown);
+    } else {
+      RCLCPP_WARN(get_logger(), "mapped-obstacle reject thrash; cool tip pocket and retreat");
     }
-    RCLCPP_WARN(get_logger(),
-                "mapped-obstacle reject thrash; cool tip pocket and retreat");
-    ClearEntryMouthLock();
-    if (Pose()) {
-      explorer_.CoolRegion(ActiveGoal().x, ActiveGoal().y, 1.80, 3000u);
-      explorer_.CoolRegion(ActiveGoal().frontier_x, ActiveGoal().frontier_y, 1.80, 3000u);
-      explorer_.CoolRegion(Pose()->x, Pose()->y, 1.80,
-                           3000u);
-    }
-    retreat_.AllowRetry();
-    tour_.Suspend();
-    PublishStatus("SELECTING", "leaving pinch after mapped-obstacle rejects");
-    if (EscapeOrShortRetreat(
-            "leaving pinch after mapped-obstacle rejects; peel",
-            "leaving pinch after mapped-obstacle rejects; short retreat"))
-      return true;
+  }
+  void DelayMappedRejectSelection() override {
     selection_.ScheduleAt((now() + rclcpp::Duration::from_seconds(1.0)).nanoseconds());
-    return true;
   }
 
   // Live-map check of the active route. SLAM occupied is lethal, unknown is
@@ -1429,10 +1397,6 @@ class AutonomousExplorer final : public rclcpp::Node,
   navigation2d::exploration::ExplorationMission mission_;
   navigation2d::exploration::CompletionExecution completion_;
   navigation2d::exploration::RouteFailureHistory route_failures_;
-  int mapped_obstacle_rejects_ = 0;
-  bool reject_pose_valid_ = false;
-  int reject_cell_x_ = 0;
-  int reject_cell_y_ = 0;
   navigation2d::exploration::RetreatExecution retreat_;
   navigation2d::exploration::PlanningEvidenceBudget evidence_budget_;
   // Trail budget the active plan was painted with (0 = not painted).

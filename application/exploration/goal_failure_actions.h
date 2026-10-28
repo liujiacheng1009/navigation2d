@@ -1,4 +1,6 @@
 #pragma once
+#include <optional>
+
 #include "navigation2d/application/exploration/forward_blocked.h"
 #include "navigation2d/application/exploration/open_forward_stop.h"
 #include "navigation2d/application/navigation_state.h"
@@ -15,6 +17,13 @@ class GoalFailureActions : public OpenForwardStopActions,
   void AbandonLockedEntryMouth(const std::string&) override = 0;
   bool StartEntryProbe() override = 0;
   bool EscapeOrShortRetreat(const char*, const char*) override = 0;
+  // Unknown observation cells already opened and reachable in planning.
+  // Read lazily after discarding the failed route; absence of pose means zero.
+  virtual std::size_t ReachableUnknownForRecovery() const = 0;
+  virtual std::optional<TourPose> TourRobot() const = 0;
+  virtual void LockEntryMouth(const ExplorationGoal&) = 0;
+  virtual void ReportMappedRejectThrash(std::size_t local_unknown) = 0;
+  virtual void DelayMappedRejectSelection() = 0;
   virtual void StopSelectionMotion() = 0;
   virtual void ReportPinchRecovery(const char* reason) = 0;
   // Clear published paths before the displayed target; navigation is cancelled.

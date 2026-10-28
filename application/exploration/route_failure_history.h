@@ -16,6 +16,17 @@ class RouteFailureHistory {
   void Cool(std::uint64_t signature) { signatures_.insert(signature); }
   void ClearSignatures() { signatures_.clear(); }
   int NoteFailure(std::uint64_t signature);
+  // This budget is independent of cell/map-growth and signature clearing.
+  // Only a prepared route or consumed two-reject recovery resets it.
+  void NoteMappedReject() { ++mapped_rejects_; }
+  void ResetMappedRejects() { mapped_rejects_ = 0; }
+  bool TakeMappedThrash() {
+    if (mapped_rejects_ < 2) {
+      return false;
+    }
+    mapped_rejects_ = 0;
+    return true;
+  }
   [[nodiscard]] int failures_at_pose() const { return failures_at_pose_; }
   [[nodiscard]] std::size_t size() const { return signatures_.size(); }
   [[nodiscard]] bool Contains(std::uint64_t signature) const {
@@ -31,5 +42,6 @@ class RouteFailureHistory {
   std::optional<std::pair<int, int>> cell_;
   std::size_t last_known_cells_ = 0;
   int failures_at_pose_ = 0;
+  int mapped_rejects_ = 0;
 };
 }  // namespace navigation2d::exploration

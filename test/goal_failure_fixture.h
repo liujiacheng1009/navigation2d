@@ -31,6 +31,7 @@ struct FailureScene : GoalFailureActions, GoalExecutionClock {
   bool corner = false, pinch = false, pose = true, force_return = false;
   bool fallback = false, replan = true, escape = false, breadcrumbs = false, probe = true;
   bool rescue = false;
+  std::size_t recovery_unknown = 0;
   std::function<void()> on_replan, on_peel;
   std::optional<ExplorationGoal> demoted_goal;
   FailureScene() {
@@ -91,6 +92,22 @@ struct FailureScene : GoalFailureActions, GoalExecutionClock {
     events.emplace_back("finish");
     message = reason;
   }
+  std::size_t ReachableUnknownForRecovery() const override {
+    events.emplace_back("unknown");
+    return recovery_unknown;
+  }
+  std::optional<TourPose> TourRobot() const override {
+    events.emplace_back("robot");
+    return pose ? std::optional<TourPose>{{1., 1., 0.}} : std::nullopt;
+  }
+  void LockEntryMouth(const ExplorationGoal& value) override {
+    events.emplace_back("lock");
+    entry.Lock(value, false, {});
+  }
+  void ReportMappedRejectThrash(std::size_t unknown) override {
+    events.emplace_back(unknown > 80 ? "report-pocket" : "report-tip");
+  }
+  void DelayMappedRejectSelection() override { events.emplace_back("delay-mapped"); }
   void StopSelectionMotion() override { events.emplace_back("stop"); }
   void ReportPinchRecovery(const char*) override { events.emplace_back("report-pinch"); }
   void ClearRecoveryDisplay() override { events.emplace_back("clear-display"); }

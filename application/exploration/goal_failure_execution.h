@@ -4,6 +4,7 @@ namespace navigation2d::exploration {
 class ExplorationMission;
 class ReturnCoordinator;
 class PoseMotionWatch;
+class RouteFailureHistory;
 struct ImmobilityRecoveryObservation {
   double robot_x, robot_y, path_progress_m;  // World-frame metres.
   bool entry_drive, tip_wedged;
@@ -25,6 +26,9 @@ class GoalFailureExecution {
         retreat_(retreat),
         explorer_(explorer),
         watch_(watch) {}
+  // Consume two consecutive mapped-route rejects before trying local entry
+  // or cooling/leaving a tip. Prepared-route acceptance resets this budget.
+  bool HandleMappedThrash(RouteFailureHistory&, GoalFailureActions&);
   // Cool/demote a pinched viewpoint, discard it and continue with bounded
   // peel, distant-mouth rescue, or delayed selection, in that priority.
   void LeavePinch(const char* reason, GoalFailureActions&);
