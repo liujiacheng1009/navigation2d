@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 
 #include "navigation2d/configuration/navigation_config.h"
 #include "navigation2d/geometry/pose_2d.h"
@@ -46,12 +47,17 @@ inline bool PointInsideOrNearFootprint(const Eigen::Vector2d& world_point, const
 // footprint plus 2 cm covers the flats, about 0.16 m from the centre. Without
 // a footprint the circular body is the shell. A real return farther out still
 // stops.
+// A supplied distance must belong to this exact point/robot-pose pair. The
+// default computes it lazily, only for the circular-footprint branch.
 inline bool ShellReturn(const Eigen::Vector2d& point, const Pose2d& pose,
-                        const NavigationConfig& config) {
+                        const NavigationConfig& config,
+                        std::optional<double> distance_to_robot = std::nullopt) {
   if (config.footprint.size() >= 3) {
     return PointInsideOrNearFootprint(point, pose, config, .02);
   }
-  return (point - pose.translation()).norm() <= std::max(.16, config.robot_radius);
+  const double distance =
+      distance_to_robot ? *distance_to_robot : (point - pose.translation()).norm();
+  return distance <= std::max(.16, config.robot_radius);
 }
 
 Pose2d Integrate(const Pose2d& pose, const Twist2d& command, double dt);

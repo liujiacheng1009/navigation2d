@@ -90,18 +90,26 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
   depth_.Refresh(robot_pose, timestamp, config_);
   struct SafetyReturn {
     Eigen::Vector2d point;
-    bool depth = false;
+    double initial_distance = 0.;
   };
   std::vector<SafetyReturn> returns;
   returns.reserve(points_.size() + depth_.points().size() + depth_.held().size());
-  for (const auto& point : points_) returns.push_back({point, false});
-  for (const auto& point : depth_.points()) returns.push_back({point, true});
-  for (const auto& point : depth_.held()) returns.push_back({point, true});
+  for (const auto& point : points_) returns.push_back({point, 0.});
+  for (const auto& point : depth_.points()) returns.push_back({point, 0.});
+  for (const auto& point : depth_.held()) returns.push_back({point, 0.});
 
   double min_distance = std::numeric_limits<double>::infinity();
-  for (const auto& sample : returns)
+  // One immutable robot pose per filter frame. Reuse each measured distance
+  // across swept predictions; projected distances still change at every step.
+  for (auto& sample : returns) {
+    sample.initial_distance = (sample.point - robot_pose.translation()).norm();
     min_distance = std::min(min_distance,
-        std::max(0., (sample.point - robot_pose.translation()).norm() - config_.robot_radius));
+        std::max(0., sample.initial_distance - config_.robot_radius));
+  }
+  // Returns are appended as lidar, live depth, then held depth. Deriving the
+  // source from this boundary leaves room for the cached double without an
+  // additional per-return flag or a second allocation.
+  const auto lidar_returns = points_.size();
   // Laser points are continuous measurements, but the route/controller
   // contract is evaluated on an occupancy raster.  Match the planner's
   // one-cell half-diagonal guard so a command cannot enter the physical wall
@@ -133,10 +141,12 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
     const double command_heading = Yaw(robot_pose);
     const Eigen::Vector2d heading(std::cos(command_heading), std::sin(command_heading));
     bool predicted_contact = false;
-    for (const auto& sample : returns) {
+    for (std::size_t sample_index = 0; sample_index < returns.size(); ++sample_index) {
+      const auto& sample = returns[sample_index];
+      const bool depth = sample_index >= lidar_returns;
       const Eigen::Vector2d& point = sample.point;
-      if (ShellReturn(point, robot_pose, config_)) continue;
-      const double initial_distance = (point - robot_pose.translation()).norm();
+      if (ShellReturn(point, robot_pose, config_, sample.initial_distance)) continue;
+      const double initial_distance = sample.initial_distance;
       const double projected_distance = (point - projected.translation()).norm();
       const Eigen::Vector2d relative = point - robot_pose.translation();
       const double longitudinal = relative.dot(heading);
@@ -156,7 +166,7 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
       const double clearance = initial_distance - config_.robot_radius;
       // Depth is a noisy near field. It stops inside the bumper gap and does
       // not scale speed the way a lidar return in the 0.45 m zone does.
-      if (!sample.depth && in_travel_corridor && closing && clearance > 0. &&
+      if (!depth && in_travel_corridor && closing && clearance > 0. &&
           clearance <= config_.collision_monitor_slowdown_distance) {
         slowdown_clearance = std::min(slowdown_clearance, clearance);
         slowdown_closing = true;
@@ -185,7 +195,7 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
       // corridor. Door jambs sit in the travel band beside a 0.55–0.70 m mouth;
       // treating them as predicted_contact latched STOP (ttc≈one cycle) and
       // left the robot parked on the threshold despite a clear centerline.
-      if (!sample.depth && in_stop_corridor && initial_distance > collision_radius &&
+      if (!depth && in_stop_corridor && initial_distance > collision_radius &&
           projected_footprint_collision)
         predicted_contact = true;
     }
