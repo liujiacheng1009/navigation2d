@@ -32,7 +32,7 @@ navigation2d_configure_mpc_backend(navigation2d_control)
 
 navigation2d_library(navigation2d_exploration
   exploration/exploration_policy.cc exploration/frontier_explorer.cc exploration/live_route_safety.cc
-  exploration/frontier_tracks.cc exploration/frontier_visit_memory.cc exploration/region_scheduler.cc exploration/region_identity.cc exploration/region_partition.cc
+  exploration/frontier_tracks.cc exploration/frontier_visit_memory.cc exploration/region_scheduler.cc exploration/region_identity.cc exploration/region_partition.cc exploration/region_graph_observation.cc
   exploration/frontier_travel_graph.cc exploration/bootstrap_frontier_travel.cc
   exploration/frontier_reachability.cc exploration/viewpoint_settlement.cc
   exploration/entry_probe_search.cc exploration/entry_probe_direction.cc
