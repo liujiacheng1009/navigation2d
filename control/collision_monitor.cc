@@ -16,58 +16,11 @@ using collision_internal::StopCorridorHalfWidth;
 using collision_internal::TravelCorridorHalfWidth;
 
 
-void CollisionMonitor::UpdatePoints(const Pose2d& sensor_pose,
-                                    std::vector<Eigen::Vector2d> points) {
-  points_.clear();
-  points_.reserve(points.size());
-  const double cosine = std::cos(Yaw(sensor_pose)), sine = std::sin(Yaw(sensor_pose));
-  for (const auto& point : points)
-    points_.emplace_back(X(sensor_pose) + cosine * point.x() - sine * point.y(),
-                         Y(sensor_pose) + sine * point.x() + cosine * point.y());
-  observation_pending_ = true;
+void CollisionMonitor::UpdateLaserScan(const Pose2d& pose, const LaserScan& scan) {
+  range_.UpdateLaserScan(pose, scan);
 }
-
-void CollisionMonitor::UpdateLaserScan(const Pose2d& sensor_pose, const LaserScan& scan) {
-  std::vector<Eigen::Vector2d> points;
-  std::vector<Eigen::Vector2d> blind_zone_points;
-  points.reserve(scan.ranges.size());
-  blind_zone_points.reserve(scan.ranges.size());
-  for (std::size_t index = 0; index < scan.ranges.size(); ++index) {
-    const double range = scan.ranges[index];
-    const double angle = scan.angle_min + index * scan.angle_increment;
-    // Gazebo's GPU lidar (and several real drivers) encode a return closer
-    // than range_min as -inf.  It is not a free/no-return beam: the obstacle
-    // is inside the sensor's measurement envelope.  Preserve a conservative
-    // point at range_min so the monitor can stop a command that closes on the
-    // blind zone.  Finite sub-minimum values are handled the same way.
-    const bool below_min = (std::isinf(range) && range < 0.) ||
-        (std::isfinite(range) && range >= 0. && range < scan.range_min);
-    if (below_min) {
-      if (scan.range_min > 0.)
-        blind_zone_points.emplace_back(scan.range_min * std::cos(angle),
-                                       scan.range_min * std::sin(angle));
-      continue;
-    }
-    if (!std::isfinite(range) || range > scan.range_max) continue;
-    points.emplace_back(range * std::cos(angle), range * std::sin(angle));
-  }
-  UpdatePoints(sensor_pose, std::move(points));
-  blind_zone_points_.clear();
-  blind_zone_points_.reserve(blind_zone_points.size());
-  const double cosine = std::cos(Yaw(sensor_pose)), sine = std::sin(Yaw(sensor_pose));
-  for (const auto& point : blind_zone_points)
-    blind_zone_points_.emplace_back(
-        X(sensor_pose) + cosine * point.x() - sine * point.y(),
-        Y(sensor_pose) + sine * point.x() + cosine * point.y());
-}
-
-void CollisionMonitor::UpdatePointCloud(const Pose2d& sensor_pose, const PointCloud2d& cloud) {
-  blind_zone_points_.clear();
-  std::vector<Eigen::Vector2d> points;
-  points.reserve(cloud.points.size());
-  for (const auto& point : cloud.points)
-    if (point.allFinite() && point.norm() <= cloud.range_max) points.push_back(point);
-  UpdatePoints(sensor_pose, std::move(points));
+void CollisionMonitor::UpdatePointCloud(const Pose2d& pose, const PointCloud2d& cloud) {
+  range_.UpdatePointCloud(pose, cloud);
 }
 
 void CollisionMonitor::UpdateDepthPoints(const Pose2d& pose,
@@ -78,13 +31,7 @@ void CollisionMonitor::UpdateDepthPoints(const Pose2d& pose,
 CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2d command,
                                                  double timestamp) {
   if (!config_.collision_monitor_enabled) return {command};
-  if (observation_pending_) {
-    last_observation_time_ = timestamp;
-    observation_pending_ = false;
-    has_observation_ = true;
-  }
-  if (!has_observation_ ||
-      timestamp - last_observation_time_ > config_.collision_monitor_source_timeout)
+  if (!range_.FreshAt(timestamp, config_.collision_monitor_source_timeout))
     return {{}, CollisionMonitorAction::kSourceTimeout, 0., 0.};
 
   depth_.Refresh(robot_pose, timestamp, config_);
@@ -93,8 +40,8 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
     double initial_distance = 0.;
   };
   std::vector<SafetyReturn> returns;
-  returns.reserve(points_.size() + depth_.points().size() + depth_.held().size());
-  for (const auto& point : points_) returns.push_back({point, 0.});
+  returns.reserve(range_.points().size() + depth_.points().size() + depth_.held().size());
+  for (const auto& point : range_.points()) returns.push_back({point, 0.});
   for (const auto& point : depth_.points()) returns.push_back({point, 0.});
   for (const auto& point : depth_.held()) returns.push_back({point, 0.});
 
@@ -109,7 +56,7 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
   // Returns are appended as lidar, live depth, then held depth. Deriving the
   // source from this boundary leaves room for the cached double without an
   // additional per-return flag or a second allocation.
-  const auto lidar_returns = points_.size();
+  const auto lidar_returns = range_.points().size();
   // Laser points are continuous measurements, but the route/controller
   // contract is evaluated on an occupancy raster.  Match the planner's
   // one-cell half-diagonal guard so a command cannot enter the physical wall
@@ -206,10 +153,10 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
   // projected-point test cannot see a new crossing (or may disappear from
   // the next scan).  Stop only when the commanded translation closes on the
   // return; in-place rotation and motion away from it remain executable.
-  if (std::abs(command.linear) > 1e-9 && !blind_zone_points_.empty()) {
+  if (std::abs(command.linear) > 1e-9 && !range_.blind_zone_points().empty()) {
     const Pose2d one_step = Integrate(robot_pose, command, config_.control_period);
     blind_zone_closing = std::any_of(
-        blind_zone_points_.begin(), blind_zone_points_.end(), [&](const auto& point) {
+        range_.blind_zone_points().begin(), range_.blind_zone_points().end(), [&](const auto& point) {
           if (ShellReturn(point, robot_pose, config_)) return false;
           const double initial_distance = (point - robot_pose.translation()).norm();
           const double projected_distance = (point - one_step.translation()).norm();
@@ -248,22 +195,15 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
   else if (std::isfinite(ttc) || slowdown_closing)
     requested = CollisionMonitorAction::kSlowdown;
 
-  if (requested != CollisionMonitorAction::kNone) {
-    ++trigger_count_; release_count_ = 0;
-    if (trigger_count_ >= config_.collision_monitor_trigger_cycles)
-      latched_action_ = requested;
-  } else {
-    trigger_count_ = 0; ++release_count_;
-    if (release_count_ >= config_.collision_monitor_release_cycles)
-      latched_action_ = CollisionMonitorAction::kNone;
-  }
-  if (latched_action_ == CollisionMonitorAction::kStop ||
-      latched_action_ == CollisionMonitorAction::kBlindZoneStop) {
+  const auto action = latch_.Update(requested, config_.collision_monitor_trigger_cycles,
+                                    config_.collision_monitor_release_cycles);
+  if (action == CollisionMonitorAction::kStop ||
+      action == CollisionMonitorAction::kBlindZoneStop) {
     // A safety filter must not turn an arc into an unvalidated pivot.
     // Replanning/recovery belongs to the controller, not this filter.
     command = {};
   }
-  else if (latched_action_ == CollisionMonitorAction::kSlowdown) {
+  else if (action == CollisionMonitorAction::kSlowdown) {
     const double requested_linear = command.linear;
     const double scale = SlowdownScale(slowdown_clearance, ttc, config_);
     command.linear *= scale;
@@ -278,7 +218,7 @@ CollisionMonitorResult CollisionMonitor::Filter(const Pose2d& robot_pose, Twist2
         std::abs(command.linear) < executable)
       command.linear = std::copysign(executable, requested_linear);
   }
-  return {command, latched_action_, min_distance,
+  return {command, action, min_distance,
           std::isfinite(ttc) ? ttc : 0.};
 }
 

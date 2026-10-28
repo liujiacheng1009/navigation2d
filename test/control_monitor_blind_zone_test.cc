@@ -29,4 +29,26 @@ int main() {
   result = blind_monitor.Filter(base_pose, {-.05, 0.}, 4.05);
   assert(result.action == navigation2d::CollisionMonitorAction::kNone);
   assert(result.command.linear < 0.);
+  // Source timeout bypasses hysteresis: it neither clears a pending trigger
+  // nor counts as a clear release frame when fresh data resumes.
+  blind_config.collision_monitor_trigger_cycles = 2;
+  blind_config.collision_monitor_release_cycles = 2;
+  blind_config.collision_monitor_source_timeout = .1;
+  navigation2d::CollisionMonitor intermittent(blind_config);
+  intermittent.UpdateLaserScan(sensor_pose, scan);
+  assert(intermittent.Filter(base_pose, {.05, 0.}, 10.).action ==
+         navigation2d::CollisionMonitorAction::kNone);
+  assert(intermittent.Filter(base_pose, {.05, 0.}, 11.).action ==
+         navigation2d::CollisionMonitorAction::kSourceTimeout);
+  intermittent.UpdateLaserScan(sensor_pose, scan);
+  assert(intermittent.Filter(base_pose, {.05, 0.}, 12.).action ==
+         navigation2d::CollisionMonitorAction::kBlindZoneStop);
+  assert(intermittent.Filter(base_pose, {.05, 0.}, 13.).action ==
+         navigation2d::CollisionMonitorAction::kSourceTimeout);
+  scan.ranges.clear();
+  intermittent.UpdateLaserScan(sensor_pose, scan);
+  assert(intermittent.Filter(base_pose, {.05, 0.}, 14.).action ==
+         navigation2d::CollisionMonitorAction::kBlindZoneStop);
+  assert(intermittent.Filter(base_pose, {.05, 0.}, 14.05).action ==
+         navigation2d::CollisionMonitorAction::kNone);
 }

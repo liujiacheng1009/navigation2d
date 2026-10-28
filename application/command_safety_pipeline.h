@@ -2,6 +2,7 @@
 #include <vector>
 
 #include "navigation2d/control/collision_monitor.h"
+#include "navigation2d/control/obstacle_prediction.h"
 namespace navigation2d {
 // Owns sensor safety state and dynamic predictions. Configuration is borrowed
 // read-only from NavigationSystem's earlier-declared, stable-lifetime config;
