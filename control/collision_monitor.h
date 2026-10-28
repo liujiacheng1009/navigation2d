@@ -1,11 +1,11 @@
 #pragma once
 
 #include <Eigen/Core>
-#include <utility>
 #include <vector>
 
 #include "navigation2d/configuration/navigation_config.h"
 #include "navigation2d/control/collision_latch.h"
+#include "navigation2d/control/collision_monitor_parameters.h"
 #include "navigation2d/control/collision_monitor_types.h"
 #include "navigation2d/control/depth_observation.h"
 #include "navigation2d/control/range_observation.h"
@@ -17,7 +17,9 @@ namespace navigation2d {
 // stop/slowdown/approach architecture. It intentionally never reads a costmap.
 class CollisionMonitor {
  public:
-  explicit CollisionMonitor(NavigationConfig config) : config_(std::move(config)) {}
+  // Compatibility entry point retains the existing by-value consumption contract.
+  explicit CollisionMonitor(NavigationConfig config);
+  static CollisionMonitor WithParameters(CollisionMonitorParameters parameters);
   void UpdateLaserScan(const Pose2d& sensor_pose, const LaserScan& scan);
   void UpdatePointCloud(const Pose2d& sensor_pose, const PointCloud2d& cloud);
   // Depth returns are already in the robot frame. They do not replace the
@@ -31,7 +33,9 @@ class CollisionMonitor {
   CollisionMonitorResult Filter(const Pose2d& robot_pose, Twist2d command, double timestamp);
 
  private:
-  NavigationConfig config_;
+  struct ParametersTag {};
+  CollisionMonitor(CollisionMonitorParameters parameters, ParametersTag);
+  CollisionMonitorParameters config_;
   collision_internal::RangeObservation range_;
   collision_internal::DepthObservation depth_;
   collision_internal::CollisionLatch latch_;

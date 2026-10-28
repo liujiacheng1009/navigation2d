@@ -4,20 +4,21 @@
 #include <limits>
 #include <optional>
 
-#include "navigation2d/configuration/navigation_config.h"
+#include "navigation2d/control/collision_monitor_parameters.h"
 #include "navigation2d/geometry/pose_2d.h"
 #include "navigation2d/geometry/twist_2d.h"
 
 namespace navigation2d::collision_internal {
 // Stateless geometry used by sensor retention and swept-motion filtering.
-double TravelCorridorHalfWidth(const NavigationConfig& config);
-double StopCorridorHalfWidth(const NavigationConfig& config);
-double CommandedExtent(const NavigationConfig& config, double linear);
-double SlowdownScale(double clearance, double time_to_collision, const NavigationConfig& config);
+double TravelCorridorHalfWidth(const CollisionMonitorParameters& config);
+double StopCorridorHalfWidth(const CollisionMonitorParameters& config);
+double CommandedExtent(const CollisionMonitorParameters& config, double linear);
+double SlowdownScale(double clearance, double time_to_collision,
+                     const CollisionMonitorParameters& config);
 // Per-return hot path: keeping the small admission checks visible here lets
 // callers hoist frame/configuration invariants out of their sensor loops.
 inline bool PointInsideOrNearFootprint(const Eigen::Vector2d& world_point, const Pose2d& pose,
-                                       const NavigationConfig& config, double margin) {
+                                       const CollisionMonitorParameters& config, double margin) {
   if (config.footprint.size() < 3) {
     return false;
   }
@@ -50,7 +51,7 @@ inline bool PointInsideOrNearFootprint(const Eigen::Vector2d& world_point, const
 // A supplied distance must belong to this exact point/robot-pose pair. The
 // default computes it lazily, only for the circular-footprint branch.
 inline bool ShellReturn(const Eigen::Vector2d& point, const Pose2d& pose,
-                        const NavigationConfig& config,
+                        const CollisionMonitorParameters& config,
                         std::optional<double> distance_to_robot = std::nullopt) {
   if (config.footprint.size() >= 3) {
     return PointInsideOrNearFootprint(point, pose, config, .02);

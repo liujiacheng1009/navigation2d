@@ -10,7 +10,8 @@ namespace navigation2d {
 class CommandSafetyPipeline {
  public:
   explicit CommandSafetyPipeline(const NavigationConfig& config)
-      : config_(config), monitor_(config) {}
+      : config_(config),
+        monitor_(CollisionMonitor::WithParameters(CollisionMonitorParametersFrom(config))) {}
   CommandSafetyPipeline(NavigationConfig&&) = delete;
   CommandSafetyPipeline(const NavigationConfig&&) = delete;
   void UpdateLaserScan(const Pose2d& sensor, const LaserScan& scan);

@@ -6,7 +6,8 @@
 
 #include "navigation2d/control/collision_monitor_geometry.h"
 namespace navigation2d::collision_internal {
-void DepthObservation::CullPassed(const Pose2d& robot_pose, const NavigationConfig& config) {
+void DepthObservation::CullPassed(const Pose2d& robot_pose,
+                                  const CollisionMonitorParameters& config) {
   const double yaw = Yaw(robot_pose);
   const double cosine = std::cos(yaw), sine = std::sin(yaw);
   const double bumper = CommandedExtent(config, 1.);
@@ -19,7 +20,7 @@ void DepthObservation::CullPassed(const Pose2d& robot_pose, const NavigationConf
 
 void DepthObservation::Update(const Pose2d& robot_pose,
                               const std::vector<Eigen::Vector2d>& base_points, double timestamp,
-                              const NavigationConfig& config) {
+                              const CollisionMonitorParameters& config) {
   const double yaw = Yaw(robot_pose);
   const double cosine = std::cos(yaw), sine = std::sin(yaw);
   const double half_width = TravelCorridorHalfWidth(config);
@@ -91,7 +92,7 @@ void DepthObservation::Update(const Pose2d& robot_pose,
 }
 
 void DepthObservation::Refresh(const Pose2d& pose, double timestamp,
-                               const NavigationConfig& config) {
+                               const CollisionMonitorParameters& config) {
   if (has_depth_stamp_ && timestamp - depth_stamp_ > .40) {
     depth_points_.clear();
     held_depth_points_.clear();

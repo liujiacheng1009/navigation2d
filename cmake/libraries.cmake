@@ -23,7 +23,7 @@ navigation2d_library(navigation2d_control
   control/pursuit_parameters.cc control/pursuit_path_progress.cc control/pursuit_regulation.cc
   control/dwa_controller.cc control/nav2_mppi_core.cc
   control/mppi_controller.cc control/mppi_parameters.cc control/dynamic_safety.cc control/safe_corridor.cc
-  control/collision_monitor.cc control/range_observation.cc control/collision_monitor_geometry.cc
+  control/collision_monitor.cc control/collision_monitor_parameters.cc control/range_observation.cc control/collision_monitor_geometry.cc
   control/depth_observation.cc control/mpc_controller.cc control/mpc_parameters.cc)
 target_link_libraries(navigation2d_control PUBLIC navigation2d_planning)
 target_include_directories(navigation2d_control SYSTEM PRIVATE "${decomp_util_SOURCE_DIR}/include")

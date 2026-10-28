@@ -6,7 +6,7 @@
 
 namespace navigation2d::collision_internal {
 
-double BodyHalfWidth(const NavigationConfig& config) {
+double BodyHalfWidth(const CollisionMonitorParameters& config) {
   double half_width = 0.;
   for (const auto& corner : config.footprint) {
     half_width = std::max(half_width, std::abs(corner.y()));
@@ -24,7 +24,7 @@ double BodyHalfWidth(const NavigationConfig& config) {
 // slowdown_ratio before being floored at a crawl. The extra 0.05 m is only a
 // slowdown margin so a corner beside the bumper eases the speed; it must not
 // widen the stop zone.
-double TravelCorridorHalfWidth(const NavigationConfig& config) {
+double TravelCorridorHalfWidth(const CollisionMonitorParameters& config) {
   const double body = BodyHalfWidth(config);
   const double raster = std::sqrt(.5) * config.map_resolution;
   // Passage mode: body + one raster cell only. The extra 0.05 m open-space
@@ -39,7 +39,7 @@ double TravelCorridorHalfWidth(const NavigationConfig& config) {
 // a few centimetres outside the chassis is still inside the slowdown corridor
 // and used to satisfy the radial stop test, which then latched a zero command
 // for the rest of the traverse.
-double StopCorridorHalfWidth(const NavigationConfig& config) {
+double StopCorridorHalfWidth(const CollisionMonitorParameters& config) {
   const double body = BodyHalfWidth(config);
   if (config.collision_monitor_passage_mode) {
     return body;
@@ -49,7 +49,7 @@ double StopCorridorHalfWidth(const NavigationConfig& config) {
 
 // Distance from the robot origin to the bumper in the commanded direction.
 // Without a footprint the circular planning radius is that bumper.
-double CommandedExtent(const NavigationConfig& config, double linear) {
+double CommandedExtent(const CollisionMonitorParameters& config, double linear) {
   if (config.footprint.size() >= 3) {
     double extent = 0.;
     for (const auto& corner : config.footprint) {
@@ -66,7 +66,8 @@ double CommandedExtent(const NavigationConfig& config, double linear) {
 // 1 at the outer edge of the slowdown zone, slowdown_ratio at the stop
 // distance or at a one-cycle time-to-collision. A flat ratio makes a return
 // 0.40 m away as slow as one 0.10 m away.
-double SlowdownScale(double clearance, double time_to_collision, const NavigationConfig& config) {
+double SlowdownScale(double clearance, double time_to_collision,
+                     const CollisionMonitorParameters& config) {
   const double minimum = std::clamp(config.collision_monitor_slowdown_ratio, 0., 1.);
   double scale = 1.;
   bool applied = false;

@@ -1,7 +1,7 @@
 #pragma once
 #include <vector>
 
-#include "navigation2d/configuration/navigation_config.h"
+#include "navigation2d/control/collision_monitor_parameters.h"
 #include "navigation2d/geometry/pose_2d.h"
 
 namespace navigation2d::collision_internal {
@@ -11,8 +11,8 @@ namespace navigation2d::collision_internal {
 class DepthObservation {
  public:
   void Update(const Pose2d& pose, const std::vector<Eigen::Vector2d>& base_points, double timestamp,
-              const NavigationConfig& config);
-  void Refresh(const Pose2d& pose, double timestamp, const NavigationConfig& config);
+              const CollisionMonitorParameters& config);
+  void Refresh(const Pose2d& pose, double timestamp, const CollisionMonitorParameters& config);
   const std::vector<Eigen::Vector2d>& points() const { return depth_points_; }
   const std::vector<Eigen::Vector2d>& held() const { return held_depth_points_; }
 
@@ -21,7 +21,7 @@ class DepthObservation {
     Eigen::Vector2d point = Eigen::Vector2d::Zero();
     int hits = 0;
   };
-  void CullPassed(const Pose2d& pose, const NavigationConfig& config);
+  void CullPassed(const Pose2d& pose, const CollisionMonitorParameters& config);
   std::vector<Eigen::Vector2d> depth_points_, held_depth_points_;
   std::vector<Track> depth_tracks_;
   bool has_depth_stamp_ = false;
