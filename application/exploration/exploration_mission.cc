@@ -33,7 +33,6 @@ void ExplorationMission::Tick(double max_duration_s, MotionOutput& motion,
     runtime.Finish(false, "exploration timed out");
     return;
   }
-  runtime.NoteKnownProgress(runtime.KnownCells());
   runtime.NotePoseMotion();
   if (runtime.TickEscape()) {
     return;

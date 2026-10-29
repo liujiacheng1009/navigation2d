@@ -78,7 +78,6 @@ class ViewpointSelectionRecorder final : public exploration::ViewpointSelectionA
     ++rejected;
   }
   void StopSelectionMotion() override { exhausted.StopSelectionMotion(); }
-  void NoteKnownProgress(std::size_t known) override { exhausted.NoteKnownProgress(known); }
   void QueueActiveRegionFinish() override { exhausted.QueueActiveRegionFinish(); }
   void DeferBlockedSelection(const char* value) override { exhausted.DeferBlockedSelection(value); }
   void SelectionStatus(const char* value) override { exhausted.SelectionStatus(value); }

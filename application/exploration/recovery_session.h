@@ -2,6 +2,8 @@
 #include <cmath>
 namespace navigation2d::exploration {
 class WallScrapeActions;
+class EntryCoordinator;
+class EscapeRetreatActions;
 // Per-goal recovery budget. Counters survive resume/replan of the same
 // viewpoint so side-speck peel cannot reset itself into an infinite loop.
 struct GoalRecoverySession {
@@ -15,6 +17,12 @@ struct GoalRecoverySession {
   bool active = false;
 
   bool BreakWallScrape(const char* reason, WallScrapeActions&);
+  // Escape takes priority; a live pending/locked mouth forbids trail retreat.
+  // A started escape commits resume intent before publishing RECOVERING.
+  bool TryEscapeOrRetreat(const EntryCoordinator&, const char* escape_message,
+                          const char* retreat_message, EscapeRetreatActions&);
+  // A side peel alone cannot turn into the repeated pinch-unlock loop.
+  bool LeavePinchAfterPeel(WallScrapeActions&);
 
   bool SameGoal(double x, double y, double tol = 0.5) const {
     return active && std::hypot(x - goal_x, y - goal_y) <= tol;

@@ -31,7 +31,7 @@ int main() {
       actions.events.clear();
       selection.Resolve(explorer, completion, tour, {{1.2, 1.5, 0.}, 1}, actions);
       assert(actions.events.front() == "stop");
-      assert(actions.known == 6000 && selection.blocked_cycles() == cycle);
+      assert(explorer.KnownCells() == 6000 && selection.blocked_cycles() == cycle);
       assert(actions.returns == (cycle == budget ? 1 : 0));
       assert(actions.partial == (cycle == budget));
       assert(actions.probes == 0);

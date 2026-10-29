@@ -53,6 +53,19 @@ struct Scene : WallScrapeActions {
 };
 }  // namespace
 int main() {
+  for (int scrapes : {-1, 0, 1}) {
+    for (bool accepted : {false, true}) {
+      Scene after_peel;
+      after_peel.recovery.wall_scrapes = scrapes;
+      after_peel.recovery.side_peels = 3;
+      after_peel.unstick_result = accepted;
+      assert(after_peel.recovery.LeavePinchAfterPeel(after_peel) == (scrapes > 0 && accepted));
+      assert(after_peel.events == (scrapes > 0
+                                      ? std::vector<std::string>{
+                                            "unstick:after wall peel; leave pinch pocket"}
+                                      : std::vector<std::string>{}));
+    }
+  }
   Scene first;
   first.reset = true;
   assert(first.Run());

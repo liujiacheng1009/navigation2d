@@ -43,7 +43,6 @@ void SelectionExhaustion::ResolveBlocked(FrontierExplorer& explorer,
     // New map evidence may open a tip the previous leftover missed.
     completion.ResetBudget();
   }
-  actions.NoteKnownProgress(known_now);
   ++blocked_cycles_;
   const std::size_t reachable_unknown =
       explorer.ReachableUnknownCells(observation.robot.x, observation.robot.y);

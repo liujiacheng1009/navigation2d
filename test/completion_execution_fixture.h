@@ -22,7 +22,7 @@ struct CompletionRecorder final : CompletionActions {
   bool navigate = false, thrash = false, entry = false, pinch = false;
   bool rescue = false, waiting = false, seed_tour = false, partial = false;
   int lock_clears = 0;
-  bool throw_navigation = false;
+  bool throw_navigation = false, throw_rescue = false;
   CompletionRecorder(MissionLifecycle& mission, TourExecution& tour)
       : mission(mission), tour(tour) {}
   void ClearCompletionRouteCooling() override {
@@ -55,13 +55,16 @@ struct CompletionRecorder final : CompletionActions {
   }
   bool TryRescueDistantMouths(const char*) override {
     events.push_back("rescue");
+    if (throw_rescue) {
+      throw std::runtime_error("injected rescue failure");
+    }
     return rescue;
   }
   bool ShouldKeepWaitingForFrontiers() const override {
     events.push_back("wait");
     return waiting;
   }
-  void BeginReturnOrRescue(bool value) override {
+  void BeginReturn(bool value) override {
     events.push_back("return");
     partial = value;
   }

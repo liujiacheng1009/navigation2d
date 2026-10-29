@@ -6,6 +6,39 @@ using namespace navigation2d;
 using namespace navigation2d::exploration;
 using namespace navigation2d::test;
 int main() {
+  // The real completion role owns rescue-before-partial-return; the adapter
+  // no longer has to duplicate this decision in a callback.
+  for (bool partial : {false, true}) {
+    for (bool rescued : {false, true}) {
+      MissionLifecycle mission;
+      TourExecution tour;
+      CompletionExecution execution;
+      CompletionRecorder actions(mission, tour);
+      actions.rescue = rescued;
+      execution.ReturnOrRescue(partial, actions);
+      const auto expected = !partial ? std::vector<std::string>{"return"}
+                            : rescued ? std::vector<std::string>{"rescue"}
+                                      : std::vector<std::string>{"rescue", "return"};
+      assert(actions.events == expected);
+      if (!partial || !rescued) {
+        assert(actions.partial == partial);
+      }
+    }
+  }
+  {
+    MissionLifecycle mission;
+    TourExecution tour;
+    CompletionExecution execution;
+    CompletionRecorder actions(mission, tour);
+    actions.throw_rescue = true;
+    bool threw = false;
+    try {
+      execution.ReturnOrRescue(true, actions);
+    } catch (const std::runtime_error&) {
+      threw = true;
+    }
+    assert(threw && actions.events == std::vector<std::string>{"rescue"});
+  }
   {
     FrontierExplorer explorer;
     MissionLifecycle mission;
@@ -126,7 +159,7 @@ int main() {
       actions.events.clear();
     }
     execution.Finish(explorer, mission, tour, actions);
-    assert(actions.events == (exhausted ? std::vector<std::string>({"build", "wait", "return"})
+    assert(actions.events == (exhausted ? std::vector<std::string>({"build", "wait", "rescue", "return"})
                                         : std::vector<std::string>({"build", "probe_again"})));
     if (exhausted) {
       assert(actions.partial);

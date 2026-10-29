@@ -15,7 +15,6 @@ class SelectionExhaustionActions {
  public:
   virtual ~SelectionExhaustionActions() = default;
   virtual void StopSelectionMotion() = 0;
-  virtual void NoteKnownProgress(std::size_t) = 0;
   virtual void QueueActiveRegionFinish() = 0;
   virtual void DeferBlockedSelection(const char* message) = 0;
   virtual void SelectionStatus(const char* message) = 0;

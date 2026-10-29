@@ -19,7 +19,6 @@ class MissionRuntime : public GoalExecutionClock {
   virtual void InitializeMissionProgress(std::size_t initial_known) = 0;
   virtual void MissionBootstrapScheduled(std::int64_t deadline_ns) = 0;
   virtual void Finish(bool success, const std::string& message) = 0;
-  virtual void NoteKnownProgress(std::size_t known) = 0;
   virtual void NotePoseMotion() = 0;
   virtual bool TickEscape() = 0;
   virtual bool TickIdleNavigation() = 0;

@@ -29,6 +29,7 @@
 #include "navigation2d/application/exploration/entry_probe_executor.h"
 #include "navigation2d/application/exploration/entry_selection.h"
 #include "navigation2d/application/exploration/escape_execution.h"
+#include "navigation2d/application/exploration/escape_retreat_actions.h"
 #include "navigation2d/application/exploration/escape_runtime.h"
 #include "navigation2d/application/exploration/execution_command.h"
 #include "navigation2d/application/exploration/forward_blocked.h"
@@ -94,6 +95,7 @@ class AutonomousExplorer final : public rclcpp::Node,
                                  private navigation2d::exploration::RetreatActions,
                                  private navigation2d::exploration::MissionRuntime,
                                  private navigation2d::exploration::EscapeRuntime,
+                                 private navigation2d::exploration::EscapeRetreatActions,
                                  private navigation2d::exploration::WallScrapeActions,
                                  private navigation2d::exploration::GoalTrackingActions,
                                  private navigation2d::exploration::ViewpointSelectionActions,
@@ -416,14 +418,6 @@ class AutonomousExplorer final : public rclcpp::Node,
     route_failures_.ObserveCell(PoseCell());
     const std::size_t known = KnownCells();
     route_failures_.ObserveMapGrowth(known);
-    NoteKnownProgress(known);
-  }
-
-  void NoteKnownProgress(std::size_t known) override {
-    if (last_progress_known_cells_ == 0 || known >= last_progress_known_cells_ + 500) {
-      last_progress_known_cells_ = known;
-      last_progress_time_ = now();
-    }
   }
 
   bool NoteFirstSegmentFailure(const navigation2d::NavigationState& state) override {
@@ -550,29 +544,15 @@ class AutonomousExplorer final : public rclcpp::Node,
   bool HasRescueNavigation() const override { return navigation_.has_session(); }
 
   void BeginReturnOrRescue(bool force_partial) override {
-    if (force_partial && TryRescueDistantMouths("before PARTIAL return")) return;
-    BeginReturn(force_partial);
+    completion_.ReturnOrRescue(force_partial, *this);
   }
 
   void FinishCompleting() override {
     completion_.Finish(explorer_, mission_, tour_, *this);
   }
 
-  // True pinch peel. Never fall back to trail reverse while a mouth is locked:
-  // StartRetreat sends the robot back along the outbound path (折返) and that
-  // is the inefficiency the UI shows after a failed doorway crawl.
   bool EscapeOrShortRetreat(const char* escape_msg, const char* retreat_msg) override {
-    if (TryStartEscape()) {
-      recovery_.resume_after_escape = true;
-      PublishStatus("RECOVERING", escape_msg);
-      return true;
-    }
-    if (entry_.pending() || entry_.locked()) return false;
-    if (StartRetreat()) {
-      PublishStatus("NAVIGATING", retreat_msg);
-      return true;
-    }
-    return false;
+    return recovery_.TryEscapeOrRetreat(entry_, escape_msg, retreat_msg, *this);
   }
 
   // Tip only when BOTH axes are inside the planning circle and the live path
@@ -639,11 +619,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
 
   bool BreakWallScrapeAfterPeel() override {
-    // Only after a confirmed scrape session. side_peels-only (open speck peel)
-    // must resume/reselect — Unstick→Escape here was the fixed-pose thrash
-    // (log: after wall peel clearance=0 scrapes=0 every ~2s).
-    if (recovery_.wall_scrapes <= 0) return false;
-    return UnstickFromPinch("after wall peel; leave pinch pocket");
+    return recovery_.LeavePinchAfterPeel(*this);
   }
 
   // Goal lies on the outbound trail behind the robot — picking it after a
@@ -663,7 +639,7 @@ class AutonomousExplorer final : public rclcpp::Node,
   }
   bool NavigateRetreat(const Goal& goal) override { return StartNavigation(goal, false); }
   void CancelRetreatEvidence() override { evidence_budget_.CancelTrailReplay(); }
-  bool StartRetreat() {
+  bool StartRetreat() override {
     if (observations_.trail().size() < 4 || !Pose()) return false;
     return retreat_.Start(observations_.trail(), *TourRobot(), PoseCell(),
                           entry_.pending() || entry_.locked(), *this);
@@ -1121,8 +1097,6 @@ class AutonomousExplorer final : public rclcpp::Node,
 
   void InitializeMissionProgress(std::size_t known) override {
     selection_.InitializeKnown(known);
-    last_progress_known_cells_ = known;
-    last_progress_time_ = now();
   }
 
   void MissionBootstrapScheduled(std::int64_t deadline_ns) override {
@@ -1193,8 +1167,6 @@ class AutonomousExplorer final : public rclcpp::Node,
   navigation2d::exploration::GoalExecutionWatch goal_execution_;
   std::uint64_t map_revision_ = 0;
   navigation2d::exploration::ViewpointArrival viewpoint_arrival_;
-  std::size_t last_progress_known_cells_ = 0;
-  rclcpp::Time last_progress_time_{0, 0, RCL_ROS_TIME};
   using MissionPhase = navigation2d::exploration::MissionPhase;
   navigation2d::exploration::ExplorationMission mission_;
   navigation2d::exploration::CompletionExecution completion_;

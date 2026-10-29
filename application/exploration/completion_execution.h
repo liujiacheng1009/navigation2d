@@ -32,7 +32,7 @@ class CompletionActions {
   virtual bool TipPinchedNow() const = 0;
   virtual bool TryRescueDistantMouths(const char* reason) = 0;
   virtual bool ShouldKeepWaitingForFrontiers() const = 0;
-  virtual void BeginReturnOrRescue(bool partial) = 0;
+  virtual void BeginReturn(bool partial) = 0;
   virtual void CompletionStatus(const char* message) = 0;
   virtual void ReportCompletion(const CompletionNotice&) = 0;
   virtual void BuildTour() = 0;
@@ -46,6 +46,9 @@ class CompletionExecution {
  public:
   void Start(FrontierExplorer&, MissionLifecycle&, TourExecution&, TourPose, CompletionActions&);
   void Finish(FrontierExplorer&, MissionLifecycle&, TourExecution&, CompletionActions&);
+  // Partial return first gives the mission's bounded distant-mouth rescue a
+  // chance; normal completion returns directly. Actions remain synchronous.
+  void ReturnOrRescue(bool partial, CompletionActions&);
   [[nodiscard]] bool CanProbe() const noexcept { return rounds_ < 3; }
   [[nodiscard]] bool ShouldWait(bool has_exploring_work, int no_executable_cycles) const noexcept {
     return has_exploring_work && (CanProbe() || no_executable_cycles < 8);

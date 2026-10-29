@@ -12,16 +12,11 @@ class SelectionRecorder final : public exploration::SelectionExhaustionActions {
   bool pinched = false, swing_clear = false, rescue = false, wait = false, throw_stop = false;
   bool partial = false;
   int returns = 0, direct_returns = 0, probes = 0;
-  std::size_t known = 0;
   void StopSelectionMotion() override {
     events.emplace_back("stop");
     if (throw_stop) {
       throw std::runtime_error("publisher failed");
     }
-  }
-  void NoteKnownProgress(std::size_t value) override {
-    known = value;
-    events.emplace_back("known");
   }
   void QueueActiveRegionFinish() override { events.emplace_back("queue"); }
   void DeferBlockedSelection(const char*) override { events.emplace_back("defer"); }

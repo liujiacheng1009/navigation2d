@@ -44,10 +44,6 @@ struct Runtime final : MissionRuntime, MotionOutput {
     events.push_back("finish");
     mission->Finish();
   }
-  void NoteKnownProgress(std::size_t known) override {
-    Require(known == 120);
-    events.push_back("progress");
-  }
   void NotePoseMotion() override { events.push_back("pose"); }
   bool TickEscape() override {
     events.push_back("escape");
@@ -79,12 +75,12 @@ int main() {
   tick();
   Require(runtime.events == std::vector<std::string>{"ready", "clock", "reset", "known",
                                                      "initialize", "clock", "bootstrap", "clock",
-                                                     "known", "progress", "pose", "escape", "clock",
+                                                     "pose", "escape", "clock",
                                                      "stop"});
   Require(runtime.deadline == 9000000000LL && mission.home()->x == 1.);
   runtime.time_ns = runtime.deadline;
   tick();
-  Require(runtime.events == std::vector<std::string>{"ready", "clock", "known", "progress", "pose",
+  Require(runtime.events == std::vector<std::string>{"ready", "clock", "pose",
                                                      "escape", "clock", "idle", "track"});
   runtime.idle = true;
   tick();
@@ -92,7 +88,7 @@ int main() {
   runtime.escape = true;
   tick();
   Require(runtime.events ==
-          std::vector<std::string>{"ready", "clock", "known", "progress", "pose", "escape"});
+          std::vector<std::string>{"ready", "clock", "pose", "escape"});
   runtime.ready = false;
   runtime.time_ns = 100000000000LL;
   tick();

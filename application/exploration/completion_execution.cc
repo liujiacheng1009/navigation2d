@@ -57,7 +57,7 @@ void CompletionExecution::Start(FrontierExplorer& explorer, MissionLifecycle& mi
       actions.CompletionStatus("unresolved boundary; waiting for map before return");
       return;
     }
-    actions.BeginReturnOrRescue(explorer.raw_frontier_cells() > 0);
+    ReturnOrRescue(explorer.raw_frontier_cells() > 0, actions);
     return;
   }
   for (const auto& leftover : leftovers) {
@@ -75,8 +75,8 @@ void CompletionExecution::Start(FrontierExplorer& explorer, MissionLifecycle& mi
     actions.CompletionStatus("leftover blocked; waiting for map update before return");
     return;
   }
-  actions.BeginReturnOrRescue(explorer.raw_frontier_cells() > 0 ||
-                              explorer.ReachableUnknownCells(robot.x, robot.y) > 0);
+  ReturnOrRescue(explorer.raw_frontier_cells() > 0 ||
+                              explorer.ReachableUnknownCells(robot.x, robot.y) > 0, actions);
 }
 void CompletionExecution::Finish(FrontierExplorer& explorer, MissionLifecycle& mission,
                                  TourExecution& tour, CompletionActions& actions) {
@@ -101,6 +101,12 @@ void CompletionExecution::Finish(FrontierExplorer& explorer, MissionLifecycle& m
     actions.CompletionStatus("completing emptied tour; waiting for unresolved frontiers");
     return;
   }
-  actions.BeginReturnOrRescue(explorer.raw_frontier_cells() > 0);
+  ReturnOrRescue(explorer.raw_frontier_cells() > 0, actions);
+}
+void CompletionExecution::ReturnOrRescue(bool partial, CompletionActions& actions) {
+  if (partial && actions.TryRescueDistantMouths("before PARTIAL return")) {
+    return;
+  }
+  actions.BeginReturn(partial);
 }
 }  // namespace navigation2d::exploration
