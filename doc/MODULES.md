@@ -525,3 +525,13 @@ flowchart LR
 - `cmake/explorer_ros.cmake`：可选 ROS 装配的唯一源码清单，供独立工程和在线建图父工程共用；默认核心构建不依赖 ROS。
 - `test/explorer_ros_loop_test.cc`、`explorer_ros_loop_scene.h`、`ros_loop_room.h`：实际公开工厂、订阅和定时器的隔离合成闭环；探索、返航、内部绕障及扫描暂停场景。`tools/run_explorer_ros_loops.py` 创建无网络/私有 IPC 的独立容器并保存完整命令轨迹。普通 CTest 不启动该任务。
 - `test/navigation_allocation_probe.cc`、`tools/check_navigation_allocations.py`：显式构建的标量 C++ new 探针，新旧核心各保留正常/停滞 400 周期；比较命令/阶段/路线指纹和每周期分配。不是延迟门禁，也不覆盖 malloc、对齐分配、SDK 或进程 RSS。
+
+## 收尾与恢复动作的直接所有者
+
+`CompletionExecution::ReturnOrRescue`决定部分返航前是否尝试远端救援，普通返航直接交给既有返航动作。`GoalRecoverySession::TryEscapeOrRetreat`先尝试脱困，失败后读取实时入口锁再决定短退；通知前提交续行意图。`EscapeRetreatActions`只有脱困、短退和通知三个动作，不拥有任务状态。`LeavePinchAfterPeel`保留刮蹭会话门限。ROS节点绑定这些动作，不重复执行同一分派策略。
+
+原ROS已知格进度时间戳没有读取者，已移除镜像；真实500格增长门限及残余预算仍属于`SelectionExhaustion`，不能把删除无效镜像误解为删除探索进度诊断。
+
+## 性能报告的派生验收
+
+2026-10-29用户确认允许提升、禁止退化。`tools/compare_benchmarks.py`保留原双侧报告；`tools/assess_no_regression.py raw-ab.json --calibration frozen-aa.json --output new-report.json`使用同一配对区间及锁定A/A正向界限：上界不超过界限通过，下界超过界限失败，其余不确定。所有声明指标均越小越好，行为差异直接失败。工具校验完整原始样本、有限测量和区间，输出源报告摘要且拒绝覆盖已有文件；不负责采样、重校准或目标板实验。零RSS界限的不确定不能被耗时改善或标量分配减少抵消。
